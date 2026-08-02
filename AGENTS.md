@@ -24,7 +24,7 @@
 
 | 队员 | 模块 | 主要文件 |
 |------|------|---------|
-| A（队长） | 大脑：世界模型/角色分配/调度/摆位 | `world_model.cpp` `role_assignment.cpp` `strategy.cpp` `formation.cpp` |
+| A（全局调度） | 大脑：世界模型/角色分配/调度/摆位 | `world_model.cpp` `role_assignment.cpp` `strategy.cpp` `formation.cpp` |
 | B | 运动与进攻：差速轮控制/射门/传球 | `motion.cpp` `shoot.cpp` `pass.cpp` |
 | C | 防守与工程：守门员/防守/调参/日志复盘 | `roles.cpp`(goalie/passive) `defense.cpp` `tools/py/` |
 
