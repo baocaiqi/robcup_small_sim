@@ -28,6 +28,36 @@
 | B | 运动与进攻：差速轮控制/射门/传球 | `motion.cpp` `shoot.cpp` `pass.cpp` |
 | C | 防守与工程：守门员/防守/调参/日志复盘 | `roles.cpp`(goalie/passive) `defense.cpp` `tools/py/` |
 
+## 团队 Skill（仓库内自带，跟随仓库分发）
+
+> 从原中型组 AGENTS.md 的 40 个 skill 清单中，按 3 人小组需要挑选 12 个写成实体，
+> 存放在仓库内 `.claude/skills/` 和 `.codex/skills/`（SKILL.md 格式，双份通用）。
+
+| Skill | 一句话作用 |
+|-------|-----------|
+| brainstorming | 需求澄清：一次一问，方案对比 |
+| spec-driven-development | **先写规格再写代码**（没 spec 不动手） |
+| writing-plans | 拆成 2-5 分钟可验证小任务 |
+| test-driven-development | 先写测试→失败→最小实现→通过 |
+| incremental-implementation | 一次只改一小块，改完测完提交完再继续 |
+| systematic-debugging | 4 步根因：复现→定位→缩减→修复+防守 |
+| requesting-code-review | 合并前派 agent 对照 spec 审查 |
+| verification-before-completion | 说"做完了"前必须贴命令+输出 |
+| documentation-and-adrs | 决策/调参进文档，聊天里的不算数 |
+| context-engineering | 新会话必读三件套（docs/03+docs/06+模块头文件） |
+| using-git-worktrees | 3 人并行开发隔离工作区 |
+| file-search | git grep 高效搜索 |
+
+**队友机器一次性同步**（从仓库拉到全局，Claude/Codex 各一条）：
+
+```bash
+# Claude Code 用户
+cp -r .claude/skills/* ~/.claude/skills/
+# Codex 用户
+cp -r .codex/skills/* ~/.codex/skills/
+# 以后仓库有更新，重跑对应命令即可
+```
+
 ## 测试命令速查
 
 ```bat
