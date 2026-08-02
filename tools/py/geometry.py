@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-geometry.py — 几何工具（移植自中型组 nubot_strategy_py/geometry.py）
+geometry.py — 几何工具
 单位：cm / 度
 """
 import math

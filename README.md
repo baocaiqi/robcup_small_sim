@@ -1,7 +1,7 @@
 # FIRA 仿真 5v5 策略库（SimuroSot5）
 
 > RoboCup 中国赛 FIRA 小型组 · 仿真 5vs5 项目的比赛策略代码。
-> 三人小组，从零搭建，最大化复用中型组（ROS2）时代的算法资产。
+> 三人小组，从零搭建的完整比赛策略。
 
 ## 这是什么
 
@@ -36,23 +36,6 @@ build\Release\offline_test.exe
 
 > 为什么必须 MSVC 编译？平台按 C++ mangled 导出名（如 `?RunStrategy@@YAXPAUEnvironment@@@Z`）
 > 加载 DLL，MinGW 的符号命名不兼容。见 `docs/02-平台接口说明.md`。
-
-## 从中型组（robcup_mid_sim）复用了什么
-
-| 资产 | 出处 | 复用方式 |
-|------|------|---------|
-| 分层架构：世界模型→局势→角色分配→角色壳→公共模块 | `nubot_strategy/` | 直接沿用 |
-| 效用函数角色分配算法 | `role_assignment.cpp` | 移植（数据换 struct） |
-| 几何库（角度归一化、点线距离） | `nubot_interfaces/include/` | 移植（去 ROS2 依赖） |
-| 射门/传球/防守模块算法思想 | `shoot/pass/defense_module.cpp` | 移植思路，数值重标定 |
-| Python 调参/日志分析工作流 | `nubot_strategy_py/` | 保留并适配 .rlg |
-| 协作文档体系（AGENTS/docs） | 仓库根 | 沿用模板改小型组 |
-
-**重写部分**（平台差异，无法复用）：
-- ROS2 节点/消息/launch → 5 个 DLL 导出函数（`include/simuro5/simuro_interface.hpp`）
-- 全向运动控制（vx/vy/w）→ 差速轮（vl/vr，基底取官方 demo 的 `Position()`）
-- 坐标系：中型组中心对称 ±1100×±700 → 小型组左下角原点 0..220×0..180
-- 视觉融合 → 上帝视角（平台直接给全场坐标）
 
 ## 目录结构
 
@@ -92,4 +75,3 @@ tools/py/                Python：constants/geometry/rlg_analyzer
 - 官方模板源码：`D:\SIM5_platform\SIM5_extracted\src\Strategy4Blue|Yellow\`
 - 比赛规则 PDF：`D:\robcup5v5足球仿真组小型\4.1赛事规则...pdf`
 - 用户手册：`D:\Users Manual for SimuroSot5 in Chinese（2023）.pdf`
-- 中型组仓库：`C:\Users\zyqqcandy\robcup_mid_sim`
