@@ -1,0 +1,32 @@
+# 构建产物
+build/
+out/
+*.dll
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# IDE / 系统
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 比赛日志 / 数据
+*.rlg
+*.log
+log/

@@ -1,0 +1,59 @@
+// ============================================================
+// world_model.hpp — 世界模型包装
+// 中型组对应物: nubot_strategy/world_model_info.cpp(5台视觉融合)
+// 小型组是上帝视角，平台每周期直接把全场数据塞进 Environment，
+// 这里只做「搬运 + 派生量计算」(球速/预测/球权)。
+// ============================================================
+#ifndef SIMURO5_WORLD_MODEL_HPP
+#define SIMURO5_WORLD_MODEL_HPP
+
+#include "simuro5/simuro_interface.hpp"
+#include <cmath>
+#include "simuro5/team.hpp"
+
+namespace simuro5 {
+
+struct RobotState {
+    double x = 0, y = 0;        // 位置
+    double rot = 0;             // 朝向(度)
+    double vl = 0, vr = 0;      // 差速轮速(仅己方有效)
+};
+
+struct BallState {
+    double x = 0, y = 0;
+    double vx = 0, vy = 0;      // 速度(由 current-last 差分)
+    bool valid = false;
+};
+
+struct WorldModel {
+    TeamContext ctx;
+
+    BallState ball;          // 当前球
+    BallState ball_last;     // 上一帧球
+    BallState ball_pred;     // 平台预测球(直接用)
+    RobotState home[PLAYERS_PER_SIDE];
+    RobotState opp[PLAYERS_PER_SIDE];
+
+    Bounds field;            // 场地边界(平台给)
+    Bounds goal;             // 球门边界(平台给)
+    int game_state = 0;      // PlayMode
+    long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
+
+    // 角色分配结果（由 RoleAssignment 填写）
+    int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举
+
+    // 站位参考点（由 SituationModule 填写）
+    double passive_x = 0, passive_y = 90;
+    double assist_x = 0, assist_y = 90;
+    double mid_x = 110, mid_y = 90;
+
+    // 每周期从平台环境刷新
+    void update(const Environment *env, const TeamContext &ctx_);
+
+    // 距离辅助
+    double ball_opp_goal_dist() const { return std::fabs(ball.x - ctx.opp_goal_x()); }
+    double ball_our_goal_dist() const { return std::fabs(ball.x - ctx.our_goal_x()); }
+};
+
+}  // namespace simuro5
+#endif
