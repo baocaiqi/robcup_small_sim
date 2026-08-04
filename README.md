@@ -58,7 +58,7 @@ src/
   dll_yellow.cpp         黄队导出壳
   offline_test.cpp       离线冒烟测试
   *.cpp                  各模块实现
-docs/                    规则速查/架构/接口/分工/进度/规范/调参/部署
+docs/                    新人上手/规则速查/架构/接口/分工/进度/规范/调参/部署
 tools/py/                Python：constants/geometry/rlg_analyzer
 ```
 
