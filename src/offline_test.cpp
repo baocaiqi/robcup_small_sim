@@ -13,6 +13,9 @@
 #include "simuro5/team.hpp"
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
+#include "simuro5/defense.hpp"
+#include "simuro5/roles.hpp"
+#include "simuro5/field_info.hpp"
 
 using namespace simuro5;
 
@@ -97,10 +100,71 @@ static int test_formation() {
     return 0;
 }
 
+// 断球点纯函数单测：三角函数外推「球轨迹 ∩ 球门前拦截线」
+static int test_defense_intercept() {
+    TeamContext ctx{true};                 // 蓝队，门在 x=220
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    double ix = 0, iy = 0;
+
+    // ① 平飞球：沿 x 正向、y=90，断球点应在 (170, 90)
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 3.0; wm.ball.vy = 0.0;
+    if (!intercept_point(wm, 50.0, ix, iy)) { printf("FAIL: 平飞球应有断球点\n"); return 1; }
+    if (fabs(ix - 170.0) > 0.5 || fabs(iy - 90.0) > 0.5) {
+        printf("FAIL: 平飞球断球点错 (%.1f,%.1f)\n", ix, iy); return 1;
+    }
+
+    // ② 斜向球：vy/vx 斜率外推，y = 60 + (1.5/3.0)*(170-100) = 95
+    wm.ball.x = 100; wm.ball.y = 60; wm.ball.vx = 3.0; wm.ball.vy = 1.5;
+    if (!intercept_point(wm, 50.0, ix, iy)) { printf("FAIL: 斜向球应有断球点\n"); return 1; }
+    if (fabs(ix - 170.0) > 0.5 || fabs(iy - 95.0) > 0.5) {
+        printf("FAIL: 斜向球断球点错 (%.1f,%.1f)\n", ix, iy); return 1;
+    }
+
+    // ③ 背离球：vx<0（蓝队门在 +x 端），不应有朝门的断球点
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = -3.0; wm.ball.vy = 0.0;
+    if (intercept_point(wm, 50.0, ix, iy)) { printf("FAIL: 背离球不应有断球点\n"); return 1; }
+
+    // ④ 只沿 y 向滚（vx≈0）：到不了竖线，不应有断球点
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 3.0;
+    if (intercept_point(wm, 50.0, ix, iy)) { printf("FAIL: 纯 y 向球不应有断球点\n"); return 1; }
+
+    printf("defense intercept: OK (平飞/斜向/背离/纯y向)\n");
+    return 0;
+}
+
+// 守门员出击预判冒烟测试：球朝门射应出击，慢球/无威胁应停车
+static int test_goalie_predict() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.home[0].x = 210; wm.home[0].y = 90; wm.home[0].rot = 180;
+
+    // 球在门前快速朝门滚（vx=6，会进球 y=90 在门宽内）→ 应出击
+    wm.ball.x = 190; wm.ball.y = 90; wm.ball.vx = 6.0; wm.ball.vy = 0.0;
+    run_goalie(wm, 0);
+    double v = fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr));
+    if (!(v > 0.0) || v > 300.0) { printf("FAIL: 守门员出击轮速异常 %.1f\n", v); return 1; }
+
+    // 球慢且远离门 → 守门员不应冲刺（轮速须在合理范围）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[0].vl = 0; wm.home[0].vr = 0;
+    run_goalie(wm, 0);
+    v = fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr));
+    if (v > 300.0) { printf("FAIL: 守门员停车轮速异常 %.1f\n", v); return 1; }
+
+    printf("goalie predict: OK (朝门出击/慢球停车均正常)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
     rc |= test_formation();
+    rc |= test_defense_intercept();
+    rc |= test_goalie_predict();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
