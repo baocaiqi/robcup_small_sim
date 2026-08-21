@@ -19,7 +19,10 @@ void run_goalie(WorldModel &wm, int id) {
     // 球在我方球门前且很近 → 出击扑球
     double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
     if (db < 18.0 && wm.ball_our_goal_dist() < 45.0) {
-        motion::position(r, wm.ball.x, wm.ball.y);
+        // 出击：冲向球，但目标 y 限制在球门范围附近（球门 70-110，留 2cm 扑球余量），
+        // 防止球在边路时守门员追出球门被吊射空门
+        double ty = clamp(wm.ball.y, 68.0, 112.0);
+        motion::position(r, wm.ball.x, ty);
     } else {
         motion::position(r, gx, gy);
     }

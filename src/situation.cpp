@@ -40,11 +40,13 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     double ogx = ctx.our_goal_x();
 
     // 助攻站位：球前方偏侧（和持球人错开）
-    wm.assist_x = clamp(bx + ad * 25.0, 15.0, 205.0);
+    // 截图前拉：助攻点球前 40cm（原 25cm 太保守）
+    wm.assist_x = clamp(bx + ad * 40.0, 15.0, 205.0);
     wm.assist_y = clamp(by > 90 ? by - 30.0 : by + 30.0, 12.0, 168.0);
 
     // 中场站位：中线附近，另一侧
-    wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.3, 15.0, 205.0);
+    // 增大前压系数 0.3->0.6：球前压时中场也跟着前移
+    wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.6, 15.0, 205.0);
     wm.mid_y = clamp(by * 0.4 + 54.0, 15.0, 165.0);
 
     // 防守站位：球-己方球门连线，距球门约 50cm
@@ -59,9 +61,20 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.passive_y = 90.0;
     }
 
+    // 高位防守：球在对方半场时，防守线前压（防全缩后场）
+    bool ball_opp_half = (ad > 0) ? (bx > 110.0) : (bx < 110.0);
+    if (ball_opp_half) {
+        wm.passive_x = (ad > 0) ? std::max(wm.passive_x, 65.0)
+                                 : std::min(wm.passive_x, 155.0);
+    }
     // 禁区修正：防守点不得进入己方门区/罚球区
-    if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
+    // 罚球区（大禁区）堆叠 4 人 = 送点球！    if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
         wm.passive_x = clamp(gx + ad * 55.0, 10.0, 210.0);
+    if (in_penalty_area(ctx, wm.passive_x, wm.passive_y))
+        wm.passive_x = clamp(gx + ad * 85.0, 10.0, 210.0);
+    // 助攻点避开己方罚球区（球在禁区时外拉，防堆叠送点）
+    if (in_penalty_area(ctx, wm.assist_x, wm.assist_y))
+        wm.assist_x = clamp(gx + ad * 85.0, 15.0, 205.0);
 }
 
 }  // namespace simuro5
