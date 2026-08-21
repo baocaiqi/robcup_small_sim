@@ -38,6 +38,8 @@ struct WorldModel {
     Bounds goal;             // 球门边界(平台给)
     int game_state = 0;      // PlayMode
     long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
+    double threat_level = 0.0; // 威胁等级 0~1（Situation.analyze 填入）
+    bool we_have_ball = false; // 球权是否在我方（简版判断）
 
     // 角色分配结果（由 RoleAssignment 填写）
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举

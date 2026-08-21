@@ -51,10 +51,22 @@ void run_passive(WorldModel &wm, int id) {
 }
 
 void run_assist(WorldModel &wm, int id) {
+    // 威胁高（球在我们半场且球权对方）：回防站位，不站进攻锚点
+    if (wm.threat_level > 0.4) {
+        DefensePlan dp = plan_defense(wm);
+        motion::position(wm.home[id], dp.target_x, dp.target_y);
+        return;
+    }
     motion::position(wm.home[id], wm.assist_x, wm.assist_y);
 }
 
 void run_midfield(WorldModel &wm, int id) {
+    // 威胁高时同样回防（防守人数不足 = 防守迟延根因）
+    if (wm.threat_level > 0.4) {
+        DefensePlan dp = plan_defense(wm);
+        motion::position(wm.home[id], dp.target_x, dp.target_y);
+        return;
+    }
     motion::position(wm.home[id], wm.mid_x, wm.mid_y);
 }
 

@@ -9,6 +9,8 @@ void Strategy::run(WorldModel &wm) {
     // 1. 局势分析
     sit_.update_stand_points(wm);
     Situation sit = sit_.analyze(wm);
+    wm.threat_level = sit.threat_level;
+    wm.we_have_ball = sit.we_have_ball;
 
     // 2. 角色分配
     ra_.assign(wm);
