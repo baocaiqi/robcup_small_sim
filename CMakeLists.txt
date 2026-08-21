@@ -52,6 +52,9 @@ foreach(tgt Strategy4Blue Strategy4Yellow)
     # 关键: 导出符号必须是 MSVC C++ mangled 名(与官方模板一致),
     # 平台按这些名字加载, 因此禁止 extern "C"。
     target_compile_options(${tgt} PRIVATE /W3 /utf-8)
+    # 红线(docs/02): 静态链接运行时(/MT), DLL 不依赖 vcruntime/ucrt,
+    # 否则比赛现场低配机(无 MSVC 运行时)加载失败 → 机器人不动。
+    set_property(TARGET ${tgt} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   endif()
 endforeach()
 
@@ -62,5 +65,6 @@ if(BUILD_TEST)
   target_compile_definitions(offline_test PRIVATE STRATEGY4BLUE_EXPORTS)
   if(MSVC)
     target_compile_options(offline_test PRIVATE /W3 /utf-8)
+    set_property(TARGET offline_test PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   endif()
 endif()
