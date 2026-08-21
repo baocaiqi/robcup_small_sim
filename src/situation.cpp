@@ -37,21 +37,11 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     if (!wm.ball.valid) return;
 
     double ad = ctx.attack_dir();   // +1 或 -1
-    double ogx = ctx.our_goal_x();
+    double gx = ctx.our_goal_x();
+    bool attack = (wm.team_state == TS_ATTACK);
 
-    // 助攻站位：球前方偏侧（和持球人错开）
-    // 截图前拉：助攻点球前 40cm（原 25cm 太保守）
-    wm.assist_x = clamp(bx + ad * 40.0, 15.0, 205.0);
-    // 宽度课题：助攻点偏球上方(y+40)，中场点偏球下方(y-40)，两台天然分上下两侧（原来都拤中路）
-    wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
-
-    // 中场站位：中线附近，另一侧
-    // 增大前压系数 0.3->0.6：球前压时中场也跟着前移
-    wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.6, 15.0, 205.0);
-    wm.mid_y = clamp(by - 40.0, 20.0, 160.0);
-
-    // 防守站位：球-己方球门连线，距球门约 50cm
-    double gx = ogx, gy = 90.0;
+    // —— 防守锚点（PASSIVE/中卫）：球-己方球门连线，距门约 50cm（攻防共用）——
+    double gy = 90.0;
     double d = dist(bx, by, gx, gy);
     if (d > 30) {
         double t = 50.0 / d;
@@ -62,20 +52,53 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.passive_y = 90.0;
     }
 
-    // 高位防守：球在对方半场时，防守线前压（防全缩后场）
+    // 对方罚球区外沿（进攻方站位不进入对方禁区，留 5cm 余量）
+    double opp_box_edge = ctx.opp_goal_x() - ad * 85.0;
+
+    if (attack) {
+        // —— 进攻态锚点 ——
+        // 助攻：球前 40cm、偏上（宽度）；不进入对方禁区
+        wm.assist_x = clamp(bx + ad * 40.0, 15.0, 205.0);
+        wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
+        if (in_opp_penalty_area(ctx, wm.assist_x, wm.assist_y))
+            wm.assist_x = opp_box_edge;
+
+        // 中场：中线前压 0.5、偏下；不进入对方禁区
+        wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
+        wm.mid_y = clamp(by - 40.0, 20.0, 160.0);
+        if (in_opp_penalty_area(ctx, wm.mid_x, wm.mid_y))
+            wm.mid_x = opp_box_edge;
+
+        // 门前回撤：球攻进对方罚球区时，助攻/中场退回中线（防反击丢球即空门，
+        // 参考官方 demo「门前回撤」思想自研实现）
+        if (in_opp_penalty_area(ctx, bx, by)) {
+            wm.assist_x = 110.0;
+            wm.mid_x    = 110.0;
+            // y 保持上下错开（assist +40 / mid -40）
+        }
+    } else {
+        // —— 防守态锚点：助攻/中场回收中线两侧（保持出球点 + 防守纵深）——
+        wm.assist_x = 110.0;
+        wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
+        wm.mid_x    = 110.0;
+        wm.mid_y    = clamp(by - 40.0, 20.0, 160.0);
+    }
+
+    // 高位防守：球在对方半场时，防守线前压（防全缩后场，攻防均适用）
     bool ball_opp_half = (ad > 0) ? (bx > 110.0) : (bx < 110.0);
     if (ball_opp_half) {
         wm.passive_x = (ad > 0) ? std::max(wm.passive_x, 65.0)
                                  : std::min(wm.passive_x, 155.0);
     }
-    // 禁区修正：防守点不得进入己方门区/罚球区
-    // 罚球区（大禁区）堆叠 4 人 = 送点球！    if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
+    // 己方禁区纪律：防守点/助攻点/中场点不得进入己方门区与罚球区（防堆叠送点）
+    if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
         wm.passive_x = clamp(gx + ad * 55.0, 10.0, 210.0);
     if (in_penalty_area(ctx, wm.passive_x, wm.passive_y))
         wm.passive_x = clamp(gx + ad * 85.0, 10.0, 210.0);
-    // 助攻点避开己方罚球区（球在禁区时外拉，防堆叠送点）
     if (in_penalty_area(ctx, wm.assist_x, wm.assist_y))
         wm.assist_x = clamp(gx + ad * 85.0, 15.0, 205.0);
+    if (in_penalty_area(ctx, wm.mid_x, wm.mid_y))
+        wm.mid_x = clamp(gx + ad * 85.0, 15.0, 205.0);
 }
 
 }  // namespace simuro5

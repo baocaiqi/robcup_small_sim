@@ -13,6 +13,12 @@
 
 namespace simuro5 {
 
+// 团队攻防状态（Strategy 状态机写入，滞回防抖）
+enum TeamState {
+    TS_ATTACK = 0,    // 进攻态：我方稳定控球（连续 N 帧持球才进入）
+    TS_DEFENSE = 1    // 防守态：对方控球 / 球权未定（连续 N 帧失球才进入）
+};
+
 struct RobotState {
     double x = 0, y = 0;        // 位置
     double rot = 0;             // 朝向(度)
@@ -38,8 +44,14 @@ struct WorldModel {
     Bounds goal;             // 球门边界(平台给)
     int game_state = 0;      // PlayMode
     long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
-    double threat_level = 0.0; // 威胁等级 0~1（Situation.analyze 填入）
+    double threat_level = 0.0; // 威胁等级 0~1（状态机输出：状态+球位稳定计算）
     bool we_have_ball = false; // 球权是否在我方（简版判断）
+
+    // —— 攻防状态机（strategy.cpp 每帧写入）——
+    TeamState team_state = TS_DEFENSE; // 当前攻防状态
+    int possession_frames = 0;         // 连续持球帧数（滞回计数）
+    int no_possession_frames = 0;      // 连续失球帧数
+    bool state_transition = false;     // 本帧是否刚发生攻防切换（事件标志，供即时响应）
 
     // 角色分配结果（由 RoleAssignment 填写）
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举

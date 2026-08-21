@@ -188,6 +188,63 @@ static int test_defense_reach() {
     return 0;
 }
 
+// 攻防状态机单测：滞回防抖 + 事件标志 + 威胁分级
+static int test_team_state() {
+    TeamContext ctx{true};               // 蓝队，门在 x=220
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.x = 150; wm.ball.y = 90;     // 蓝队半场
+    Strategy strat;
+
+    // 初始：防守态、未持球
+    wm.team_state = TS_DEFENSE; wm.possession_frames = 0; wm.no_possession_frames = 0;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 10; wm.home[i].y = 90; wm.opp[i].x = 150; wm.opp[i].y = 90; }
+    strat.run(wm);
+    if (wm.team_state != TS_DEFENSE) { printf("FAIL: 初始应防守态\n"); return 1; }
+
+    // 我方移到球附近（持球），前 2 帧未达滞回阈值 → 仍防守态
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 10; wm.opp[i].y = 90; }
+    strat.run(wm);
+    strat.run(wm);
+    if (wm.team_state != TS_DEFENSE) { printf("FAIL: 持球 2 帧不应切进攻（滞回）\n"); return 1; }
+
+    // 第 3 帧达阈值 → 进攻态 + 低威胁
+    strat.run(wm);
+    if (wm.team_state != TS_ATTACK) { printf("FAIL: 连续持球 3 帧应切进攻态\n"); return 1; }
+    if (wm.threat_level != 0.1) { printf("FAIL: 进攻态威胁应为 0.1 got %.2f\n", wm.threat_level); return 1; }
+
+    // 丢球：对手移到球附近，连续 3 帧失球 → 回防守态 + 蓝半场威胁 0.6
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 10; wm.home[i].y = 90; wm.opp[i].x = 150; wm.opp[i].y = 90; }
+    for (int f = 0; f < 3; ++f) strat.run(wm);
+    if (wm.team_state != TS_DEFENSE) { printf("FAIL: 连续失球 3 帧应回防守态\n"); return 1; }
+    if (wm.threat_level < 0.5) { printf("FAIL: 防守态(蓝半场)威胁应 0.6 got %.2f\n", wm.threat_level); return 1; }
+
+    printf("team state: OK (滞回防抖/事件标志/威胁分级)\n");
+    return 0;
+}
+
+// 固定角色单测：角色映射固定，不随位置/距离变化
+static int test_fixed_roles() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.x = 110; wm.ball.y = 90;
+    Strategy strat;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 20 + i * 30; wm.home[i].y = 90; }
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 10 + i * 20; wm.opp[i].y = 90; }
+    strat.run(wm);
+    if (wm.role[0] != ROLE_GOALIE || wm.role[1] != ROLE_ACTIVE || wm.role[2] != ROLE_ASSIST ||
+        wm.role[3] != ROLE_MIDFIELD || wm.role[4] != ROLE_PASSIVE) {
+        printf("FAIL: 角色应固定 0=GK/1=ACTIVE/2=ASSIST/3=MID/4=PASSIVE (got %d%d%d%d%d)\n",
+               wm.role[0], wm.role[1], wm.role[2], wm.role[3], wm.role[4]);
+        return 1;
+    }
+    printf("fixed roles: OK (0=GK/1=ACTIVE/2=ASSIST/3=MID/4=PASSIVE)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -195,6 +252,8 @@ int main() {
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();
+    rc |= test_team_state();
+    rc |= test_fixed_roles();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }

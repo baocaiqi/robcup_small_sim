@@ -19,6 +19,10 @@ public:
 private:
     SituationModule sit_;
     RoleAssignment ra_;
+
+    // 攻防状态机：滞回计数 + 状态翻转 + 事件标志 + 威胁分级
+    void update_team_state(WorldModel &wm);
+    double threat_from_state(const WorldModel &wm) const;
 };
 
 }  // namespace simuro5

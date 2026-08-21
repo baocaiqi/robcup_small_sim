@@ -1,13 +1,17 @@
 // ============================================================
-// role_assignment.hpp — 效用函数角色分配
-// 效用函数角色分配（集中式：一次分配全部 4 个角色）
+// role_assignment.hpp — 固定角色分配
 //
 // 角色(Roles):
 //   GOALIE=0  1号守门员(固定)
-//   ACTIVE=1  追球者(离球最近/效用最高)
-//   PASSIVE=2 防守站位
-//   ASSIST=3  助攻跑位
-//   MIDFIELD=4 中场衔接
+//   ACTIVE=1  主攻(追球/带球/射门)
+//   PASSIVE=2 中卫(区域防守/拦截)
+//   ASSIST=3  助攻(左路接应)
+//   MIDFIELD=4 中场(右路/中路衔接)
+//
+// 说明：从「距离贪心动态分配」改为「固定角色分工」
+// （参考官方 demo 固定分工思想，自研实现）。
+// 角色固定 → 机器人不再每帧换角色 → 消除无效转向（有效速度↑）、
+// 宽度/阵型结构保持；「谁负责哪片区域」由各角色行为实现。
 // ============================================================
 #ifndef SIMURO5_ROLE_ASSIGNMENT_HPP
 #define SIMURO5_ROLE_ASSIGNMENT_HPP
@@ -27,12 +31,8 @@ enum Roles {
 
 class RoleAssignment {
 public:
-    // 给 1..4 号机器人分配角色（0 号恒为守门员），结果写回 wm.role[]
+    // 固定角色分工：0=GK 1=ACTIVE 2=ASSIST 3=MID 4=PASSIVE，结果写回 wm.role[]
     void assign(WorldModel &wm);
-
-private:
-    int _last_active_idx = 1;          // 滞后：避免追球角色抖动
-    double _utility(int id, const WorldModel &wm, int role) const;
 };
 
 }  // namespace simuro5
