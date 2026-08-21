@@ -1,7 +1,7 @@
 # FIRA 仿真 5v5 策略库（SimuroSot5）
 
 > RoboCup 中国赛 FIRA 小型组 · 仿真 5vs5 项目的比赛策略代码。
-> 三人小组，从零搭建的完整比赛策略。
+> 四人小组，从零搭建的完整比赛策略。
 
 ## 这是什么
 
@@ -58,7 +58,7 @@ src/
   dll_yellow.cpp         黄队导出壳
   offline_test.cpp       离线冒烟测试
   *.cpp                  各模块实现
-docs/                    规则速查/架构/接口/分工/进度/规范/调参/部署
+docs/                    新人上手/规则速查/架构/接口/分工/进度/规范/调参/部署
 tools/py/                Python：constants/geometry/rlg_analyzer
 ```
 

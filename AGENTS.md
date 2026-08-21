@@ -1,6 +1,7 @@
-# 🤖 三人小队 AI 协作指南（精简版）
+# 🤖 四人小队 AI 协作指南（精简版）
 
-> 三人小队共用，从模块目录开始新会话时自动加载。
+> 四人小队共用，从模块目录开始新会话时自动加载。
+> **新人先读 `docs/08-基础操作与Agent使用指南.md`**（Git / 编译 / 复盘 / Agent 用法）。
 > 所有开发建议从**模块目录**开始新会话（如 `cd strategy_5v5`），根目录本文件自动加载。
 
 ## 一句话工作流（每次会话 3 步）
@@ -20,13 +21,14 @@
 4. **不引入第三方库**（平台加载的是裸 DLL，别依赖外部运行时）
 5. **每次重要改动后更新 `docs/06-调参记录.md`**（数值改了哪些、为什么、效果）
 
-## 三人分工（详见 docs/05-三人分工方案.md）
+## 四人分工（详见 docs/05-四人分工方案.md）
 
 | 队员 | 模块 | 主要文件 |
 |------|------|---------|
 | A（全局调度） | 大脑：世界模型/角色分配/调度/摆位 | `world_model.cpp` `role_assignment.cpp` `strategy.cpp` `formation.cpp` |
-| B | 运动与进攻：差速轮控制/射门/传球 | `motion.cpp` `shoot.cpp` `pass.cpp` |
-| C | 防守与工程：守门员/防守/调参/日志复盘 | `roles.cpp`(goalie/passive) `defense.cpp` `tools/py/` |
+| B（持球进攻） | 带球与射门：差速轮控制/射门决策 | `motion.cpp` `shoot.cpp` `roles.cpp`(active) `geometry.cpp` |
+| C（无球进攻） | 传球与跑位：传球决策/接应站位 | `pass.cpp` `roles.cpp`(assist/midfield) |
+| D（防守+工程） | 守门员/防守/调参/日志复盘 | `roles.cpp`(goalie/passive) `defense.cpp` `tools/py/` |
 
 ## 团队 Skill（仓库内自带，跟随仓库分发）
 
@@ -45,7 +47,7 @@
 | verification-before-completion | 说"做完了"前必须贴命令+输出 |
 | documentation-and-adrs | 决策/调参进文档，聊天里的不算数 |
 | context-engineering | 新会话必读三件套（docs/03+docs/06+模块头文件） |
-| using-git-worktrees | 3 人并行开发隔离工作区 |
+| using-git-worktrees | 4 人并行开发隔离工作区 |
 | file-search | git grep 高效搜索 |
 
 **队友机器一次性同步**（从仓库拉到全局，Claude/Codex 各一条）：

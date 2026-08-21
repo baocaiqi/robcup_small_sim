@@ -17,19 +17,58 @@ void run_goalie(WorldModel &wm, int id) {
         return;
     }
 
-    // 球门前 10cm，y 跟球（夹在门区内）
-    double gx = ctx.our_goal_x() + ctx.attack_dir() * 10.0;
-    double gy = clamp(wm.ball.y, 76.0, 104.0);
+    // ============================================================
+    // 可调参数（改动后记得同步 docs/06-调参记录.md）
+    // ============================================================
+    // 门前站位：球门中心前方 10cm；y 跟踪范围 [76,104]（门宽内侧留余量）
+    const double kGuardDist = 10.0;
+    const double kTrackYLo  = 76.0, kTrackYHi = 104.0;
+    // 出击判定阈值：
+    //   kMaxTTA   ：预测球到门线的时间上限(帧)。超过它=远期威胁，不出击。
+    //   kMaxReach ：守门员出击能「够得着」球的距离上限(cm)。
+    //   kMinSpeed ：球速下限(cm/帧)。太慢的球不用出击，等它滚到门前再拿。
+    const double kMaxTTA   = 15.0;
+    const double kMaxReach = 30.0;
+    const double kMinSpeed = 5.0;
 
-    // 球在我方球门前且很近 → 出击扑球
-    double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
-    if (db < 18.0 && wm.ball_our_goal_dist() < 45.0) {
-        // 出击：冲向球，但目标 y 限制在球门范围附近（球门 70-110，留 2cm 扑球余量），
-        // 防止球在边路时守门员追出球门被吊射空门
-        double ty = clamp(wm.ball.y, 68.0, 112.0);
-        motion::position(r, wm.ball.x, ty);
+    double gx = ctx.our_goal_x() + ctx.attack_dir() * kGuardDist;
+    double bx = wm.ball.x, by = wm.ball.y;
+    double vx = wm.ball.vx, vy = wm.ball.vy;
+    double speed = ball_speed(vx, vy);
+    double db = dist(r.x, r.y, bx, by);      // 守门员到球的当前距离
+
+    // ============================================================
+    // 出击预判（最难的点）：用球速 (vx,vy) 做三角函数外推，
+    // 判断「球会不会进门」+「多久到门」，再决定要不要离开门线出击。
+    //
+    // 出击太早 → 守门员离开门前，对方一横传/变向就是空门；
+    // 出击太晚 → 球滚到门线才动，扑不到。
+    // 所以只有当球「真的会进球」且「马上到门」才出击，否则守门不动。
+    // ============================================================
+    double y_at_goal = 90.0;
+    // 球会不会到达门线：predict_y_at_x 返回 false = 球背离门或只有 y 向运动
+    bool heading_goal = predict_y_at_x(bx, by, vx, vy, ctx.our_goal_x(), y_at_goal);
+    // 到达门线时 y 落在门宽内 → 这球会进球（不是偏出/打墙）
+    bool on_target = heading_goal &&
+                     y_at_goal >= goal_y_low() && y_at_goal <= goal_y_high();
+    // 到门线时间 TTA（帧）：距离 / 朝门速度分量
+    double tta = 1e9;
+    if (std::fabs(vx) > 1e-9)
+        tta = std::fabs(ctx.our_goal_x() - bx) / std::fabs(vx);
+
+    bool should_attack = on_target && tta < kMaxTTA && db < kMaxReach && speed > kMinSpeed;
+
+    if (should_attack) {
+        // 出击：扑向「球会到达的点」（门线内侧一点），而不是追球当前位置。
+        //   这样封的是射门路线，不会跟在球屁股后面被溜。
+        double aim_x = ctx.our_goal_x() + ctx.attack_dir() * 3.0;   // 门线前 3cm
+        motion::position(r, aim_x, clamp(y_at_goal, 74.0, 106.0));
+    } else if (on_target && tta < kMaxTTA) {
+        // 会进球但还够不着球：提前站到预测入球 y，把门封死。
+        motion::position(r, gx, clamp(y_at_goal, kTrackYLo, kTrackYHi));
     } else {
-        motion::position(r, gx, gy);
+        // 无威胁 / 球慢：常规门前站位，y 跟球（夹在门区内）。
+        motion::position(r, gx, clamp(by, kTrackYLo, kTrackYHi));
     }
 }
 
@@ -46,14 +85,14 @@ void run_active(WorldModel &wm, int id) {
 }
 
 void run_passive(WorldModel &wm, int id) {
-    DefensePlan dp = plan_defense(wm);
+    DefensePlan dp = plan_defense(wm, id);
     motion::position(wm.home[id], dp.target_x, dp.target_y);
 }
 
 void run_assist(WorldModel &wm, int id) {
     // 威胁高：回防但分散站位（封上侧射门线，不与 passive 挤一点）
     if (wm.threat_level > 0.3) {
-        DefensePlan dp = plan_defense(wm);
+        DefensePlan dp = plan_defense(wm, id);
         double ty = clamp(dp.target_y + 30.0, 20.0, 160.0);
         motion::position(wm.home[id], dp.target_x, ty);
         return;
@@ -64,7 +103,7 @@ void run_assist(WorldModel &wm, int id) {
 void run_midfield(WorldModel &wm, int id) {
     // 威胁高：回防但分散站位（封下侧射门线）
     if (wm.threat_level > 0.3) {
-        DefensePlan dp = plan_defense(wm);
+        DefensePlan dp = plan_defense(wm, id);
         double ty = clamp(dp.target_y - 30.0, 20.0, 160.0);
         motion::position(wm.home[id], dp.target_x, ty);
         return;
