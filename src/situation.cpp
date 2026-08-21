@@ -42,12 +42,13 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     // 助攻站位：球前方偏侧（和持球人错开）
     // 截图前拉：助攻点球前 40cm（原 25cm 太保守）
     wm.assist_x = clamp(bx + ad * 40.0, 15.0, 205.0);
-    wm.assist_y = clamp(by > 90 ? by - 30.0 : by + 30.0, 12.0, 168.0);
+    // 宽度课题：助攻点偏球上方(y+40)，中场点偏球下方(y-40)，两台天然分上下两侧（原来都拤中路）
+    wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
 
     // 中场站位：中线附近，另一侧
     // 增大前压系数 0.3->0.6：球前压时中场也跟着前移
     wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.6, 15.0, 205.0);
-    wm.mid_y = clamp(by * 0.4 + 54.0, 15.0, 165.0);
+    wm.mid_y = clamp(by - 40.0, 20.0, 160.0);
 
     // 防守站位：球-己方球门连线，距球门约 50cm
     double gx = ogx, gy = 90.0;
