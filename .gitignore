@@ -30,3 +30,6 @@ venv/
 *.rlg
 *.log
 log/
+
+#个人学习笔记
+notes/
