@@ -15,6 +15,13 @@ DefensePlan plan_defense(const WorldModel &wm) {
         plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
         plan.target_y = 90.0;
     }
+    // 防推球犯规：防守点距球保持 >= 8cm（球周围不挤球不推球）
+    double db = dist(plan.target_x, plan.target_y, wm.ball.x, wm.ball.y);
+    if (db < 8.0) {
+        double ang = atan2(wm.ball.y - plan.target_y, wm.ball.x - plan.target_x);
+        plan.target_x = wm.ball.x - 8.0 * cos(ang);
+        plan.target_y = wm.ball.y - 8.0 * sin(ang);
+    }
     return plan;
 }
 
