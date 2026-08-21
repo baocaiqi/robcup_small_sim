@@ -11,6 +11,11 @@ namespace simuro5 {
 void run_goalie(WorldModel &wm, int id) {
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
+    // 点球：守门员锁定球门线中央（不出小禁区，防调度失位）
+    if (wm.game_state == PM_PenaltyKick_Blue || wm.game_state == PM_PenaltyKick_Yellow) {
+        motion::position(r, ctx.our_goal_x() + ctx.attack_dir() * 3.0, 90.0);
+        return;
+    }
 
     // 球门前 10cm，y 跟球（夹在门区内）
     double gx = ctx.our_goal_x() + ctx.attack_dir() * 10.0;
