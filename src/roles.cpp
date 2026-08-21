@@ -74,6 +74,7 @@ void run_goalie(WorldModel &wm, int id) {
 
 void run_active(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
+    const TeamContext &ctx = wm.ctx;
 
     ShootPlan sp = plan_shoot(wm, id);
     if (sp.viable) { motion::position(r, sp.target_x, sp.target_y); return; }
@@ -81,7 +82,30 @@ void run_active(WorldModel &wm, int id) {
     PassPlan pp = plan_pass(wm, id);
     if (pp.viable) { motion::position(r, pp.target_x, pp.target_y); return; }
 
-    motion::chase_ball(r, wm.ball_pred);
+    double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+    // 找离球最近的对方防守者（含守门员）：决定带球开口侧 + 判断球权是否在我
+    double opp_d = 1e9, opp_y = 90.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
+        if (d < opp_d) { opp_d = d; opp_y = wm.opp[i].y; }
+    }
+
+    if (db < 15.0 && db < opp_d) {
+        // —— 带球推进：球在我方脚下控制范围（我方是离球最近的人）——
+        // 目标 = 球后方 8cm 推球点，方向指向门柱开口；
+        // 开口选「离最近防守者远」的一侧，避免直线撞进防守怀里。
+        double ogx = ctx.opp_goal_x();
+        double aim_y = (opp_y > 90.0) ? 106.0 : 74.0;   // 防守者偏下 → 带上柱口
+        double dirx = (ogx + ctx.attack_dir() * 5.0) - wm.ball.x;
+        double diry = aim_y - wm.ball.y;
+        double len = std::hypot(dirx, diry);
+        if (len > 1e-6) { dirx /= len; diry /= len; }
+        // 球后方 8cm 推球点（和 shoot 同款推球机制）
+        motion::position(r, wm.ball.x - dirx * 8.0, wm.ball.y - diry * 8.0);
+    } else {
+        // 球不在脚下 / 争抢中：追预测球位（带减速防冲过头）
+        motion::chase_ball(r, wm.ball_pred);
+    }
 }
 
 void run_passive(WorldModel &wm, int id) {

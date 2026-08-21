@@ -24,7 +24,9 @@ void position(RobotState &r, double tx, double ty) {
 
     double desired_angle = angle_to(r.x, r.y, tx, ty);
     double te = angle_diff(desired_angle, r.rot);
-    double vc = 100.0, Ka = 10.0 / 90.0;
+    // vc：基准车速。复盘实测我们平均 54-63 cm/s，demo 60-68 → 提高上限
+    //   drive = vc*(sigmoid-0.3) 饱和值 = 0.7*vc=70；改 -0.25 且 vc=120 → 饱和 90（+29%）
+    double vc = 120.0, Ka = 10.0 / 90.0;
 
     if (de > 100.0)      Ka = 17.0 / 90.0;
     else if (de > 50.0)  Ka = 19.0 / 90.0;
@@ -32,7 +34,7 @@ void position(RobotState &r, double tx, double ty) {
     else if (de > 20.0)  Ka = 23.0 / 90.0;
     else                 Ka = 25.0 / 90.0;
 
-    double drive = vc * (1.0 / (1.0 + std::exp(-3.0 * de)) - 0.3);
+    double drive = vc * (1.0 / (1.0 + std::exp(-3.0 * de)) - 0.25);
 
     if (te > 95.0 || te < -95.0) {
         // 目标在正后方：倒着走
