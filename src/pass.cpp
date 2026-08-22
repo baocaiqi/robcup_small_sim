@@ -1,22 +1,20 @@
 #include "simuro5/pass.hpp"
 #include "simuro5/geometry.hpp"
+#include "simuro5/field_info.hpp"
+#include "simuro5/role_assignment.hpp"
 #include <cmath>
 #include <algorithm>
-#include <cstdio>
-
-
 
 namespace simuro5 {
-
 
 namespace {
 // 调参常量
 constexpr double PASS_MAX_DIST     = 60.0;    // 最大传球距离 cm
 constexpr double PASS_MIN_DIST     = 8.0;     // 最小传球距离，避免贴脸传球
 constexpr double BLOCK_THRESHOLD   = 15.0;    // 传球线路阻挡阈值 cm
-constexpr double OFFSET_BASE       = 5.0;     // 基础向前偏移
-constexpr double THREAT_RADIUS     = 25.0;    // 接应点周围敌方威胁半径
-
+constexpr double OFFSET_BASE       = 6.0;     // 接应点向前的领球偏移 cm
+constexpr double THREAT_RADIUS     = 30.0;    // 接应点周围敌方威胁半径 cm
+constexpr double FIELD_MARGIN      = 6.0;     // 接应点离边线的最小距离 cm
 
 // 路线 (sx,sy)->(tx,ty) 是否被某个对手机器人挡住
 bool route_blocked(const WorldModel &wm, double sx, double sy, double tx, double ty) {
@@ -28,7 +26,6 @@ bool route_blocked(const WorldModel &wm, double sx, double sy, double tx, double
     }
     return false;
 }
-
 
 // 统计目标点周围敌方机器人数量（威胁度）
 int count_near_opponent(const WorldModel &wm, double x, double y)
@@ -46,10 +43,18 @@ int count_near_opponent(const WorldModel &wm, double x, double y)
     return cnt;
 }
 
+// 把接应点夹回场内，并避免深入对方罚球区（带球/接应不该进禁区）。
+void clamp_receive_point(const TeamContext &ctx, double &x, double &y) {
+    x = clamp(x, FIELD_MARGIN, TeamContext::FIELD_LENGTH - FIELD_MARGIN);
+    y = clamp(y, FIELD_MARGIN, TeamContext::FIELD_WIDTH - FIELD_MARGIN);
+    if (in_opp_penalty_area(ctx, x, y)) {
+        // 落在对方罚球区内：沿 x 推到禁区外沿（朝持球者一侧）
+        double gx = ctx.opp_goal_x();
+        x = (ctx.attack_dir() > 0) ? gx - 80.0 - FIELD_MARGIN : gx + 80.0 + FIELD_MARGIN;
+    }
+}
 
 }  // anonymous namespace
-
-
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     PassPlan plan{};
@@ -62,49 +67,51 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     int best = -1;
     double best_score = 1e9;
     double best_tx = 0, best_ty = 0;
-    int best_threat = 0;
-
 
     for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
-        const auto &rob = wm.home[id];
 
-        double raw_dist = dist(px, py, rob.x, rob.y);
-        printf("[RAW_DIST] id:%d raw dist:%.2f  min:%.2f max:%.2f\n",
-                id, raw_dist, PASS_MIN_DIST, PASS_MAX_DIST);
+        // —— 接应点基准：优先用 A 输出的角色站位点（联动），其余回退本体坐标 ——
+        double base_x = wm.home[id].x, base_y = wm.home[id].y;
+        switch (wm.role[id]) {
+            case ROLE_ASSIST:   base_x = wm.assist_x;  base_y = wm.assist_y;  break;
+            case ROLE_MIDFIELD: base_x = wm.mid_x;     base_y = wm.mid_y;     break;
+            case ROLE_PASSIVE:  base_x = wm.passive_x; base_y = wm.passive_y; break;
+            default: break;   // GOALIE / 未分配：无站位点，用本体坐标
+        }
 
-        int threat = count_near_opponent(wm, rob.x, rob.y);
-        double dynamic_offset = OFFSET_BASE * std::max(0.2, 1.0 - 0.25 * threat);
+        // —— 选点：在站位点前方领出一个接应点（向前推进），再夹回场内 ——
+        double tx = base_x + ad * OFFSET_BASE;
+        double ty = base_y;
+        clamp_receive_point(ctx, tx, ty);
 
-        double rx2 = rob.x + ad * dynamic_offset;
-        double ry2 = rob.y;
-
-        // 重点：判断偏移之后接应点的距离（业务真实逻辑）
-        double pass_dist = dist(px, py, rx2, ry2);
+        // 传球距离校验
+        double pass_dist = dist(px, py, tx, ty);
         if (pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) {
             continue;
         }
 
-        bool blocked = route_blocked(wm, px, py, rx2, ry2);
-        if (blocked) {
+        // 路线被挡则排除
+        if (route_blocked(wm, px, py, tx, ty)) {
             continue;
         }
 
-        double goal_dist = std::fabs(rob.x - ctx.opp_goal_x());
-        double score = goal_dist + threat * 12.0;
+        // —— 威胁评估：在接应点（不是队友当前位置）统计对手数量 ——
+        int threat = count_near_opponent(wm, tx, ty);
+
+        // —— 评分：越靠前越好 + 威胁越低越好 + 传球越短越稳 ——
+        double goal_dist = std::fabs(tx - ctx.opp_goal_x());
+        double score = goal_dist + threat * 20.0 + pass_dist * 0.5;
 
         if (score < best_score) {
             best_score = score;
             best = id;
-            best_tx = rx2;
-            best_ty = ry2;
-            best_threat = threat;
+            best_tx = tx;
+            best_ty = ty;
         }
     }
 
-
     if (best < 0) {
-        printf("[PASS_DEBUG] passer:%d no valid receiver\n", passer_id);
         return plan;
     }
 
@@ -112,12 +119,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     plan.receiver_id = best;
     plan.target_x = best_tx;
     plan.target_y = best_ty;
-    printf("[PASS_DEBUG] passer:%d -> recv:%d threat:%d target(%.2f,%.2f)\n",
-           passer_id, best, best_threat, best_tx, best_ty);
-
-
     return plan;
 }
-
 
 } // namespace simuro5

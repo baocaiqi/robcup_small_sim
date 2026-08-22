@@ -16,6 +16,7 @@
 #include "simuro5/defense.hpp"
 #include "simuro5/roles.hpp"
 #include "simuro5/field_info.hpp"
+#include "simuro5/pass.hpp"
 
 using namespace simuro5;
 
@@ -245,6 +246,102 @@ static int test_fixed_roles() {
     return 0;
 }
 
+// 传球选点单测：威胁惩罚 / 边界夹取 / 短传优先
+static int test_pass() {
+    TeamContext ctx{true};               // 蓝队：门在 x=220，攻向左(对方门 x=0)
+    WorldModel wm;
+    wm.ctx = ctx;
+
+    // 场景①：同等球门距离、同等传球距离下，接应点有对手 → 应被威胁惩罚、落选。
+    // A 接应点(52,69) 旁 20cm 放对手(threat=1)，B 接应点(52,111) 无对手(threat=0)。
+    wm.home[0].x = 80; wm.home[0].y = 90;    // 持球者
+    wm.home[1].x = 58; wm.home[1].y = 69;    // A → 接应点(52,69)
+    wm.home[2].x = 58; wm.home[2].y = 111;   // B → 接应点(52,111)
+    wm.home[3].x = 150; wm.home[3].y = 90;   // 其余队友距离>60，不可选
+    wm.home[4].x = 80; wm.home[4].y = 170;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.opp[0].x = 64; wm.opp[0].y = 53;      // 距 A 接应点 20cm，且不挡传球线
+    {
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 2) {
+            printf("FAIL: 场景①威胁应惩罚A、选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+    }
+
+    // 场景②：接应点越过边界 → 夹回场内，坐标不越界。
+    // home[1] 在 x=2，领球偏移 -6 后原始 x=-4，应夹到 FIELD_MARGIN=6。
+    wm.home[0].x = 40; wm.home[0].y = 50;    // 持球者
+    wm.home[1].x = 2;  wm.home[1].y = 50;    // 接应点原始 (-4,50) → 夹到 (6,50)
+    wm.home[2].x = 40; wm.home[2].y = 160;   // 其余队友距离>60，不可选
+    wm.home[3].x = 150; wm.home[3].y = 50;
+    wm.home[4].x = 150; wm.home[4].y = 120;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 20 + i * 25; }
+    {
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 1) {
+            printf("FAIL: 场景②应选 home[1] got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+        if (fabs(p.target_x - 6.0) > 0.5 || fabs(p.target_y - 50.0) > 0.5) {
+            printf("FAIL: 场景②接应点未正确夹取 (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+        if (p.target_x < 0 || p.target_x > 220 || p.target_y < 0 || p.target_y > 180) {
+            printf("FAIL: 场景②接应点越界 (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+    }
+
+    // 场景③：同等威胁、同等球门距离 → 优先短传。
+    // A 接应点(54,70) pass_dist=32.8，B 接应点(54,50) pass_dist=47.7，短传 A 应胜出。
+    wm.home[0].x = 80; wm.home[0].y = 90;    // 持球者
+    wm.home[1].x = 60; wm.home[1].y = 70;    // A → 接应点(54,70) 短
+    wm.home[2].x = 60; wm.home[2].y = 50;    // B → 接应点(54,50) 长
+    wm.home[3].x = 160; wm.home[3].y = 90;   // 其余队友距离>60，不可选
+    wm.home[4].x = 80; wm.home[4].y = 170;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    {
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 1) {
+            printf("FAIL: 场景③应优先短传A(home[1]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+    }
+
+    // 场景④：接应点基准联动站位点（assist_pt），不依赖队友本体坐标。
+    // ASSIST(home[2]) 本体在 (150,90)（距持球者>60，若用本体则不可选），
+    // 但其站位点 assist_pt=(60,70) 在传球距离内 → 应基于站位点选出接应点(54,70)。
+    wm.role[0] = ROLE_GOALIE;
+    wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST;
+    wm.role[3] = ROLE_MIDFIELD;
+    wm.role[4] = ROLE_PASSIVE;
+    wm.home[0].x = 210; wm.home[0].y = 90;    // GK 远，不可选
+    wm.home[1].x = 80;  wm.home[1].y = 90;    // 持球者(ACTIVE)
+    wm.home[2].x = 150; wm.home[2].y = 90;    // ASSIST 本体远（若用本体则>60 不可选）
+    wm.home[3].x = 150; wm.home[3].y = 150;   // MIDFIELD 远
+    wm.home[4].x = 150; wm.home[4].y = 30;    // PASSIVE 远
+    wm.assist_x = 60;  wm.assist_y = 70;      // ASSIST 站位点（在传球距离内）
+    wm.mid_x = 150;    wm.mid_y = 150;        // MIDFIELD 站位点远
+    wm.passive_x = 150; wm.passive_y = 30;    // PASSIVE 站位点远
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    {
+        PassPlan p = plan_pass(wm, 1);
+        if (!p.viable || p.receiver_id != 2) {
+            printf("FAIL: 场景④应联动站位点选ASSIST(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+        if (fabs(p.target_x - 54.0) > 0.5 || fabs(p.target_y - 70.0) > 0.5) {
+            printf("FAIL: 场景④接应点未基于站位点 (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+    }
+
+    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -254,6 +351,7 @@ int main() {
     rc |= test_defense_reach();
     rc |= test_team_state();
     rc |= test_fixed_roles();
+    rc |= test_pass();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
