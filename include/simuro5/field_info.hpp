@@ -37,6 +37,22 @@ inline bool in_penalty_area(const TeamContext &ctx, double x, double y) {
     return in_rect(x, y, x_lo, x_hi, 72.5, 107.5);
 }
 
+// 守门员活动区域 = 己方罚球区（大禁区 80×35）。
+//   规则：守门员出「球门区(小禁区)」即不受保护；出罚球区则离门太远、易被过。
+//   所以守门员出击/拦截点一律 clamp 回罚球区内，保证不越界（策略约束，非硬规则）。
+inline void clamp_goalie_area(const TeamContext &ctx, double &x, double &y) {
+    double gx = ctx.our_goal_x();
+    double x_lo = std::min(gx, gx + ctx.attack_dir() * 80.0);
+    double x_hi = std::max(gx, gx + ctx.attack_dir() * 80.0);
+    x = clamp(x, x_lo, x_hi);
+    y = clamp(y, 72.5, 107.5);
+}
+
+// 罚球区前缘 x：守门员可活动的最靠外一条线（球门前 80cm）
+inline double penalty_front_x(const TeamContext &ctx) {
+    return ctx.our_goal_x() + ctx.attack_dir() * 80.0;
+}
+
 // 对方罚球区（进攻方禁区内不能久留/越位参考）
 inline bool in_opp_penalty_area(const TeamContext &ctx, double x, double y) {
     TeamContext mirror = ctx; mirror.is_blue = !ctx.is_blue;
