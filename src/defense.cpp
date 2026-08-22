@@ -29,6 +29,14 @@ static constexpr double kMinBallSpeed = 3.0;
 static constexpr double kMinX = 12.0, kMaxX = 208.0;
 static constexpr double kMinY = 15.0, kMaxY = 165.0;
 
+// 可达性判断：防守队员最大直线速度(cm/帧)。保守值，需用 rlg 复盘实测标定。
+//   （motion 基准车速 vc=100 是轮速量级，换算成每帧位移要现场标定，这里先取 2.0）
+static constexpr double kMySpeed = 2.0;
+
+// 可达余量倍数：我到达时间 ≤ 球到达时间 × 该系数 才认为追得上。
+//   >1 给自己留缓冲（比如 1.2 = 多留 20% 时间余量）。
+static constexpr double kReachMargin = 1.2;
+
 // ============================================================
 // 纯函数：球轨迹 ∩ 球门前拦截线
 // ============================================================
@@ -58,7 +66,7 @@ bool intercept_point(const WorldModel &wm, double line_dist,
 // ============================================================
 // 主入口：2 号防守队员的断球点
 // ============================================================
-DefensePlan plan_defense(const WorldModel &wm) {
+DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     DefensePlan plan;
     const TeamContext &ctx = wm.ctx;
 
@@ -78,8 +86,20 @@ DefensePlan plan_defense(const WorldModel &wm) {
     double ix = 0.0, iy = 0.0;
     if (plan.approaching && plan.ball_spd >= kMinBallSpeed &&
         intercept_point(wm, kInterceptLineDist, ix, iy)) {
-        plan.target_x = ix;
-        plan.target_y = iy;
+        // 可达性判断：算出的断球点，我赶不赶得上？
+        //   t_ball = 球到截点的时间 = dist(球, 截点) / 球速
+        //   t_me   = 我到截点的时间 = dist(我, 截点) / kMySpeed
+        //   若 t_me > t_ball × 余量 → 追不上，回退卡位：
+        //   避免为追一个够不着的球而失位、把身后空档让给对方。
+        double t_ball = dist(wm.ball.x, wm.ball.y, ix, iy) / plan.ball_spd;
+        double t_me   = dist(wm.home[defender_id].x, wm.home[defender_id].y, ix, iy) / kMySpeed;
+        if (t_me <= t_ball * kReachMargin) {
+            plan.target_x = ix;
+            plan.target_y = iy;
+        } else {
+            plan.target_x = wm.passive_x;
+            plan.target_y = wm.passive_y;
+        }
     } else {
         plan.target_x = wm.passive_x;
         plan.target_y = wm.passive_y;

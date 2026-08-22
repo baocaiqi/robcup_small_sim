@@ -64,7 +64,8 @@ struct DefensePlan {
 };
 
 // 主入口：计算 2 号防守队员的断球点
-DefensePlan plan_defense(const WorldModel &wm);
+// defender_id：防守队员在 home[] 中的下标（用于「可达性判断」——我赶不赶得上）
+DefensePlan plan_defense(const WorldModel &wm, int defender_id);
 
 // 纯函数：断球点 = 球运动轨迹 ∩ 球门前 line_dist 处的拦截线
 //   拦截线是与球门线平行、位于球门前 line_dist 处的竖线：
