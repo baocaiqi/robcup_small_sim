@@ -159,12 +159,42 @@ static int test_goalie_predict() {
     return 0;
 }
 
+// 可达性判断单测：近处采纳截点、远处回退卡位
+static int test_defense_reach() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.passive_x = 150; wm.passive_y = 70;   // 回退用的静态站位点（明显区别于截点）
+
+    // 球在 (100,90) 朝门滚 vx=3 → 截点本应在 (170,90)（门区修正后 165,90）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 3.0; wm.ball.vy = 0.0;
+
+    // 场景 A：2号就站在截点附近，赶得上 → 应采纳截点（偏离 passive）
+    wm.home[1].x = 168; wm.home[1].y = 90;
+    DefensePlan a = plan_defense(wm, 1);
+    if (fabs(a.target_x - wm.passive_x) < 0.5) {
+        printf("FAIL: 近处应采纳截点而非卡位 (%.1f,%.1f)\n", a.target_x, a.target_y); return 1;
+    }
+
+    // 场景 B：2号在场地另一头，赶不上 → 应回退卡位（等于 passive）
+    wm.home[1].x = 20; wm.home[1].y = 90;
+    DefensePlan b = plan_defense(wm, 1);
+    if (fabs(b.target_x - wm.passive_x) > 0.5 || fabs(b.target_y - wm.passive_y) > 0.5) {
+        printf("FAIL: 远处应回退卡位 (%.1f,%.1f)\n", b.target_x, b.target_y); return 1;
+    }
+
+    printf("defense reach: OK (近处截断/远处回退)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
     rc |= test_formation();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
+    rc |= test_defense_reach();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }

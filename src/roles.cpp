@@ -80,7 +80,7 @@ void run_active(WorldModel &wm, int id) {
 }
 
 void run_passive(WorldModel &wm, int id) {
-    DefensePlan dp = plan_defense(wm);
+    DefensePlan dp = plan_defense(wm, id);
     motion::position(wm.home[id], dp.target_x, dp.target_y);
 }
 
