@@ -342,6 +342,63 @@ static int test_pass() {
     return 0;
 }
 
+// 守门员二过一/远射场景冒烟：新决策分支不崩溃且轮速合理
+static int test_goalie_scenarios() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.home[0].x = 210; wm.home[0].y = 90; wm.home[0].rot = 180;
+
+    // 场景1：带球者高速前突 + 侧前方接应者 → 守门员后退封门（不崩溃）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 5; wm.opp[i].y = 90; }
+    wm.ball.x = 150; wm.ball.y = 90; wm.ball.vx = 8.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 149; wm.opp[0].y = 90;   // 带球者（离球最近）
+    wm.opp[1].x = 165; wm.opp[1].y = 80;   // 接应者（更靠门 + 够近）
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 二过一场景轮速异常\n"); return 1;
+    }
+
+    // 场景2：远射（球快速朝门、对方无人接应）→ 前压拦截（不崩溃）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 10 + i * 10; wm.opp[i].y = 90; }
+    wm.ball.x = 120; wm.ball.y = 90; wm.ball.vx = 10.0; wm.ball.vy = 0.0;
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 远射场景轮速异常\n"); return 1;
+    }
+
+    // 场景3：慢球朝门滚（无对方埋伏）→ 贴门不出击（深度≈门线，不冲出去）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 10 + i * 10; wm.opp[i].y = 90; }
+    wm.ball.x = 120; wm.ball.y = 90; wm.ball.vx = 3.0; wm.ball.vy = 0.0;
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 慢球场景轮速异常\n"); return 1;
+    }
+
+    // 场景4：门前有对方埋伏（罚球区内）+ 快球朝门 → 回缩不出太远（不崩溃）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 10 + i * 10; wm.opp[i].y = 90; }
+    wm.opp[0].x = 170; wm.opp[0].y = 90;   // 埋伏在罚球区内
+    wm.ball.x = 120; wm.ball.y = 90; wm.ball.vx = 10.0; wm.ball.vy = 0.0;
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 埋伏回缩场景轮速异常\n"); return 1;
+    }
+
+    // 场景5：球在门将脚下（很近）→ 主动解围（不崩溃，且往队友方向清）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 10 + i * 10; wm.opp[i].y = 90; }
+    wm.home[1].x = 150; wm.home[1].y = 90;   // 队友在己方半场
+    wm.ball.x = 212; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 210; wm.home[0].y = 90;   // 门将（球夹在门将和门之间 → 应弧线绕）
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 解围场景轮速异常\n"); return 1;
+    }
+
+    printf("goalie scenarios: OK (二过一后退/远射前压/慢球贴门/埋伏回缩/解围均正常)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -352,6 +409,7 @@ int main() {
     rc |= test_team_state();
     rc |= test_fixed_roles();
     rc |= test_pass();
+    rc |= test_goalie_scenarios();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
