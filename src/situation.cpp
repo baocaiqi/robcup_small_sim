@@ -55,34 +55,50 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     // 对方罚球区外沿（进攻方站位不进入对方禁区，留 5cm 余量）
     double opp_box_edge = ctx.opp_goal_x() - ad * 85.0;
 
+    // —— 助攻/中场目标点（先算局部变量，走滞回后再写入）——
+    double ax, ay, mx, my;
     if (attack) {
-        // —— 进攻态锚点 ——
-        // 助攻：球前 40cm、偏上（宽度）；不进入对方禁区
-        wm.assist_x = clamp(bx + ad * 40.0, 15.0, 205.0);
-        wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
-        if (in_opp_penalty_area(ctx, wm.assist_x, wm.assist_y))
-            wm.assist_x = opp_box_edge;
-
-        // 中场：中线前压 0.5、偏下；不进入对方禁区
-        wm.mid_x = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
-        wm.mid_y = clamp(by - 40.0, 20.0, 160.0);
-        if (in_opp_penalty_area(ctx, wm.mid_x, wm.mid_y))
-            wm.mid_x = opp_box_edge;
-
-        // 门前回撤：球攻进对方罚球区时，助攻/中场退回中线（防反击丢球即空门，
-        // 参考官方 demo「门前回撤」思想自研实现）
-        if (in_opp_penalty_area(ctx, bx, by)) {
-            wm.assist_x = 110.0;
-            wm.mid_x    = 110.0;
-            // y 保持上下错开（assist +40 / mid -40）
-        }
+        // 进攻态：助攻球前 40cm 偏上、中场中线前压 0.5 偏下，均不进入对方禁区
+        ax = clamp(bx + ad * 40.0, 15.0, 205.0);
+        ay = clamp(by + 40.0, 20.0, 160.0);
+        if (in_opp_penalty_area(ctx, ax, ay)) ax = opp_box_edge;
+        mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
+        my = clamp(by - 40.0, 20.0, 160.0);
+        if (in_opp_penalty_area(ctx, mx, my)) mx = opp_box_edge;
+        // 门前半撤：球攻进对方罚球区时——assist 留禁区外沿当近端短传出球点
+        // （治"主攻被围无近端接应"，参考 2008 心得「禁区内能安全倒开球是关键」），
+        // mid 回撤中线防反击。
+        if (in_opp_penalty_area(ctx, bx, by)) { ax = opp_box_edge; mx = 110.0; }
     } else {
-        // —— 防守态锚点：助攻/中场回收中线两侧（保持出球点 + 防守纵深）——
-        wm.assist_x = 110.0;
-        wm.assist_y = clamp(by + 40.0, 20.0, 160.0);
-        wm.mid_x    = 110.0;
-        wm.mid_y    = clamp(by - 40.0, 20.0, 160.0);
+        // 防守态：助攻/中场回收中线两侧（保持出球点 + 防守纵深）
+        ax = 110.0;
+        ay = clamp(by + 40.0, 20.0, 160.0);
+        mx = 110.0;
+        my = clamp(by - 40.0, 20.0, 160.0);
     }
+
+    // —— 跑位前瞻修正：目标点附近有对手时，y 往空档侧挪开（别跑到别人怀里）——
+    //    参考 2008 战术心得「跑位要考虑对方会不会先到」，自研实现；
+    //    与现有约束合并：在滞回之前算，禁区外沿/门前回撤/己方禁区纪律仍生效。
+    const double kAvoidRadius = 25.0;    // 对手距目标点多近需要躲（cm）
+    const double kAvoidShift  = 30.0;    // 躲开的 y 位移（cm）
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (dist(wm.opp[i].x, wm.opp[i].y, ax, ay) < kAvoidRadius) {
+            ay = (wm.opp[i].y >= ay) ? ay - kAvoidShift : ay + kAvoidShift;
+            ay = clamp(ay, 20.0, 160.0);
+        }
+        if (dist(wm.opp[i].x, wm.opp[i].y, mx, my) < kAvoidRadius) {
+            my = (wm.opp[i].y >= my) ? my - kAvoidShift : my + kAvoidShift;
+            my = clamp(my, 20.0, 160.0);
+        }
+    }
+
+    // —— 锚点滞回：目标变化 < kAnchorHysteresis 不更新 ——
+    //    均速落后 demo 的主因之一：追着每帧移动的锚点频繁变向（差速轮转向慢吃速度）。
+    //    目标点冻结 → 机器人跑直线、到位等待，少无效转向。防守锚点不设滞回（要响应快）。
+    const double kAnchorHysteresis = 15.0;   // cm（可调，见 docs/06）
+    if (dist(ax, ay, wm.assist_x, wm.assist_y) >= kAnchorHysteresis) { wm.assist_x = ax; wm.assist_y = ay; }
+    if (dist(mx, my, wm.mid_x, wm.mid_y) >= kAnchorHysteresis)       { wm.mid_x = mx;  wm.mid_y = my; }
 
     // 高位防守：球在对方半场时，防守线前压（防全缩后场，攻防均适用）
     bool ball_opp_half = (ad > 0) ? (bx > 110.0) : (bx < 110.0);

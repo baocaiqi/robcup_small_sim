@@ -1,4 +1,5 @@
 #include "simuro5/roles.hpp"
+#include "simuro5/role_assignment.hpp"
 #include "simuro5/motion.hpp"
 #include "simuro5/shoot.hpp"
 #include "simuro5/pass.hpp"
@@ -91,7 +92,30 @@ void run_active(WorldModel &wm, int id) {
     }
 
     if (db < 15.0 && db < opp_d) {
-        // —— 带球推进：球在我方脚下控制范围（我方是离球最近的人）——
+        // —— 围困检测（治"带球有进无退"）——
+        // 球周围 25cm 内 ≥2 个 demo，或最近 demo <12cm → 不硬带：
+        //   优先回传/横传（此时 assist 已在禁区外沿近端接应），无传球选择则带球离场。
+        int swarm = 0, near_i = -1;
+        double opp_near = 1e9;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
+            if (d < 25.0) swarm++;
+            if (d < opp_near) { opp_near = d; near_i = i; }
+        }
+        if (swarm >= 2 || opp_near < 12.0) {
+            PassPlan pp2 = plan_pass(wm, id);
+            if (pp2.viable) { motion::position(r, pp2.target_x, pp2.target_y); return; }
+            // 无传球选择：把球带离最近的围困者（向空档方向推）
+            if (near_i >= 0 && opp_near > 1e-6) {
+                double dx = wm.ball.x - wm.opp[near_i].x;
+                double dy = wm.ball.y - wm.opp[near_i].y;
+                double len = std::hypot(dx, dy);
+                if (len > 1e-6) { dx /= len; dy /= len; }
+                motion::position(r, wm.ball.x - dx * 8.0, wm.ball.y - dy * 8.0);
+                return;
+            }
+        }
+        // —— 正常带球推进：球在我方脚下控制范围（我方是离球最近的人）——
         // 目标 = 球后方 8cm 推球点，方向指向门柱开口；
         // 开口选「离最近防守者远」的一侧，避免直线撞进防守怀里。
         double ogx = ctx.opp_goal_x();

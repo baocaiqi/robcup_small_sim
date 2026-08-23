@@ -24,15 +24,16 @@ void position(RobotState &r, double tx, double ty) {
 
     double desired_angle = angle_to(r.x, r.y, tx, ty);
     double te = angle_diff(desired_angle, r.rot);
-    // vc：基准车速。复盘实测我们平均 54-63 cm/s，demo 60-68 → 提高上限
-    //   drive = vc*(sigmoid-0.3) 饱和值 = 0.7*vc=70；改 -0.25 且 vc=120 → 饱和 90（+29%）
-    double vc = 120.0, Ka = 10.0 / 90.0;
+    // vc：基准车速。复盘实测 demo 均速 97-100 cm/s，我们 55-88 → 再拉上限
+    //   drive = vc*(sigmoid-0.25) 饱和值 = 0.75*vc；vc=150 → 上限 112（与 demo 追平）
+    double vc = 150.0, Ka = 10.0 / 90.0;
 
-    if (de > 100.0)      Ka = 17.0 / 90.0;
-    else if (de > 50.0)  Ka = 19.0 / 90.0;
-    else if (de > 30.0)  Ka = 21.0 / 90.0;
-    else if (de > 20.0)  Ka = 23.0 / 90.0;
-    else                 Ka = 25.0 / 90.0;
+    // Ka 分段整体 +3：转向修正更积极，缩短差速轮重新瞄准的时间
+    if (de > 100.0)      Ka = 20.0 / 90.0;
+    else if (de > 50.0)  Ka = 22.0 / 90.0;
+    else if (de > 30.0)  Ka = 24.0 / 90.0;
+    else if (de > 20.0)  Ka = 26.0 / 90.0;
+    else                 Ka = 28.0 / 90.0;
 
     double drive = vc * (1.0 / (1.0 + std::exp(-3.0 * de)) - 0.25);
 

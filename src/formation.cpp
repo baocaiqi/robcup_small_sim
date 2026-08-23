@@ -28,13 +28,14 @@ void defense_formation(const TeamContext &c, Robot *r) {
     put(r, 4, M(c, 130), 120, field_rot(c));
 }
 
-// 进攻开球阵型（蓝队坐标）：守门员门前 + 中圈/己方半场
+// 进攻开球阵型（蓝队坐标）：守门员门前 + ACTIVE(id1) 站球后 10cm 负责开球推进
+// 修复：原罚球人放 id4(PASSIVE 只防守不追球) → 发球没人踢；改 id1(ACTIVE) 带球推进天然覆盖
 void kickoff_formation(const TeamContext &c, Robot *r) {
     put(r, 0, M(c, 215), 90, goalie_rot(c));
-    put(r, 1, M(c, 185), 90, field_rot(c));
+    put(r, 1, M(c, 100), 90, field_rot(c));   // ACTIVE：球(110)后 10cm，开球即推
     put(r, 2, M(c, 150), 60, field_rot(c));
     put(r, 3, M(c, 150), 120, field_rot(c));
-    put(r, 4, M(c, 120), 90, field_rot(c));
+    put(r, 4, M(c, 185), 90, field_rot(c));
 }
 
 // 争球摆位：1 人球侧 25cm，其余人散开（1/4 区外）
@@ -74,24 +75,24 @@ void formation_former(const TeamContext &c, PlayMode gs, Robot robots[]) {
             if (!c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,130), 60, field_rot(c)); put(robots, 2, M(c,130), 120, field_rot(c)); put(robots, 3, M(c,150), 90, field_rot(c)); put(robots, 4, M(c,180), 90, field_rot(c)); }
             break;
 
-        // 任意球：进攻方先摆（罚球人球后 10cm，其他人己方半场）
+        // 任意球：进攻方先摆（罚球人=ACTIVE(id1) 球后 10cm，其他人己方半场）
         case PM_FreeKick_Blue:
             if (c.is_blue) {
                 // FK 点在对方半场中部附近估计 (55,90)；罚球人在球后(离球门远侧)
                 put(robots, 0, M(c,215), 90, goalie_rot(c));
-                put(robots, 1, M(c,185), 90, field_rot(c));
+                put(robots, 1, M(c,65), 90, field_rot(c));    // ACTIVE：球(55)后 10cm
                 put(robots, 2, M(c,150), 60, field_rot(c));
                 put(robots, 3, M(c,150), 120, field_rot(c));
-                put(robots, 4, M(c,65), 90, field_rot(c));   // 球后 10cm
+                put(robots, 4, M(c,185), 90, field_rot(c));
             }
             break;
         case PM_FreeKick_Yellow:
             if (!c.is_blue) {
                 put(robots, 0, M(c,215), 90, goalie_rot(c));
-                put(robots, 1, M(c,185), 90, field_rot(c));
+                put(robots, 1, M(c,155), 90, field_rot(c));   // ACTIVE：球(165)后 10cm
                 put(robots, 2, M(c,150), 60, field_rot(c));
                 put(robots, 3, M(c,150), 120, field_rot(c));
-                put(robots, 4, M(c,155), 90, field_rot(c));  // 球后 10cm (镜像)
+                put(robots, 4, M(c,185), 90, field_rot(c));
             }
             break;
 
@@ -126,16 +127,16 @@ void formation_later(const TeamContext &c, PlayMode gs,
             freeball_formation(c, laterRobots, ball.x, ball.y);
             break;
 
-        // 点球：进攻方后摆（守门员门线 + 罚球人球后10cm + 队友中线另一边）
+        // 点球：进攻方后摆（守门员门线 + 罚球人=ACTIVE(id1) 球后10cm + 队友散开）
         case PM_PenaltyKick_Blue:
         case PM_PenaltyKick_Yellow: {
             put(laterRobots, 0, M(c,215), 90, goalie_rot(c));
-            put(laterRobots, 1, M(c,180), 90, field_rot(c));
             put(laterRobots, 2, M(c,150), 60, field_rot(c));
             put(laterRobots, 3, M(c,150), 120, field_rot(c));
-            // 罚球人：球后 10cm（离球门远侧）
+            put(laterRobots, 4, M(c,180), 90, field_rot(c));
+            // 罚球人：ACTIVE(id1) 球后 10cm（离球门远侧）——执行靠 run_active 带球推进
             double dir = (ball.x > 110.0) ? 1.0 : -1.0;
-            put(laterRobots, 4, ball.x + dir * 10.0, ball.y, field_rot(c));
+            put(laterRobots, 1, ball.x + dir * 10.0, ball.y, field_rot(c));
             break;
         }
 
