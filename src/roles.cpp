@@ -262,6 +262,35 @@ void run_active(WorldModel &wm, int id) {
 }
 
 void run_passive(WorldModel &wm, int id) {
+    // 人盯人（威胁明显时）：盯进攻威胁最大的对方球员，挡在其与己方球门之间。
+    //   威胁分级见 strategy.cpp：>=0.6 = 球在己方半场（或己方罚球区），此时才贴人；
+    //   否则维持区域防守（plan_defense 拦截点）。
+    if (wm.threat_level >= 0.6) {
+        int t = pick_mark_target(wm, wm.mark_target);
+        wm.mark_target = t;
+        if (t >= 0) {
+            // 站位：速度前馈外推被盯者未来位置（改「追」为「截」，解决同速追不上移动目标），
+            //   再在其与球门中心连线、被盯者侧 mark_dist 处站位（挡射门/传球路线）。
+            double gx = wm.ctx.our_goal_x(), gy = 90.0;
+            double px = wm.opp[t].x + wm.opp_vx[t] * mark_lead();
+            double py = wm.opp[t].y + wm.opp_vy[t] * mark_lead();
+            double dx = gx - px, dy = gy - py;
+            double len = std::hypot(dx, dy);
+            if (len > 1e-6) { dx /= len; dy /= len; }
+            double mx = px + dx * mark_dist();
+            double my = py + dy * mark_dist();
+            // 别站进己方罚球区（防送点球）：推到罚球区前缘外 5cm，
+            // y 跟住被盯者（原来固定 90 会让 marker 离被盯者太远、白盯）
+            if (in_penalty_area(wm.ctx, mx, my)) {
+                mx = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
+                my = clamp(py, 72.5, 107.5);
+            }
+            mx = clamp(mx, 0.0, TeamContext::FIELD_LENGTH);
+            my = clamp(my, 0.0, TeamContext::FIELD_WIDTH);
+            motion::position(wm.home[id], mx, my);
+            return;
+        }
+    }
     DefensePlan dp = plan_defense(wm, id);
     motion::position(wm.home[id], dp.target_x, dp.target_y);
 }

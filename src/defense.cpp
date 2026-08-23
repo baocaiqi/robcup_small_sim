@@ -123,8 +123,72 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         double ang = atan2(wm.ball.y - plan.target_y, wm.ball.x - plan.target_x);
         plan.target_x = wm.ball.x - 8.0 * cos(ang);
         plan.target_y = wm.ball.y - 8.0 * sin(ang);
+        // 推球点可能又被推回罚球区（球贴罚球区前缘时），再夹一次防送点球
+        if (in_penalty_area(ctx, plan.target_x, plan.target_y)) {
+            plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
+            plan.target_y = 90.0;
+        }
     }
     return plan;
+}
+
+// ============================================================
+// 人盯人：威胁打分 + 目标选择（见 defense.hpp 注释）
+// ============================================================
+double mark_threat(double d_ball, double d_goal,
+                   double ball_speed, bool is_dribbler) {
+    const double K = 10.0;                  // 距离平滑：避免贴脸分数爆表/每帧抖动
+    double s = 50.0 / (d_ball + K);         // ① 控球威胁（主导）：越靠近球越危险
+    s      += 25.0 / (d_goal + K);          // ② 位置威胁：越靠门越危险
+    if (is_dribbler) s += 0.3 * ball_speed; // ③ 球速加成：只给持球者，球越快越要贴
+    return s;
+}
+
+int pick_mark_target(const WorldModel &wm, int current_target) {
+    const TeamContext &ctx = wm.ctx;
+    double speed = ball_speed(wm.ball.vx, wm.ball.vy);
+
+    // 持球者 = 离球最近的对方球员
+    int dribbler = -1;
+    double dmin = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        if (d < dmin) { dmin = d; dribbler = i; }
+    }
+
+    // 逐人打分取 argmax
+    int best = -1;
+    double best_score = -1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        double d_goal = ctx.dist_our_goal(wm.opp[i].x);
+        double score = mark_threat(d_ball, d_goal, speed, i == dribbler);
+        if (score > best_score) { best_score = score; best = i; }
+    }
+
+    // 滞回：新目标分没超过当前目标 10% 就不换（防每帧换人原地转圈；
+    //   20% 太强，实测「选错人」占未贴住 19~22%——危险换人常被滞回挡掉）
+    if (current_target >= 0 && current_target < PLAYERS_PER_SIDE &&
+        best != current_target) {
+        double cur_d_ball = dist(wm.ball.x, wm.ball.y,
+                                 wm.opp[current_target].x, wm.opp[current_target].y);
+        double cur_d_goal = ctx.dist_our_goal(wm.opp[current_target].x);
+        double cur_score = mark_threat(cur_d_ball, cur_d_goal, speed,
+                                       current_target == dribbler);
+        if (best_score <= cur_score * 1.1) best = current_target;
+    }
+
+    // 危险门限：最终目标必须离球近(持球/抢点) 或 离门近(门前埋伏) 才贴；
+    //   否则返回 -1 回区域防守——复盘未贴住帧里 44~48% 被盯者离球 >40cm，
+    //   追不危险的对手白费体力还丢区域。
+    if (best >= 0) {
+        double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[best].x, wm.opp[best].y);
+        double d_goal = ctx.dist_our_goal(wm.opp[best].x);
+        if (d_ball > mark_engage_ball_dist() && d_goal > mark_engage_goal_dist()) {
+            return -1;
+        }
+    }
+    return best;
 }
 
 }  // namespace simuro5
