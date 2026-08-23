@@ -399,6 +399,64 @@ static int test_goalie_scenarios() {
     return 0;
 }
 
+// 人盯人威胁打分 + 滞回单测：持球者/门前埋伏排序正确，滞回不换人
+static int test_mark_target() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+
+    // 场景 A：持球者（球在脚下、离门较近）应威胁最大
+    wm.ball.x = 150; wm.ball.y = 90; wm.ball.vx = 5.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 149; wm.opp[0].y = 90;   // 持球者（离球最近）
+    wm.opp[1].x = 215; wm.opp[1].y = 90;   // 门前埋伏
+    wm.opp[2].x = 40;  wm.opp[2].y = 60;
+    wm.opp[3].x = 40;  wm.opp[3].y = 90;
+    wm.opp[4].x = 40;  wm.opp[4].y = 120;
+    if (pick_mark_target(wm, -1) != 0) {
+        printf("FAIL: 持球者应威胁最大\n"); return 1;
+    }
+
+    // 场景 B：无明确持球者，门前埋伏者（离门最近）应威胁最大
+    wm.ball.x = 150; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 130; wm.opp[0].y = 90;   // 离球 20cm、离门 90cm
+    wm.opp[1].x = 215; wm.opp[1].y = 90;   // 门前埋伏（离门 5cm）
+    wm.opp[2].x = 40;  wm.opp[2].y = 60;
+    wm.opp[3].x = 40;  wm.opp[3].y = 90;
+    wm.opp[4].x = 40;  wm.opp[4].y = 120;
+    if (pick_mark_target(wm, -1) != 1) {
+        printf("FAIL: 门前埋伏应威胁最大\n"); return 1;
+    }
+
+    // 场景 C：滞回——两目标分接近，新目标未超当前 20% 应继续盯旧目标
+    wm.ball.x = 140; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 149; wm.opp[0].y = 90;   // 略占优（离球更近）
+    wm.opp[1].x = 150; wm.opp[1].y = 90;   // 略落后但离门更近
+    wm.opp[2].x = 40;  wm.opp[2].y = 60;
+    wm.opp[3].x = 40;  wm.opp[3].y = 90;
+    wm.opp[4].x = 40;  wm.opp[4].y = 120;
+    if (pick_mark_target(wm, -1) != 0) {
+        printf("FAIL: 无滞回时应选占优者 0\n"); return 1;
+    }
+    if (pick_mark_target(wm, 1) != 1) {
+        printf("FAIL: 滞回应保持当前目标 1\n"); return 1;
+    }
+
+    // 场景 D：危险门限——所有人离球/离门都远（无人值得贴）应返回 -1 回区域防守
+    wm.ball.x = 110; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 110; wm.opp[0].y = 20;    // 离球 70、离门 110
+    wm.opp[1].x = 110; wm.opp[1].y = 160;   // 离球 70、离门 110
+    wm.opp[2].x = 60;  wm.opp[2].y = 20;    // 离球 86、离门 160
+    wm.opp[3].x = 60;  wm.opp[3].y = 160;   // 离球 86、离门 160
+    wm.opp[4].x = 160; wm.opp[4].y = 20;    // 离球 86、离门 60
+    if (pick_mark_target(wm, -1) != -1) {
+        printf("FAIL: 无人值得盯应返回 -1（回区域防守）\n"); return 1;
+    }
+
+    printf("mark target: OK (持球者/门前埋伏/滞回/危险门限均正常)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -410,6 +468,7 @@ int main() {
     rc |= test_fixed_roles();
     rc |= test_pass();
     rc |= test_goalie_scenarios();
+    rc |= test_mark_target();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }

@@ -28,12 +28,24 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
         home[i].vr = env->home[i].velocityRight;
     }
 
-    // 对方
+    // 对方（对手无平台预测速度，需自己差分；单帧位移超上限判为复位跳变、速度清零）
+    const double kMaxOppVel = 8.0;   // cm/帧：机器人正常 ~2.5，瞬移 50+，8 安全分隔
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         opp[i].x = env->opponent[i].pos.x;
         opp[i].y = env->opponent[i].pos.y;
         opp[i].rot = env->opponent[i].rotation;
+        if (opp_vel_ready) {
+            double dvx = opp[i].x - opp_last[i].x;
+            double dvy = opp[i].y - opp_last[i].y;
+            opp_vx[i] = (std::fabs(dvx) > kMaxOppVel) ? 0.0 : dvx;
+            opp_vy[i] = (std::fabs(dvy) > kMaxOppVel) ? 0.0 : dvy;
+        } else {
+            opp_vx[i] = 0.0;
+            opp_vy[i] = 0.0;
+        }
+        opp_last[i] = opp[i];
     }
+    opp_vel_ready = true;
 }
 
 }  // namespace simuro5

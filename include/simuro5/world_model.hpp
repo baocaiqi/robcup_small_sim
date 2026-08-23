@@ -39,6 +39,10 @@ struct WorldModel {
     BallState ball_pred;     // 平台预测球(直接用)
     RobotState home[PLAYERS_PER_SIDE];
     RobotState opp[PLAYERS_PER_SIDE];
+    RobotState opp_last[PLAYERS_PER_SIDE];   // 上一帧对方位置（差分求速用）
+    double opp_vx[PLAYERS_PER_SIDE] = {0};   // 对方速度(cm/帧，current-last 差分，瞬移清零)
+    double opp_vy[PLAYERS_PER_SIDE] = {0};
+    bool opp_vel_ready = false;              // 首帧只记位置不求速（防初始(0,0)跳变）
 
     Bounds field;            // 场地边界(平台给)
     Bounds goal;             // 球门边界(平台给)
@@ -55,6 +59,8 @@ struct WorldModel {
 
     // 角色分配结果（由 RoleAssignment 填写）
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举
+    // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
+    int mark_target = -1;
 
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;
