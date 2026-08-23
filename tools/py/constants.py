@@ -49,4 +49,6 @@ WHOS_BALL_NAMES = {0: "未知", 1: "蓝队", 2: "黄队"}
 # LogRobot = pos(x,y,z) + rotation = 32B；LogEnvironment = 蓝5 + 黄5 + 球 + gs + whosBall = 352B
 FRAME_BYTES = 352
 LOG_ROBOT_BYTES = 32
-LOG_OFFSET_X = -15.0   # 日志坐标系原点偏移（球门线 x=-15/235 → 策略坐标 0/220）
+LOG_OFFSET_X = 0.0   # 日志坐标系与策略坐标系一致（2023 版 SimuroSot5 平台原生 [0,220]：
+                      # 官方 demo Strategy4Blue 门将 x=215、Strategy4Yellow 门将 x=5，
+                      # .rlg raw 蓝门将≈214.8/黄门将≈5.1，与策略输出 210/10 完全吻合，无需偏移）

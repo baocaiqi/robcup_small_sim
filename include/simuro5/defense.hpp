@@ -75,5 +75,37 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id);
 bool intercept_point(const WorldModel &wm, double line_dist,
                      double &ix, double &iy);
 
+// ============================================================
+// 人盯人（man-marking）：威胁打分 + 目标选择（队员 D 负责）
+// ============================================================
+
+// 盯人距离：防守队员贴到被盯球员多近(cm)。
+//   太近(<8cm)会被判推球犯规，太远拦不住传/射。取 16cm 折中（原 12 实测超调到 8 犯规边）。
+inline double mark_dist() { return 16.0; }
+
+// 盯人预测帧数：用被盯者速度外推其未来位置再站位（速度前馈截击）。
+//   同速追逐追不上移动目标，预测「几帧后会在哪」才能截住；太大易超调、太小追不上。
+inline double mark_lead() { return 6.0; }
+
+// 盯人危险门限：被盯者必须离球或离门足够近才值得贴，否则回区域防守。
+//   复盘未贴住帧里 44~48% 被盯者离球 >40cm——追不危险的对手白费体力。
+inline double mark_engage_ball_dist() { return 40.0; }
+inline double mark_engage_goal_dist() { return 40.0; }
+
+// 威胁打分（纯函数，可直接单测）：分越高越该被盯。
+//   d_ball      ：该球员到球距离(cm)
+//   d_goal      ：该球员到己方球门线距离(cm)
+//   ball_speed  ：当前球速(cm/帧)
+//   is_dribbler ：该球员是否离球最近（持球者）
+double mark_threat(double d_ball, double d_goal,
+                   double ball_speed, bool is_dribbler);
+
+// 选出「进攻威胁最大」的对方球员下标(0~4)，含滞回 + 危险门限：
+//   对 5 人打 mark_threat 取 argmax；若上一帧目标(current_target)仍在，
+//   且新目标分数没超过它 10%，则继续盯旧目标——避免每帧换人原地转圈。
+//   最后做危险门限：被盯者须离球或离门够近才值得贴，否则返回 -1（回区域防守）。
+//   current_target：上一帧目标（-1=无）。返回新目标下标（-1=无人值得盯）。
+int pick_mark_target(const WorldModel &wm, int current_target);
+
 }  // namespace simuro5
 #endif
