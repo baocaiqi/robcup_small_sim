@@ -9,6 +9,37 @@
 
 namespace simuro5 {
 
+namespace {
+// ============================================================
+// 无球接应拉开（队员C）：站位点附近有敌方机器人时，沿 Y 轴横向躲开。
+//   · 只微调 Y，保留 A 输出的原始 X（全局跑位点由 situation.cpp 决定，这里只做局部微调）
+//   · 判距用 dx*dx+dy*dy，风格对齐 pass.cpp 的 count_near_opponent
+//   · 返回微调后的 y；威胁半径内无敌人则原样返回 by
+// ============================================================
+double spread_y(const WorldModel &wm, double bx, double by,
+                double threat_radius, double max_offset) {
+    double best_d2 = threat_radius * threat_radius;
+    double nearest_dy = 0.0;
+    bool found = false;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double dx = wm.opp[i].x - bx;
+        double dy = wm.opp[i].y - by;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {      // 半径内最近的敌人
+            best_d2 = d2;
+            nearest_dy = dy;
+            found = true;
+        }
+    }
+    if (!found) return by;
+    // 越近偏移越大（d=0→max_offset，d=radius→0），朝敌人反方向横向躲
+    double frac = 1.0 - std::sqrt(best_d2) / threat_radius;
+    double sign = (nearest_dy >= 0.0) ? -1.0 : 1.0;   // 敌人在上 → 往下躲
+    return by + sign * max_offset * clamp(frac, 0.0, 1.0);
+}
+
+}  // anonymous namespace
+
 void run_goalie(WorldModel &wm, int id) {
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
@@ -274,7 +305,20 @@ void run_assist(WorldModel &wm, int id) {
         motion::position(wm.home[id], dp.target_x, ty);
         return;
     }
-    motion::position(wm.home[id], wm.assist_x, wm.assist_y);
+    // —— 进攻分支：站 A 的助攻点；先躲敌人，再和队友 Y 轴互相推开 ——
+    constexpr double THREAT_RADIUS = 30.0;   // 敌方威胁检测半径 cm
+    constexpr double MAX_OFFSET     = 20.0;   // 最大允许横向偏移 cm
+    constexpr double FIELD_MARGIN   = 6.0;    // 目标点离边线最小距离 cm
+    constexpr double TEAM_SPACING   = 25.0;   // 与中场的最小 Y 间距（防挤堆）
+    double tx = wm.assist_x;                  // X 保持 A 原始输出
+    double ty = spread_y(wm, wm.assist_x, wm.assist_y, THREAT_RADIUS, MAX_OFFSET);   // ① 躲敌人（优先级高）
+    // ② 队友推开：离中场站位点 Y 太近时，朝远离方向错开，X 不动
+    if (fabs(ty - wm.mid_y) < TEAM_SPACING) {
+        ty = wm.mid_y + ((ty >= wm.mid_y) ? TEAM_SPACING : -TEAM_SPACING);
+    }
+    tx = clamp(tx, FIELD_MARGIN, TeamContext::FIELD_LENGTH - FIELD_MARGIN);
+    ty = clamp(ty, FIELD_MARGIN, TeamContext::FIELD_WIDTH  - FIELD_MARGIN);
+    motion::position(wm.home[id], tx, ty);
 }
 
 void run_midfield(WorldModel &wm, int id) {
@@ -285,7 +329,20 @@ void run_midfield(WorldModel &wm, int id) {
         motion::position(wm.home[id], dp.target_x, ty);
         return;
     }
-    motion::position(wm.home[id], wm.mid_x, wm.mid_y);
+    // —— 进攻分支：站 A 的中场点；先躲敌人，再和队友 Y 轴互相推开 ——
+    constexpr double THREAT_RADIUS = 30.0;   // 敌方威胁检测半径 cm
+    constexpr double MAX_OFFSET     = 20.0;   // 最大允许横向偏移 cm
+    constexpr double FIELD_MARGIN   = 6.0;    // 目标点离边线最小距离 cm
+    constexpr double TEAM_SPACING   = 25.0;   // 与助攻的最小 Y 间距（防挤堆）
+    double tx = wm.mid_x;                     // X 保持 A 原始输出
+    double ty = spread_y(wm, wm.mid_x, wm.mid_y, THREAT_RADIUS, MAX_OFFSET);   // ① 躲敌人（优先级高）
+    // ② 队友推开：离助攻站位点 Y 太近时，朝远离方向错开，X 不动
+    if (fabs(ty - wm.assist_y) < TEAM_SPACING) {
+        ty = wm.assist_y + ((ty >= wm.assist_y) ? TEAM_SPACING : -TEAM_SPACING);
+    }
+    tx = clamp(tx, FIELD_MARGIN, TeamContext::FIELD_LENGTH - FIELD_MARGIN);
+    ty = clamp(ty, FIELD_MARGIN, TeamContext::FIELD_WIDTH  - FIELD_MARGIN);
+    motion::position(wm.home[id], tx, ty);
 }
 
 }  // namespace simuro5

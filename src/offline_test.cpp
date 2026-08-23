@@ -399,6 +399,138 @@ static int test_goalie_scenarios() {
     return 0;
 }
 
+// 传球威胁距离加权单测：半径内近/远敌人惩罚不同（新逻辑）
+static int test_pass_threat_weight() {
+    TeamContext ctx{true};               // 蓝队：门 x=220，攻向左(对方门 x=0)
+    WorldModel wm;
+    wm.ctx = ctx;
+    // role 保持默认(全 GOALIE=0) → plan_pass 走 default 分支用本体坐标
+    wm.home[0].x = 80; wm.home[0].y = 90;    // 持球者
+    wm.home[1].x = 58; wm.home[1].y = 70;    // A → 接应点(52,70)
+    wm.home[2].x = 58; wm.home[2].y = 110;   // B → 接应点(52,110)
+    wm.home[3].x = 150; wm.home[3].y = 90;   // 其余远(>60)，不可选
+    wm.home[4].x = 80;  wm.home[4].y = 170;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.opp[0].x = 37.4; wm.opp[0].y = 59.5;  // A 后方 18cm：距(52,70)=18、距传球线=18(>15 不挡)
+    wm.opp[1].x = 30.8; wm.opp[1].y = 125.1; // B 后方 26cm：距(52,110)=26、距传球线=26(>15 不挡)
+    PassPlan p = plan_pass(wm, 0);
+    if (!p.viable || p.receiver_id != 2) {
+        printf("FAIL: 距离加权应选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+        return 1;
+    }
+    printf("pass threat weight: OK (近盯防惩罚>远盯防)\n");
+    return 0;
+}
+
+// 无球接应拉开单测：站位点附近有敌人时沿 Y 轴横向躲开（run_assist/run_midfield）
+// 验证思路：让机器人朝向 +x(rot=0)，站位点在正前方同 y。
+//   motion::position 只写 vl/vr，但目标方向会反映到 desired_angle→te→vl/vr 差：
+//   · 无敌人 → 目标=站位点，直走(vl≈vr)
+//   · 敌人在站位点上方 → spread_y 让目标往下偏 → 左转(vl>vr)
+//   · 敌人在站位点下方 → 目标往上偏 → 右转(vl<vr)
+static int test_roles_spread() {
+    TeamContext ctx{true};               // 蓝队：门 x=220，攻向左
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.threat_level = 0.1;               // <=0.3 走进攻分支
+
+    // 把无关对手放到远处（离站位点 > 威胁半径 30cm），避免干扰最近敌人判断
+    auto scatter = [&]() {
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 25; }
+    };
+
+    // —— 场景1：无敌人 → 不偏移，直走 ——
+    scatter();
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.assist_x = 140; wm.assist_y = 90;
+    wm.mid_y = 150;                          // 队友错开，避免触发队友回避
+    run_assist(wm, 1);
+    if (fabs(wm.home[1].vl - wm.home[1].vr) > 0.5 || wm.home[1].vl <= 0.0) {
+        printf("FAIL: 无敌人应直走 (vl=%.1f vr=%.1f)\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景2：敌人在站位点上方 → 目标往下偏，左转(vl>vr) ——
+    scatter();
+    wm.opp[0].x = 140; wm.opp[0].y = 100;   // 站位点上方 10cm
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.assist_x = 140; wm.assist_y = 90;
+    wm.mid_y = 150;                          // 队友错开，避免触发队友回避
+    run_assist(wm, 1);
+    if (!(wm.home[1].vl > wm.home[1].vr + 1.0)) {
+        printf("FAIL: 敌人在上应往下躲(左转 vl>vr) got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景3：敌人在站位点下方 → 目标往上偏，右转(vl<vr) ——
+    scatter();
+    wm.opp[0].x = 140; wm.opp[0].y = 80;    // 站位点下方 10cm
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.assist_x = 140; wm.assist_y = 90;
+    wm.mid_y = 150;                          // 队友错开，避免触发队友回避
+    run_assist(wm, 1);
+    if (!(wm.home[1].vl < wm.home[1].vr - 1.0)) {
+        printf("FAIL: 敌人在下应往上躲(右转 vl<vr) got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景4：run_midfield 进攻分支同样拉开 ——
+    scatter();
+    wm.opp[0].x = 140; wm.opp[0].y = 100;   // 上方
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.mid_x = 140; wm.mid_y = 90;
+    wm.assist_y = 30;                        // 队友错开，避免触发队友回避
+    run_midfield(wm, 1);
+    if (!(wm.home[1].vl > wm.home[1].vr + 1.0)) {
+        printf("FAIL: midfield 敌人在上应往下躲 got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景5：站位点贴边 + 敌人往界外推 → clamp 不越界 ——
+    //   assist_y=2、敌人在上方会算出 y≈-11，应被 clamp 回 FIELD_MARGIN=6。
+    //   机器人放在 y=6：clamp 生效 → 目标(140,6) 与机器人同水平线 → 直走(vl≈vr)；
+    //   clamp 失效 → 目标(140,-11) → 明显下偏(te≈-23°)，vl≫vr。
+    scatter();
+    wm.opp[0].x = 140; wm.opp[0].y = 12;    // 上方，把目标往界外(y<0)推
+    wm.home[1].x = 100; wm.home[1].y = 6;  wm.home[1].rot = 0;
+    wm.assist_x = 140; wm.assist_y = 2;
+    run_assist(wm, 1);
+    if (fabs(wm.home[1].vl - wm.home[1].vr) > 2.0 ||
+        fabs(wm.home[1].vl) > 300.0 || fabs(wm.home[1].vr) > 300.0) {
+        printf("FAIL: 贴边站位应 clamp 回场内(直走) got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景6：队友回避——assist 与 mid 站位点 Y 过近 → assist 沿 Y 推开 ——
+    scatter();
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.assist_x = 140; wm.assist_y = 90;
+    wm.mid_y = 100;                         // |90-100|=10 < 25，触发队友回避
+    run_assist(wm, 1);
+    // 无敌人(spread_y 返回 90)，队友回避把 ty 推到 mid_y-25=75（目标在 mid 下方）
+    // 目标(140,75)，desired_angle<0 → 左转(vl>vr)
+    if (!(wm.home[1].vl > wm.home[1].vr + 1.0)) {
+        printf("FAIL: assist 队友过近应往下推(左转) got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    // —— 场景7：队友回避——midfield 对称推开 ——
+    scatter();
+    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+    wm.mid_x = 140; wm.mid_y = 90;
+    wm.assist_y = 80;                       // |90-80|=10 < 25，触发队友回避
+    run_midfield(wm, 1);
+    // 无敌人(spread_y 返回 90)，队友回避把 ty 推到 assist_y+25=105（目标在 assist 上方）
+    // 目标(140,105)，desired_angle>0 → 右转(vl<vr)
+    if (!(wm.home[1].vl < wm.home[1].vr - 1.0)) {
+        printf("FAIL: midfield 队友过近应往上推(右转) got vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+
+    printf("roles spread: OK (无敌人直走/上方下躲/下方上躲/midfield拉开/贴边clamp/队友回避)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -409,7 +541,9 @@ int main() {
     rc |= test_team_state();
     rc |= test_fixed_roles();
     rc |= test_pass();
+    rc |= test_pass_threat_weight();
     rc |= test_goalie_scenarios();
+    rc |= test_roles_spread();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
