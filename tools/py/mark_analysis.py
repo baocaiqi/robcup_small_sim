@@ -26,10 +26,30 @@ def dist(ax, ay, bx, by):
     return math.hypot(bx - ax, by - ay)
 
 
-def mark_threat(d_ball, d_goal, speed, is_dribbler):
+def ball_danger_speed(vx, vy, bx, by, gx):
+    """球朝己方门心(gx,90)的速度分量（cm/帧），背离=0。与 C++ ball_danger_speed 一致"""
+    dx, dy = gx - bx, 90.0 - by
+    d = math.hypot(dx, dy)
+    if d < 1e-6:
+        return 0.0
+    return max(0.0, (vx * dx + vy * dy) / d)
+
+
+def ball_approach_speed(vx, vy, bx, by, px, py):
+    """球朝某点(px,py)的速度分量（cm/帧），背离=0。与 C++ ball_approach_speed 一致"""
+    dx, dy = px - bx, py - by
+    d = math.hypot(dx, dy)
+    if d < 1e-6:
+        return 0.0
+    return max(0.0, (vx * dx + vy * dy) / d)
+
+
+def mark_threat(d_ball, d_goal, approach_speed, danger_speed, is_dribbler):
     s = 50.0 / (d_ball + K) + 25.0 / (d_goal + K)
+    reach = 1.0 / (1.0 + d_ball / 20.0)
+    s += 0.4 * approach_speed * reach
     if is_dribbler:
-        s += 0.3 * speed
+        s += 0.3 * danger_speed
     return s
 
 
@@ -61,9 +81,10 @@ def analyze_side(frames, home_key, opp_key, gx, gy, own_half_fn, name):
         hx, hy = h["x"], h["y"]
         opp = f[opp_key]
 
-        # 球速：相邻帧位移（cm/帧）
+        # 球速：相邻帧差分（cm/帧）
         px, py = frames[i - 1]["ball"]["x"], frames[i - 1]["ball"]["y"]
-        speed = dist(bx, by, px, py)
+        vx, vy = bx - px, by - py
+        danger = ball_danger_speed(vx, vy, bx, by, gx)
 
         # 持球者 = 离球最近对手
         dribbler, dmin = -1, 1e9
@@ -71,12 +92,13 @@ def analyze_side(frames, home_key, opp_key, gx, gy, own_half_fn, name):
             db = dist(bx, by, op["x"], op["y"])
             if db < dmin:
                 dmin, dribbler = db, t
-        # 威胁分取 argmax（含持球者球速加成）
+        # 威胁分取 argmax（接球威胁 approach + 持球突破 danger）
         best, best_score = -1, -1e9
         for t, op in enumerate(opp):
             db = dist(bx, by, op["x"], op["y"])
             dg = abs(op["x"] - gx)
-            sc = mark_threat(db, dg, speed, t == dribbler)
+            appr = ball_approach_speed(vx, vy, bx, by, op["x"], op["y"])
+            sc = mark_threat(db, dg, appr, danger, t == dribbler)
             if sc > best_score:
                 best_score, best = sc, t
 
