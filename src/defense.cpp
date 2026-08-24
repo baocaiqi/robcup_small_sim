@@ -136,17 +136,24 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
 // 人盯人：威胁打分 + 目标选择（见 defense.hpp 注释）
 // ============================================================
 double mark_threat(double d_ball, double d_goal,
-                   double ball_speed, bool is_dribbler) {
+                   double approach_speed, double danger_speed, bool is_dribbler) {
     const double K = 10.0;                  // 距离平滑：避免贴脸分数爆表/每帧抖动
     double s = 50.0 / (d_ball + K);         // ① 控球威胁（主导）：越靠近球越危险
     s      += 25.0 / (d_goal + K);          // ② 位置威胁：越靠门越危险
-    if (is_dribbler) s += 0.3 * ball_speed; // ③ 球速加成：只给持球者，球越快越要贴
+    // ③ 接球威胁：球正朝该球员冲（快传/直塞），按离球距离加权——
+    //    离球近的人（拿得到球）才吃这个加成；球越快朝他、人越近球 → 越危险。
+    //    用倒数衰减而非硬阈值，避免阈值附近每帧抖动。
+    double reach = 1.0 / (1.0 + d_ball / 20.0);   // d_ball=0→1, 20→0.5, 40→0.33
+    s += 0.4 * approach_speed * reach;
+    // ④ 持球突破威胁：持球者带球朝门冲，球越快朝门越要贴。
+    //    （持球者脚下 d_ball≈0，③ 项 reach 虽≈1 但 approach_speed≈0，靠此项兜住）
+    if (is_dribbler) s += 0.3 * danger_speed;
     return s;
 }
 
 int pick_mark_target(const WorldModel &wm, int current_target) {
     const TeamContext &ctx = wm.ctx;
-    double speed = ball_speed(wm.ball.vx, wm.ball.vy);
+    double danger = ball_danger_speed(wm);   // 球朝己方门速度（持球突破威胁用）
 
     // 持球者 = 离球最近的对方球员
     int dribbler = -1;
@@ -162,7 +169,8 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
         double d_goal = ctx.dist_our_goal(wm.opp[i].x);
-        double score = mark_threat(d_ball, d_goal, speed, i == dribbler);
+        double appr = ball_approach_speed(wm, wm.opp[i].x, wm.opp[i].y);
+        double score = mark_threat(d_ball, d_goal, appr, danger, i == dribbler);
         if (score > best_score) { best_score = score; best = i; }
     }
 
@@ -173,7 +181,9 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         double cur_d_ball = dist(wm.ball.x, wm.ball.y,
                                  wm.opp[current_target].x, wm.opp[current_target].y);
         double cur_d_goal = ctx.dist_our_goal(wm.opp[current_target].x);
-        double cur_score = mark_threat(cur_d_ball, cur_d_goal, speed,
+        double cur_appr = ball_approach_speed(wm, wm.opp[current_target].x,
+                                              wm.opp[current_target].y);
+        double cur_score = mark_threat(cur_d_ball, cur_d_goal, cur_appr, danger,
                                        current_target == dribbler);
         if (best_score <= cur_score * 1.1) best = current_target;
     }

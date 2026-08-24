@@ -2,6 +2,7 @@
 #include "simuro5/roles.hpp"
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
+#include "simuro5/defense.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -67,7 +68,17 @@ double Strategy::threat_from_state(const WorldModel &wm) const {
     // 防守态：按球的位置分级
     if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return 1.0;   // 球在己方罚球区
     bool our_half = ctx.attack_dir() > 0 ? (wm.ball.x < 110.0) : (wm.ball.x > 110.0);
-    return our_half ? 0.6 : 0.4;   // 己方半场 / 对方半场
+    double threat = our_half ? 0.6 : 0.4;
+
+    // 球速方向加成（team-level danger）：球快速朝门滚时提前升档，让全队早回防。
+    //   danger = 球朝己方门的速度分量（defense.hpp 点积投影），横滚/背离=0，不会误判。
+    //   朝门且快 → 对方半场 0.4→0.6（提前触发人盯人）、己方半场 0.6→0.8（预留更高档）。
+    //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人——升 0.6 是真正的提前回防收益。
+    const double kThreatDangerSpeed = 6.0;   // cm/帧：朝门有效速度阈值（同 kDribbleSpeed 量级，可调）
+    if (ball_danger_speed(wm) > kThreatDangerSpeed) {
+        threat = our_half ? 0.8 : 0.6;
+    }
+    return threat;
 }
 
 }  // namespace simuro5
