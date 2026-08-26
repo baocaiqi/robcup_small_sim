@@ -67,4 +67,13 @@ if(BUILD_TEST)
     target_compile_options(offline_test PRIVATE /W3 /utf-8)
     set_property(TARGET offline_test PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   endif()
+
+  # ---- 快速无头仿真器（大量样本/回归测试/参数搜索）----
+  add_executable(sim_bench tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
+  target_include_directories(sim_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_definitions(sim_bench PRIVATE STRATEGY4BLUE_EXPORTS)
+  if(MSVC)
+    target_compile_options(sim_bench PRIVATE /W3 /utf-8)
+    set_property(TARGET sim_bench PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
 endif()
