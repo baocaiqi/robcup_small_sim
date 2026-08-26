@@ -57,8 +57,10 @@ static constexpr double kWheelBase = 10.0;         // 轮距 cm（决定转向�
 static constexpr double kAccel     = 300.0;        // 轮速最大加速度 cm/s²（每帧 ±7.5）
                                                    //   真实平台有惯性：机器人不能瞬间 0→112，
                                                    //   否则追球过冲把球铲向错误方向（本 sim 主要失真源）
-static constexpr double kBallDecay = 0.985;        // 球每帧摩擦衰减
-static constexpr double kWallRest  = 0.55;         // 撞墙反弹恢复系数（垂直分量衰减）
+static constexpr double kBallDecay = 0.985;        // 球每帧摩擦衰减（校准: 真实rlg高速段 0.986-0.994/帧，一致）
+static constexpr double kWallRest  = 0.45;         // 撞墙反弹恢复系数（校准: 真实rlg x=0.458 y=0.449）
+static constexpr double kWallFric  = 0.90;         // 撞墙时平行分量衰减（墙摩擦）：球贴墙滑动会减速
+                                                   //   ——否则球沿墙滑 vy 不降，一路滑进角落/门角（2007论文怪癖: 球卡四角）
 static constexpr double kContact   = 5.5;          // 球-机器人最小分离 cm（防球嵌进机器人身体）
 static constexpr double kCarryR    = 9.0;          // 携带区半径 cm：略大于策略"球后 8cm 推球点"，
                                                    //   机器人站到推球点即可带球；但防止提前携带
@@ -195,17 +197,17 @@ static void step_physics(SimState &s) {
     s.by += s.bvy * kDt;
     s.bvx *= kBallDecay; s.bvy *= kBallDecay;
 
-    // 球-墙反弹（垂直分量衰减）；门线开口处（y∈门宽）不反弹——球要能进门！
+    // 球-墙反弹（垂直分量衰减 + 平行分量摩擦衰减）；门线开口处（y∈门宽）不反弹——球要能进门！
     if (s.bx < 0) {
         if (s.by >= kGoalLo && s.by <= kGoalHi) { /* 进门：交给 check_goal 判定 */ }
-        else { s.bx = -s.bx; s.bvx = -s.bvx * kWallRest; }
+        else { s.bx = -s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFric; }
     }
     if (s.bx > 220) {
         if (s.by >= kGoalLo && s.by <= kGoalHi) { /* 进门 */ }
-        else { s.bx = 440 - s.bx; s.bvx = -s.bvx * kWallRest; }
+        else { s.bx = 440 - s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFric; }
     }
-    if (s.by < 0) { s.by = -s.by; s.bvy = -s.bvy * kWallRest; }
-    if (s.by > 180) { s.by = 360 - s.by; s.bvy = -s.bvy * kWallRest; }
+    if (s.by < 0) { s.by = -s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFric; }
+    if (s.by > 180) { s.by = 360 - s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFric; }
 
     // —— 球-机器人交互 ——
     // 1) 携带：球在「非守门员」机器人前方弧区（距离≤kCarryR 且 |偏角|≤kCarryArc）内，
@@ -285,13 +287,20 @@ static void step_physics(SimState &s) {
     }
 }
 
-// 进球判定 + 重置（带随机摆位）
-static bool check_goal(SimState &s, Rng *rng) {
+// 进球判定 + 重置（带随机摆位）；debug>0 时打印进球详情
+static bool check_goal(SimState &s, Rng *rng, int debug) {
     if (s.bx > 220 && s.by >= kGoalLo && s.by <= kGoalHi) {   // 蓝队失球(黄得分)
-        s.score_yellow++; init_formation(s, rng); return true;
+        s.score_yellow++;
+        if (debug) printf("  [失球] 帧%d 蓝失: 球(%.0f,%.0f)v(%.0f,%.0f) 门将(%.0f,%.0f) 蓝1(%.0f,%.0f) 黄近球(%.0f,%.0f)\n",
+                          s.frames, s.bx, s.by, s.bvx, s.bvy, s.blue[0].x, s.blue[0].y,
+                          s.blue[1].x, s.blue[1].y,
+                          s.yellow[0].x, s.yellow[0].y);
+        init_formation(s, rng); return true;
     }
     if (s.bx < 0 && s.by >= kGoalLo && s.by <= kGoalHi) {     // 黄队失球(蓝得分)
-        s.score_blue++; init_formation(s, rng); return true;
+        s.score_blue++;
+        if (debug) printf("  [进球] 帧%d 蓝进: 球(%.0f,%.0f)\n", s.frames, s.bx, s.by);
+        init_formation(s, rng); return true;
     }
     return false;
 }
@@ -310,17 +319,18 @@ static void scripted_opponent(SimState &s) {
         r.vl = v - ka * te; r.vr = v + ka * te;
     };
     // 守门员：球进本方禁区附近(x<60)才快速跟球 y；球远时回中待命。
-    // 真实门将侧移慢且有反应延迟：限速 15 cm/s + 目标每 8 帧(0.2s)才刷新一次。
-    // 15 cm/s 是临界值：慢速带球到门前门将来得及没收；快速射门(球 y 变化>15cm/s)门将跟不上 → 能进球。
+    // 校准自真实 demo 门将：横向峰值 p90≈47cm/s 但有明显失误（真实跟球 y 差 p50=6.4cm、
+    // 25% 时间离球>10cm），脚本门将若完美跟球会封死球门导致我们进球虚低。
+    // 取 30cm/s + 0.3s 反应延迟（12帧），模拟 demo 门将"追不上快球"的真实表现。
     SimRobot &gk = s.yellow[0];
     static int gk_react = 0;                 // 反应延迟计数（每次 init_formation 后重置）
     static double gk_target = 90.0;
-    if (s.frames % 8 == 0) {                 // 每 0.2s 才重新瞄球
+    if (s.frames % 12 == 0) {                // 每 0.3s 才重新瞄球（demo 门将反应慢）
         gk_target = (s.bx < 60.0) ? (s.by < 70 ? 70.0 : (s.by > 110 ? 110.0 : s.by)) : 90.0;
         gk_react = 0;
     }
     double dy = gk_target - gk.y;
-    double maxdy = 15.0 / 40.0;              // 15 cm/s 横向限速（40Hz 每帧最大位移）
+    double maxdy = 30.0 / 40.0;              // 30 cm/s 横向限速（demo 峰值 47 但失误多）
     if (dy > maxdy) dy = maxdy; else if (dy < -maxdy) dy = -maxdy;
     gk.y += dy;
     gk.x = 8.0;                              // 门线站位固定
@@ -337,17 +347,29 @@ static void scripted_opponent(SimState &s) {
     for (int i = 1; i < 5; ++i) {
         if (i == chaser) {
             double db = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
-            // 永远站球后 6cm（x 减 6 = 球与己方门之间）推球向蓝门 x=220，
-            // 模拟"带球推进"而非侧面冲撞（避免把球弹飞/弹进角落）
-            double spd = (db < 15.0) ? 55.0 : 90.0;      // 近球减速，减少侧撞动量
-            drive(s.yellow[i], s.bx - 6.0, s.by, spd);
+            // 追击手模拟真实 demo：带球质量低（推球点不准+速度慢），球易被碰丢
+            //  —— 真实 demo 场均只进 0.8 球，脚本追击手若精准推球会失球虚高
+            double wob = 14.0 * std::sin(s.frames * 0.07 + i * 2.4);   // 更大抖动 ±14cm
+            double spd = (db < 20.0) ? 30.0 : 80.0;                    // 近球减速更狠
+            drive(s.yellow[i], s.bx - 6.0 + wob * 0.6, s.by + wob, spd);
         } else if (i == support) {
             // 协防：站到球与己方球门连线中点附近（截击传球路线），不直接贴球
             double mx = (s.bx + 0.0) * 0.4, my = (s.by + 90.0) * 0.5;
-            drive(s.yellow[i], mx, my, 55);
+            drive(s.yellow[i], mx, my, 50);
         } else {
-            // 阵型站位：中线散开（防反击）
+            // 阵型站位：中线散开（防反击）；站位点避开球（球在路径附近时让位），
+            // 避免站位机器人路过铲球把球推向己方球门（真实 demo 站位球员不主动碰球）
             double sx = 95.0 + (i - 1) * 8.0, sy = (i == 3) ? 50.0 : 130.0;
+            double d2b = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
+            if (d2b < 25.0) {
+                // 球近身：让开——向远离球方向退 20cm（保持阵型意图，但不贴球）
+                double ax = s.yellow[i].x - (s.bx - s.yellow[i].x);
+                double ay = s.yellow[i].y - (s.by - s.yellow[i].y);
+                double al = std::hypot(ax - s.yellow[i].x, ay - s.yellow[i].y);
+                if (al > 1e-6) { sx = s.yellow[i].x + (ax - s.yellow[i].x) / al * 20.0;
+                                 sy = s.yellow[i].y + (ay - s.yellow[i].y) / al * 20.0; }
+                sx = std::min(std::max(sx, 15.0), 205.0); sy = std::min(std::max(sy, 15.0), 165.0);
+            }
             drive(s.yellow[i], sx, sy, 40);
         }
     }
@@ -382,11 +404,16 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
 
         if (debug && f < debug) {
             s.dbg_contacts = 1;
-            printf("f%04d 球(%.0f,%.0f)v(%.1f,%.1f) 蓝1(%.0f,%.0f)rot%.0f | 黄0门(%.0f,%.0f) 黄1(%.0f,%.0f)\n",
+            printf("f%04d 球(%.0f,%.0f)v(%.1f,%.1f) | 蓝0门(%.0f,%.0f) 蓝1(%.0f,%.0f) 蓝2(%.0f,%.0f) 蓝3(%.0f,%.0f) 蓝4(%.0f,%.0f)\n",
                    f, s.bx, s.by, s.bvx, s.bvy,
-                   s.blue[1].x, s.blue[1].y, s.blue[1].rot,
+                   s.blue[0].x, s.blue[0].y, s.blue[1].x, s.blue[1].y,
+                   s.blue[2].x, s.blue[2].y, s.blue[3].x, s.blue[3].y, s.blue[4].x, s.blue[4].y);
+            printf("    黄0门(%.0f,%.0f) 黄1(%.0f,%.0f) 黄2(%.0f,%.0f) 黄3(%.0f,%.0f) 黄4(%.0f,%.0f)\n",
                    s.yellow[0].x, s.yellow[0].y,
-                   s.yellow[1].x, s.yellow[1].y);
+                   s.yellow[1].x, s.yellow[1].y,
+                   s.yellow[2].x, s.yellow[2].y,
+                   s.yellow[3].x, s.yellow[3].y,
+                   s.yellow[4].x, s.yellow[4].y);
         } else {
             s.dbg_contacts = 0;
         }
@@ -408,7 +435,7 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
         if (s.bx < 30.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_blue++;
         if (s.bx > 190.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_yellow++;
 
-        check_goal(s, &rng);
+        check_goal(s, &rng, debug);
         s.frames++;
 
         // 僵局规则（平台同款）：60 帧(1.5s)内球位移 <25cm → 判争球重置中圈
@@ -418,8 +445,10 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
         s.check_cnt++;
         if (s.check_cnt >= 60) {
             bool in_goal_mouth = ((s.bx < 40.0 || s.bx > 180.0) && s.by >= kGoalLo && s.by <= kGoalHi);
-            bool in_corner = (s.bx < 10.0 || s.bx > 210.0) && (s.by < 10.0 || s.by > 170.0);
-            if (!in_goal_mouth && std::hypot(s.bx - s.check_x, s.by - s.check_y) < 25.0) {
+            // 角落/墙边区：球贴墙缓慢滑动也算卡住（真实平台对卡角判 FreeBall）
+            bool in_wall_zone = (s.bx < 15.0 || s.bx > 205.0) || (s.by < 15.0 || s.by > 165.0);
+            double stall_dist = in_wall_zone ? 40.0 : 25.0;
+            if (!in_goal_mouth && std::hypot(s.bx - s.check_x, s.by - s.check_y) < stall_dist) {
                 init_formation(s, &rng);
             }
             s.check_x = s.bx; s.check_y = s.by; s.check_cnt = 0;
