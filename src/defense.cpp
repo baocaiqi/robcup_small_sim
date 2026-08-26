@@ -54,7 +54,7 @@ bool intercept_point(const WorldModel &wm, double line_dist,
 
     // 三角函数外推：球沿 (vx,vy) 方向到达拦截线时的 y（见 defense.hpp）。
     double y_at_line = 0.0;
-    if (!predict_y_at_x(bx, by, vx, vy, line_x, y_at_line)) {
+    if (!predict_y_at_x_reflect(bx, by, vx, vy, line_x, y_at_line)) {
         return false;   // vx≈0 或球背离球门 → 没有「朝门滚」的断球点
     }
 
@@ -174,8 +174,10 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         if (score > best_score) { best_score = score; best = i; }
     }
 
-    // 滞回：新目标分没超过当前目标 10% 就不换（防每帧换人原地转圈；
-    //   20% 太强，实测「选错人」占未贴住 19~22%——危险换人常被滞回挡掉）
+    // 滞回：新目标分没超过当前目标 5% 就不换（防每帧换人原地转圈；
+    //   20% 太强、10% 仍「选错人」占未贴住 19~22%——危险换人常被滞回挡掉。
+    //   1.1→1.05（2026-08-26）：修正尺子后「贴住最威胁」仅 5~27%，放宽到 5% 让
+    //   危险换人能切过去，但保留 5% 余量防两个威胁分接近时每帧抖换）
     if (current_target >= 0 && current_target < PLAYERS_PER_SIDE &&
         best != current_target) {
         double cur_d_ball = dist(wm.ball.x, wm.ball.y,
@@ -185,7 +187,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
                                               wm.opp[current_target].y);
         double cur_score = mark_threat(cur_d_ball, cur_d_goal, cur_appr, danger,
                                        current_target == dribbler);
-        if (best_score <= cur_score * 1.1) best = current_target;
+        if (best_score <= cur_score * 1.05) best = current_target;
     }
 
     // 危险门限：最终目标必须离球近(持球/抢点) 或 离门近(门前埋伏) 才贴；
