@@ -79,6 +79,30 @@ inline bool predict_y_at_x(double x, double y, double vx, double vy,
     return true;
 }
 
+// 带边墙反弹的轨迹预测：同 predict_y_at_x，但球中途撞 y=0 / y=180 边墙时
+//   按弹性反射（法向分量反号、切向不变）折返，预测反射后到达 target_x 时的 y。
+//   .rlg 实测：撞墙后法向分量反号（近似弹性、略有衰减），切向基本不变。
+//   只处理一次 y 墙反射；多次反射概率低、且断球点本就该保守回退，不做。
+//   供区域防守断球点 intercept_point 用——球朝边线滚时直线外推会算出界，
+//   实际球会弹回来，按反射后轨迹站位才断得到。
+inline bool predict_y_at_x_reflect(double x, double y, double vx, double vy,
+                                   double target_x, double &out_y) {
+    if (std::fabs(vx) < 1e-9) return false;
+    double t_total = (target_x - x) / vx;
+    if (t_total < 0.0) return false;
+    double y_end = y + vy * t_total;              // 直线终点
+    if (y_end >= 0.0 && y_end <= 180.0) {         // 不撞边墙：同直线
+        out_y = y_end;
+        return true;
+    }
+    // 撞 y 墙：反射折返。y_end 出界 ⇒ vy 必非 0（否则 y_end≈y 在界内）
+    double wall_y = (y_end < 0.0) ? 0.0 : 180.0;
+    double t_wall = (wall_y - y) / vy;            // 到达墙的时间
+    double t_rem  = t_total - t_wall;             // 反射后剩余时间（vx 不变）
+    out_y = wall_y + (-vy) * t_rem;               // 反射后 vy' = -vy
+    return true;
+}
+
 // 对方射门是否「在门框内且朝门」：球会到达己方门线且落点在门宽内。
 //   复用 predict_y_at_x（匀速直线外推），供后卫抢反弹位 + 后续防补射用。
 inline bool shot_on_target(const WorldModel &wm) {
@@ -137,7 +161,9 @@ inline double mark_dist() { return 16.0; }
 
 // 盯人预测帧数：用被盯者速度外推其未来位置再站位（速度前馈截击）。
 //   同速追逐追不上移动目标，预测「几帧后会在哪」才能截住；太大易超调、太小追不上。
-inline double mark_lead() { return 6.0; }
+//   6→3（2026-08-26）：修正尺子后复盘实测 marker 平均离理想点 38~52cm「追不到」，
+//   6 帧外推(≈15cm)过冲、目标点每帧跳，marker 永远追不上；降到 3 帧更稳。
+inline double mark_lead() { return 3.0; }
 
 // 堵传球线站位距离(cm)：被盯者是接球者（非持球者）且离球在此距离内 →
 //   传球随时发生，marker 从 goal-side 换到「球→被盯者」连线，掐断传球。
