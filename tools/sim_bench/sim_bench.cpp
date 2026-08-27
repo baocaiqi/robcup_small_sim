@@ -489,7 +489,12 @@ int main(int argc, char **argv) {
     int t_shots = 0;
     auto t0 = std::chrono::steady_clock::now();
     for (int g = 0; g < games; ++g) {
-        Rng rng(seed ? seed : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
+        // 修复：--seed N 时每场要用不同种子（seed + 场次偏移），
+        //   否则所有场次开局微扰完全相同 → 100 场其实是同一场的 100 份拷贝，
+        //   批次统计(均分/控球/射门)会退化成单样本，掩盖掉 --seed 复现实验的意义。
+        uint64_t gs = seed ? (seed + (uint64_t)g * 0x9E3779B97F4A7C15ull)
+                           : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+        Rng rng(gs);
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
         play_match(frames, self_play, debug, rng, b, y, poss, shots, zones);
         printf("  场%02d: 蓝 %ld : %ld 黄   控球率(蓝) %.0f%%   射门 %d   球位(黄后/中/蓝后) %ld%%/%ld%%/%ld%%\n",
