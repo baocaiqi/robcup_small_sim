@@ -82,6 +82,8 @@ struct SimState {
     long poss_blue = 0, poss_yellow = 0;   // 球权帧数（距球<15cm）
     int shots_blue = 0, shots_yellow = 0;  // 射门（球进入对方门区 30cm 内）
     long zone_blue_third = 0, zone_mid = 0, zone_yellow_third = 0;  // 球位分布
+    long ga_we_frames = 0, ga_we_episodes = 0, pa_we_frames = 0;   // 禁区纪律(我们)
+    bool prev_ga_viol = false;               // 上一帧是否门区违规（片段计数用）
     double check_x = 110, check_y = 90;   // 僵局检测：每 60 帧对比球位移
     int check_cnt = 0;
     int dbg_contacts = 0;              // 接触事件日志开关（调试用）
@@ -307,7 +309,9 @@ static bool check_goal(SimState &s, Rng *rng, int debug) {
 
 // 脚本对手：黄队——0 号守门；1 台追球（最近者），1 台协防，其余站中场阵型
 // 避免「4 台全追球」的蜂群压制（会无限触发我方围困检测导致僵局）
-static void scripted_opponent(SimState &s) {
+// 脚本对手（镜像版）：is_blue=true 时操作蓝队(守 x=220)，false 时操作黄队(守 x=0)。
+// 逻辑与攻防方向按守卫侧镜像，保证两侧强度一致（用于测"我们打黄队侧"的半场对称性）。
+static void scripted_opponent(SimState &s, bool is_blue) {
     auto drive = [](SimRobot &r, double tx, double ty, double spd) {
         double dx = tx - r.x, dy = ty - r.y;
         double d = std::hypot(dx, dy);
@@ -318,66 +322,79 @@ static void scripted_opponent(SimState &s) {
         double ka = 0.8;
         r.vl = v - ka * te; r.vr = v + ka * te;
     };
-    // 守门员：球进本方禁区附近(x<60)才快速跟球 y；球远时回中待命。
+    SimRobot *R = is_blue ? s.blue : s.yellow;   // 脚本队机器人
+    double gx_line = is_blue ? 220.0 : 0.0;      // 守门线
+    double gx_in = is_blue ? 212.0 : 8.0;        // 门将 x
+    double att_sign = is_blue ? -1.0 : 1.0;      // 进攻方向：蓝守右→攻左(-x)；黄守左→攻右(+x)
+    double field_w = 220.0;
+    // 守门员：球进本方禁区附近才快速跟球 y；球远时回中待命。
     // 校准自真实 demo 门将：横向峰值 p90≈47cm/s 但有明显失误（真实跟球 y 差 p50=6.4cm、
-    // 25% 时间离球>10cm），脚本门将若完美跟球会封死球门导致我们进球虚低。
+    // 25% 时间离球>10cm），脚本门将若完美跟球会封死球门导致进球虚低。
     // 取 30cm/s + 0.3s 反应延迟（12帧），模拟 demo 门将"追不上快球"的真实表现。
-    SimRobot &gk = s.yellow[0];
-    static int gk_react = 0;                 // 反应延迟计数（每次 init_formation 后重置）
+    SimRobot &gk = R[0];
+    static int gk_react = 0;
     static double gk_target = 90.0;
+    // 门将目标：球在本方半场才跟 y（蓝守右 → 球 x>160；黄守左 → 球 x<60）
+    bool ball_in_own_half = is_blue ? (s.bx > field_w - 60.0) : (s.bx < 60.0);
     if (s.frames % 12 == 0) {                // 每 0.3s 才重新瞄球（demo 门将反应慢）
-        gk_target = (s.bx < 60.0) ? (s.by < 70 ? 70.0 : (s.by > 110 ? 110.0 : s.by)) : 90.0;
+        gk_target = ball_in_own_half ? (s.by < 70 ? 70.0 : (s.by > 110 ? 110.0 : s.by)) : 90.0;
         gk_react = 0;
     }
     double dy = gk_target - gk.y;
     double maxdy = 30.0 / 40.0;              // 30 cm/s 横向限速（demo 峰值 47 但失误多）
     if (dy > maxdy) dy = maxdy; else if (dy < -maxdy) dy = -maxdy;
     gk.y += dy;
-    gk.x = 8.0;                              // 门线站位固定
-    gk.rot = 0;                              // 面向场内
+    gk.x = gx_in;                            // 门线站位固定
+    gk.rot = is_blue ? 180.0 : 0.0;          // 面向场内
     gk.vl = gk.vr = 0;                       // 位置直接控制，不走差速
     // 找离球最近的追击手 + 次近协防
     int chaser = 1, support = 2;
     double best = 1e9, second = 1e9;
     for (int i = 1; i < 5; ++i) {
-        double d = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
+        double d = std::hypot(s.bx - R[i].x, s.by - R[i].y);
         if (d < best) { second = best; support = chaser; best = d; chaser = i; }
         else if (d < second) { second = d; support = i; }
     }
     for (int i = 1; i < 5; ++i) {
         if (i == chaser) {
-            double db = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
+            double db = std::hypot(s.bx - R[i].x, s.by - R[i].y);
             // 追击手模拟真实 demo：带球质量低（推球点不准+速度慢），球易被碰丢
             //  —— 真实 demo 场均只进 0.8 球，脚本追击手若精准推球会失球虚高
             double wob = 14.0 * std::sin(s.frames * 0.07 + i * 2.4);   // 更大抖动 ±14cm
             double spd = (db < 20.0) ? 30.0 : 80.0;                    // 近球减速更狠
-            drive(s.yellow[i], s.bx - 6.0 + wob * 0.6, s.by + wob, spd);
+            // 站球后推球（朝对方球门方向）：推球点 = 球后方 6cm = 靠己方门一侧。
+            //   黄队(att_sign=+1)攻+x → 站 bx-6；蓝队(att_sign=-1)攻-x → 站 bx+6。
+            drive(R[i], s.bx - att_sign * 6.0 + wob * 0.6, s.by + wob, spd);
         } else if (i == support) {
-            // 协防：站到球与己方球门连线中点附近（截击传球路线），不直接贴球
-            double mx = (s.bx + 0.0) * 0.4, my = (s.by + 90.0) * 0.5;
-            drive(s.yellow[i], mx, my, 50);
+            // 协防：站到球与己方球门连线 40% 处（截击传球路线），不直接贴球。
+            //   黄队守 x=0 → (bx+0)*0.4；蓝队守 x=220 → (bx+220)*0.6（镜像后同样 40% 贴近己方门）
+            double mx = is_blue ? (s.bx + 220.0) * 0.6 : (s.bx + 0.0) * 0.4;
+            double my = (s.by + 90.0) * 0.5;
+            drive(R[i], mx, my, 50);
         } else {
             // 阵型站位：中线散开（防反击）；站位点避开球（球在路径附近时让位），
             // 避免站位机器人路过铲球把球推向己方球门（真实 demo 站位球员不主动碰球）
-            double sx = 95.0 + (i - 1) * 8.0, sy = (i == 3) ? 50.0 : 130.0;
-            double d2b = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
+            double sx = (is_blue ? 125.0 - (i - 1) * 8.0 : 95.0 + (i - 1) * 8.0);
+            double sy = (i == 3) ? 50.0 : 130.0;
+            double d2b = std::hypot(s.bx - R[i].x, s.by - R[i].y);
             if (d2b < 25.0) {
                 // 球近身：让开——向远离球方向退 20cm（保持阵型意图，但不贴球）
-                double ax = s.yellow[i].x - (s.bx - s.yellow[i].x);
-                double ay = s.yellow[i].y - (s.by - s.yellow[i].y);
-                double al = std::hypot(ax - s.yellow[i].x, ay - s.yellow[i].y);
-                if (al > 1e-6) { sx = s.yellow[i].x + (ax - s.yellow[i].x) / al * 20.0;
-                                 sy = s.yellow[i].y + (ay - s.yellow[i].y) / al * 20.0; }
+                double ax = R[i].x - (s.bx - R[i].x);
+                double ay = R[i].y - (s.by - R[i].y);
+                double al = std::hypot(ax - R[i].x, ay - R[i].y);
+                if (al > 1e-6) { sx = R[i].x + (ax - R[i].x) / al * 20.0;
+                                 sy = R[i].y + (ay - R[i].y) / al * 20.0; }
                 sx = std::min(std::max(sx, 15.0), 205.0); sy = std::min(std::max(sy, 15.0), 165.0);
             }
-            drive(s.yellow[i], sx, sy, 40);
+            drive(R[i], sx, sy, 40);
         }
     }
 }
 
 // 一场比赛
-static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_blue, long &r_yellow,
-                       double &r_poss, int &r_shots, long r_zones[3]) {
+// opp_mode: 0=脚本对手打黄队(我们守x=220, 默认)  1=自我博弈  2=脚本对手打蓝队(我们守x=0, 测半场对称)
+static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_blue, long &r_yellow,
+                       double &r_poss, int &r_shots, long r_zones[3], long &r_ga_frames, long &r_ga_eps) {
     SimState s;
     init_formation(s, &rng);
     TeamContext ctx_blue{true}, ctx_yellow{false};
@@ -386,20 +403,24 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
     Environment env_b, env_y;
 
     for (int f = 0; f < frames; ++f) {
-        // 蓝队决策
-        fill_env(env_b, s, true);
-        wm_b.update(&env_b, ctx_blue);
-        strat_b.run(wm_b);
-        for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
+        // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
+        if (opp_mode == 2) {
+            scripted_opponent(s, true);
+        } else {
+            fill_env(env_b, s, true);
+            wm_b.update(&env_b, ctx_blue);
+            strat_b.run(wm_b);
+            for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
+        }
 
-        // 黄队决策
-        if (self_play) {
+        // 黄队决策：opp_mode=0 时黄队是脚本；否则黄队是我们的策略
+        if (opp_mode == 0) {
+            scripted_opponent(s, false);
+        } else {
             fill_env(env_y, s, false);
             wm_y.update(&env_y, ctx_yellow);
             strat_y.run(wm_y);
             for (int i = 0; i < 5; ++i) { s.yellow[i].vl = wm_y.home[i].vl; s.yellow[i].vr = wm_y.home[i].vr; }
-        } else {
-            scripted_opponent(s);
         }
 
         if (debug && f < debug) {
@@ -435,6 +456,31 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
         if (s.bx < 30.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_blue++;
         if (s.bx > 190.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_yellow++;
 
+        // 禁区纪律统计（诊断用，不进比分）：
+        //   FIRA 规则：进攻方在**对方门区**(球门前50×15)除门将外停留>20帧 或 门区2+人 → 罚点球
+        //   ——真实比赛我们场均被罚1.9个点球（禁区聚集），这里看 sim 是否复现同样行为
+        {
+            // 我们进攻的门区：opp_mode=0/1 我们守x=220攻x=0 → 对方门区在 x≈0
+            //   opp_mode=2 我们守x=0攻x=220 → 对方门区在 x≈220
+            double opp_ga_x = (opp_mode == 2) ? 220.0 : 0.0;
+            // 门区：球门前 50×15（x 以门线为基准向内 50，y 门宽 ±15/2）
+            double ga_lo = opp_ga_x == 0.0 ? 0.0 : 220.0 - 50.0;
+            double ga_hi = opp_ga_x == 0.0 ? 50.0 : 220.0;
+            int blue_in_ga = 0, yellow_in_ga = 0;
+            for (int i = 1; i < 5; ++i) {   // 跳过门将(0号)
+                double by = s.blue[i].y;
+                if (s.blue[i].x > ga_lo && s.blue[i].x < ga_hi && by > 62.5 && by < 117.5) blue_in_ga++;
+                double yy = s.yellow[i].y;
+                if (s.yellow[i].x > ga_lo && s.yellow[i].x < ga_hi && yy > 62.5 && yy < 117.5) yellow_in_ga++;
+            }
+            // 只有"我们"是 opp_mode==2 ? yellow : blue
+            int we_in_ga = opp_mode == 2 ? yellow_in_ga : blue_in_ga;
+            bool ga_viol = we_in_ga >= 2;            // 对方门区2+人（会被罚点球）
+            if (ga_viol) s.ga_we_frames++;
+            if (ga_viol && !s.prev_ga_viol) s.ga_we_episodes++;   // 连续片段计数
+            s.prev_ga_viol = ga_viol;
+        }
+
         check_goal(s, &rng, debug);
         s.frames++;
 
@@ -459,34 +505,46 @@ static void play_match(int frames, bool self_play, int debug, Rng &rng, long &r_
         else if (s.bx < 147.0) s.zone_mid++;
         else s.zone_yellow_third++;
     }
-    r_blue = s.score_blue; r_yellow = s.score_yellow;
-    r_poss = (double)s.poss_blue / (s.poss_blue + s.poss_yellow + 1) * 100.0;
-    r_shots = s.shots_blue;
+    // opp_mode=2 时"蓝"=脚本、"黄"=我们：控球/射门统计换边输出
+    r_blue = opp_mode == 2 ? s.score_yellow : s.score_blue;
+    r_yellow = opp_mode == 2 ? s.score_blue : s.score_yellow;
+    double poss_us = opp_mode == 2 ? s.poss_yellow : s.poss_blue;
+    double poss_opp = opp_mode == 2 ? s.poss_blue : s.poss_yellow;
+    r_poss = poss_us / (poss_us + poss_opp + 1) * 100.0;
+    r_shots = opp_mode == 2 ? s.shots_yellow : s.shots_blue;
+    // 球位分布：蓝后(x<73)/中/黄后(x>147) 标签不变（与谁是我们无关）
     r_zones[0] = s.zone_blue_third; r_zones[1] = s.zone_mid; r_zones[2] = s.zone_yellow_third;
+    r_ga_frames = s.ga_we_frames; r_ga_eps = s.ga_we_episodes;
 }
 
 int main(int argc, char **argv) {
     int games = 3, frames = 24000;
     int debug = 0;
-    bool self_play = false;
+    int opp_mode = 0;                        // 0=脚本打黄(我们守x=220) 1=自我博弈 2=脚本打蓝(我们守x=0)
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--games" && i + 1 < argc) games = std::atoi(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
-        else if (a == "--opp" && i + 1 < argc) self_play = (std::string(argv[++i]) == "self");
+        else if (a == "--opp" && i + 1 < argc) {
+            std::string o = argv[++i];
+            if (o == "self") opp_mode = 1;
+            else if (o == "yellow") opp_mode = 2;      // 我们打黄队侧(守x=0)，脚本打蓝
+            else opp_mode = 0;                          // scripted（默认）
+        }
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed = (uint64_t)std::atoll(argv[++i]);
         else if (a == "--help") {
-            printf("sim_bench: --games N --frames N --opp scripted|self [--debug N] [--seed N]\n");
+            printf("sim_bench: --games N --frames N --opp scripted|self|yellow [--debug N] [--seed N]\n");
             return 0;
         }
     }
-    printf("=== sim_bench: games=%d frames/场=%d 对手=%s ===\n", games, frames,
-           self_play ? "自我博弈" : "脚本对手");
+    const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : "脚本对手");
+    printf("=== sim_bench: games=%d frames/场=%d 模式=%s ===\n", games, frames, mode_name);
     long t_blue = 0, t_yellow = 0;
     double t_poss = 0;
     int t_shots = 0;
+    long t_ga = 0, t_ga_eps = 0;
     auto t0 = std::chrono::steady_clock::now();
     for (int g = 0; g < games; ++g) {
         // 修复：--seed N 时每场要用不同种子（seed + 场次偏移），
@@ -496,17 +554,23 @@ int main(int argc, char **argv) {
                            : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
         Rng rng(gs);
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
-        play_match(frames, self_play, debug, rng, b, y, poss, shots, zones);
-        printf("  场%02d: 蓝 %ld : %ld 黄   控球率(蓝) %.0f%%   射门 %d   球位(黄后/中/蓝后) %ld%%/%ld%%/%ld%%\n",
+        long ga_frames = 0, ga_eps = 0;
+        play_match(frames, opp_mode, debug, rng, b, y, poss, shots, zones, ga_frames, ga_eps);
+        // play_match 已按 opp_mode 归一化：返回的 b=我们进球、y=对手进球
+        printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次\n",
                g + 1, b, y, poss, shots,
-               zones[0] * 100 / (long)frames, zones[1] * 100 / (long)frames, zones[2] * 100 / (long)frames);
+               zones[0] * 100 / (long)frames, zones[1] * 100 / (long)frames, zones[2] * 100 / (long)frames,
+               ga_frames, ga_eps);
         t_blue += b; t_yellow += y; t_poss += poss; t_shots += shots;
+        t_ga += ga_frames; t_ga_eps += ga_eps;
     }
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
-    printf("=== 汇总: 蓝 %ld : %ld 黄 (均 %.1f : %.1f)   平均控球 %.1f%%   平均射门 %.1f\n",
+    printf("=== 汇总: 我们 %ld : %ld 对手 (均 %.1f : %.1f)   平均控球 %.1f%%   平均射门 %.1f\n",
            t_blue, t_yellow, (double)t_blue / games, (double)t_yellow / games,
            t_poss / games, (double)t_shots / games);
+    printf("=== 禁区纪律(我们): 门区2+人 均 %.1f 帧/场, %.1f 次/场 ===\n",
+           (double)t_ga / games, (double)t_ga_eps / games);
     printf("=== 耗时 %.2fs, 场均 %.2fs (%.1f 帧/秒) ===\n", sec, sec / games, games * (double)frames / sec);
     return 0;
 }
