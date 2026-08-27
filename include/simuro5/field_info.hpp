@@ -59,6 +59,26 @@ inline bool in_opp_penalty_area(const TeamContext &ctx, double x, double y) {
     return in_penalty_area(mirror, x, y);
 }
 
+// 对方门区（小禁区 50×15）：FIRA 规则——进攻方在对方门区 2+ 人或单人停留>20周期 → 罚点球。
+// 真实比赛我方场均被罚 1.9 个点球（sim_bench 复现：12.9 次违规/场），
+// 非持球进攻者的站位必须避开对方门区。
+inline bool in_opp_goal_area(const TeamContext &ctx, double x, double y) {
+    TeamContext mirror = ctx; mirror.is_blue = !ctx.is_blue;
+    return in_goal_area(mirror, x, y);
+}
+
+// 对方门区禁入约束：站位点落入对方门区时，沿 x 推到门区前缘外 5cm（y 夹回门宽内侧）。
+// 注意：ACTIVE 带球/射门不调用本函数——单人压门抢射是正常进攻，
+// 规则只罚"2+ 人聚集"和"单人停留>20 帧"。
+inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y) {
+    if (!in_opp_goal_area(ctx, x, y)) return;
+    double ogx = ctx.opp_goal_x();
+    double ad = ctx.attack_dir();
+    // 对方门区前缘（朝场内方向 50cm 处），再往外让 5cm
+    x = ogx - ad * 55.0;
+    y = clamp(y, 70.0, 110.0);
+}
+
 // 是否在场地内
 inline bool in_field(double x, double y) {
     return in_rect(x, y, 0.0, TeamContext::FIELD_LENGTH, 0.0, TeamContext::FIELD_WIDTH);
