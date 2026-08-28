@@ -6,6 +6,7 @@
 // ============================================================
 #include "simuro5/defense.hpp"
 #include "simuro5/field_info.hpp"
+#include "simuro5/role_assignment.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -29,9 +30,11 @@ static constexpr double kMinBallSpeed = 3.0;
 static constexpr double kMinX = 12.0, kMaxX = 208.0;
 static constexpr double kMinY = 15.0, kMaxY = 165.0;
 
-// 可达性判断：防守队员最大直线速度(cm/帧)。保守值，需用 rlg 复盘实测标定。
-//   （motion 基准车速 vc=100 是轮速量级，换算成每帧位移要现场标定，这里先取 2.0）
-static constexpr double kMySpeed = 2.0;
+// 可达性判断：防守队员直线速度(cm/帧)。
+//   标定来源：world_model.cpp 对方速度差分处实测「机器人正常 ~2.5 cm/帧」
+//   （kMaxOppVel=8.0 那条注释），同物理引擎下我方速度一致，取 2.5 与实测对齐。
+//   原 2.0 是未标定的保守拍脑袋值——偏低会高估我到达时间、漏掉实际追得上的断球点。
+static constexpr double kMySpeed = 2.5;
 
 // 可达余量倍数：我到达时间 ≤ 球到达时间 × 该系数 才认为追得上。
 //   >1 给自己留缓冲（比如 1.2 = 多留 20% 时间余量）。
@@ -201,6 +204,70 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         }
     }
     return best;
+}
+
+// ============================================================
+// 二抢一（双人夹击）：持球者带球推进到门前危险区时，再补一个防守者上前，
+//   与被动盯人者（passive）形成包夹——一个正面封、一个斜侧抢，逼其变向丢球。
+//   只让 assist/midfield 里「非清道夫、且离持球者更近」的那一个上前，
+//   另一个留在区域里保持纵深（两个同时压上会被一脚直塞打穿）。
+// ============================================================
+static constexpr double kDoubleTeamDangerDist = 100.0;  // 持球者离门多近才夹抢(cm)
+static constexpr double kDoubleTeamLateral    = 20.0;   // 夹抢点横向偏移(cm)：与盯人者错开角度
+static constexpr double kDoubleTeamCarryDist  = 15.0;   // 持球者判定：离球 <此值视为正带球
+
+bool double_team_point(const WorldModel &wm, int defender_id,
+                       double &out_x, double &out_y) {
+    // 门槛①：威胁足够高（球在己方半场，passive 已人盯人）
+    if (wm.threat_level < 0.6) return false;
+
+    // 门槛②：有明确持球者（离球最近且足够近）
+    int dribbler = -1;
+    double dmin = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        if (d < dmin) { dmin = d; dribbler = i; }
+    }
+    if (dribbler < 0 || dmin >= kDoubleTeamCarryDist) return false;
+
+    // 门槛③：球已在己方罚球区 → 交给门将+被动防守，区域防守者不冲进去（禁区纪律）
+    if (in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y)) return false;
+
+    // 门槛④：持球者已推进到离门 kDoubleTeamDangerDist 内才夹抢——
+    //   过早夹抢会把第二人提前调离区域、留出纵深，反被一脚直塞打穿。
+    if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamDangerDist) return false;
+
+    // 只让「非清道夫、且离持球者更近」的那一个上前；离得远的留区域保持纵深。
+    double ox = wm.opp[dribbler].x, oy = wm.opp[dribbler].y;
+    double my_d = dist(wm.home[defender_id].x, wm.home[defender_id].y, ox, oy);
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (i == defender_id || i == wm.sweeper_id) continue;
+        if (wm.role[i] != ROLE_ASSIST && wm.role[i] != ROLE_MIDFIELD) continue;
+        double d = dist(wm.home[i].x, wm.home[i].y, ox, oy);
+        if (d < my_d) return false;   // 有更近的队友，它去夹，我留区域
+    }
+
+    // 夹抢站位：持球者→门心方向上 mark_dist 处（与 passive 同深、不同角），
+    //   再横向偏 kDoubleTeamLateral 到持球者所在一侧——封它沿边线外切的角度，
+    //   把它往中路门将/passive 怀里赶。
+    double gx = wm.ctx.our_goal_x(), gy = 90.0;
+    double dx = gx - ox, dy = gy - oy;
+    double len = std::hypot(dx, dy);
+    if (len < 1e-6) return false;
+    dx /= len; dy /= len;                       // 持球者→门心 单位向量
+    double nx = -dy, ny = dx;                   // 垂直向量（横向）
+    double side = (oy >= 90.0) ? 1.0 : -1.0;    // 偏到持球者所在一侧
+    out_x = ox + dx * mark_dist() + nx * side * kDoubleTeamLateral;
+    out_y = oy + dy * mark_dist() + ny * side * kDoubleTeamLateral;
+
+    // 禁区纪律：夹抢点若落入己方罚球区，退到罚球区前缘外
+    if (in_penalty_area(wm.ctx, out_x, out_y)) {
+        out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
+        out_y = clamp(oy, 72.5, 107.5);
+    }
+    out_x = clamp(out_x, 0.0, TeamContext::FIELD_LENGTH);
+    out_y = clamp(out_y, 0.0, TeamContext::FIELD_WIDTH);
+    return true;
 }
 
 }  // namespace simuro5
