@@ -33,3 +33,6 @@ log/
 
 #个人学习笔记
 notes/
+
+# 仿真评估结果
+sim_eval_*.json
