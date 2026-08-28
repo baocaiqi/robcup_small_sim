@@ -33,6 +33,9 @@ void Strategy::run(WorldModel &wm) {
     // 4. 角色分配（固定角色：0=GK 1=ACTIVE 2=ASSIST 3=MID 4=PASSIVE）
     ra_.assign(wm);
 
+    // 4.5 清道夫指派（球在防守三区拉边时，抽一个区域防守者钉中路封远门柱/横传）
+    update_sweeper(wm);
+
     // 5. 按角色执行（薄壳调度）
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         switch (wm.role[i]) {
@@ -79,6 +82,39 @@ double Strategy::threat_from_state(const WorldModel &wm) const {
         threat = our_half ? 0.8 : 0.6;
     }
     return threat;
+}
+
+void Strategy::update_sweeper(WorldModel &wm) {
+    wm.sweeper_id = -1;
+    if (wm.team_state != TS_DEFENSE) return;
+
+    const TeamContext &ctx = wm.ctx;
+    double bx = wm.ball.x, by = wm.ball.y;
+
+    // 触发：球在本方防守三区（离门 1/3 场以内）且明显拉边（|y-90|>30）。
+    //   这种局面球-门连线的静态站位会把所有区域防守者都拽到球侧（Y 同侧），
+    //   中路/远门柱真空，横传或内切一打就穿——抽一个区域防守者回收中路兜底。
+    const double third = TeamContext::FIELD_LENGTH / 3.0;
+    bool our_third = (ctx.attack_dir() > 0) ? (bx < third)
+                                            : (bx > TeamContext::FIELD_LENGTH - third);
+    if (!our_third || std::fabs(by - 90.0) <= 30.0) return;
+
+    // 从两个区域防守者(ASSIST/MIDFIELD)里挑「离球更远」的那个做清道夫：
+    //   离球近的继续压上/断球，离球远的回收中路（少跑路、也正好在远侧）。
+    int ids[2] = { -1, -1 };
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (wm.role[i] == ROLE_ASSIST)        ids[0] = i;
+        else if (wm.role[i] == ROLE_MIDFIELD) ids[1] = i;
+    }
+    double d0 = (ids[0] >= 0) ? dist(bx, by, wm.home[ids[0]].x, wm.home[ids[0]].y) : -1.0;
+    double d1 = (ids[1] >= 0) ? dist(bx, by, wm.home[ids[1]].x, wm.home[ids[1]].y) : -1.0;
+    if (d0 < 0.0 && d1 < 0.0) return;
+    wm.sweeper_id = (d0 >= d1) ? ids[0] : ids[1];
+
+    // 清道夫站位：罚球区前缘外侧(gx+85)、中路 y=90。
+    //   y=90 封中路与远门柱；x=85 尊重「非门将不进己方罚球区」纪律(见 situation.cpp)。
+    wm.sweeper_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
+    wm.sweeper_y = 90.0;
 }
 
 }  // namespace simuro5

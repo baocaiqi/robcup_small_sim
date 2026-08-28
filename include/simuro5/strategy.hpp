@@ -23,6 +23,9 @@ private:
     // 攻防状态机：滞回计数 + 状态翻转 + 事件标志 + 威胁分级
     void update_team_state(WorldModel &wm);
     double threat_from_state(const WorldModel &wm) const;
+
+    // 清道夫(远侧覆盖)指派：球在防守三区拉边时挑一个区域防守者钉中路封远门柱/横传
+    void update_sweeper(WorldModel &wm);
 };
 
 }  // namespace simuro5

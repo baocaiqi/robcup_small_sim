@@ -62,6 +62,11 @@ struct WorldModel {
     // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
 
+    // 清道夫（远侧覆盖）：球在防守三区拉边时，指定一个区域防守者钉中路封远门柱/横传。
+    //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。
+    int sweeper_id = -1;
+    double sweeper_x = 0, sweeper_y = 90;   // 清道夫站位点（罚球区前缘外侧、中路）
+
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;
     double assist_x = 0, assist_y = 90;
