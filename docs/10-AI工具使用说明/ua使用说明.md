@@ -19,7 +19,8 @@
 | `.ua/fingerprints.json` | 结构指纹基线（增量更新用，别删） |
 | `.ua/config.json` | 配置（outputLanguage=zh） |
 | `.ua/intermediate/scan-result.json` | 扫描清单（增量更新复用，别删） |
-| `/home/lalo/work/robcup/work/knowledge-graph.json` | 分析整理目录副本（work 目录） |
+| `docs/09-分析整理/knowledge-graph.json` | **仓库内副本（随 git 分发）**——队友克隆仓库即有，读它**零 token**，不用自己跑 /understand |
+| `/home/lalo/work/robcup/work/knowledge-graph.json` | 分析整理目录副本（本地 work 目录，不进仓库） |
 | `/home/lalo/work/robcup/work/07-ua知识图谱说明.md` | 图谱统计与修复记录 |
 
 图谱内容速览：function 92 / document 37 / file 34 / class 4 / config 1；边以 documents(151)/calls(103)/contains(100)/exports(69)/imports(48)/related(51) 为主。
@@ -49,6 +50,26 @@ jq '.tour[] | {order,title,nodeIds}' ...                     # 导览
 ```
 
 **方式 3：让 AI 查**——把 knowledge-graph.json 给任何 AI，让它按上面 168 节点/530 边回答；或复用 understand-chat 技能。
+
+## 队友怎么免 token 看图谱（重要）
+
+**全量 /understand 一次 30-50 万 token（子代理消耗）。队友/后来者不要自己跑！**
+
+图谱副本已随仓库分发，克隆即可零成本读取：
+
+```bash
+# 仓库内副本（已提交、随 git 分发）：
+docs/09-分析整理/knowledge-graph.json
+
+# 直接读分层/函数/tour：
+jq '.layers[].name' docs/09-分析整理/knowledge-graph.json
+jq '.nodes[] | select(.type=="function") | .name' docs/09-分析整理/knowledge-graph.json
+jq '.tour[] | {order,title}' docs/09-分析整理/knowledge-graph.json
+```
+
+也可以把该 JSON 直接丢给任何 AI 提问（方式 3），全程不耗 ua 的 token。
+
+**注意增量更新的前提**：ua 增量更新依赖 `.ua/fingerprints.json` + `.ua/intermediate/scan-result.json` 做基线，这两个文件在 `.ua/` 内、**被 .gitignore 忽略、不进仓库**。→ 队友克隆后**没有指纹基线**，想增量更新只能先全量跑一次 `/understand --full`（贵），或者由本机维护者定期重跑后在 issues/群聊同步更新。改代码后的小改动优先走增量，全量只在动接口/新增模块时用。
 
 ## 怎么重新生成 / 更新
 
