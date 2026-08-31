@@ -1,0 +1,16 @@
+  83|     double bx = wm.ball.x, by = wm.ball.y;
+  84|     double vx = wm.ball.vx, vy = wm.ball.vy;
+  85|     double danger = ball_danger_speed(wm);   // 球朝己方门的速度分量（横滚≈0、背离=0，才是真威胁）
+  86|     double db = dist(r.x, r.y, bx, by);      // 守门员到球的当前距离
+  87|     // 门球/定位球重启：球停在我方门前 → 门将主动沿中线穿过球把它推出去。
+  88|     //   否则球静止时门将只停在球后 8cm 或退到门线上，球被推/滚到门线外又触发门球，
+  89|     //   形成连续门球死循环（复盘实测一局循环 17+ 次）。
+  90|     if (std::hypot(vx, vy) < 2.0 && ctx.dist_our_goal(bx) < 40.0 && db < kClearDist) {
+  91|         double px = bx + ctx.attack_dir() * (kPushDist + 6.0);   // 越过球，穿球推进
+  92|         double py = clamp(by, 78.0, 102.0);                       // y 略拉向中线
+  93|         clamp_goalie_area(ctx, px, py);
+  94|         motion::position(r, px, py);
+  95|         return;
+  96|     }
+  97|     // 门将站位深度：球贴近门线(<15cm)后撤贴门(3cm)，防球沿门线/身后滚过；否则 10cm 封角度
+  98|     double gx = ctx.our_goal_x() + ctx.attack_dir() *

@@ -36,6 +36,10 @@ void position(RobotState &r, double tx, double ty) {
     else                 Ka = 28.0 / 90.0;
 
     double drive = vc * (1.0 / (1.0 + std::exp(-3.0 * de)) - 0.25);
+    // 近目标刹车：de < 15cm 线性降速，防高速冲过目标——
+    //   门将回防冲进球门(实测冲到 x=223 越门线)、后卫盯人冲过身位。
+    //   15cm 处全速、0cm 归零；推球/清球点在球旁约 8cm，仍保有 ~60cm/s 够用。
+    if (de < 15.0) drive *= de / 15.0;
 
     if (te > 95.0 || te < -95.0) {
         // 目标在正后方：倒着走

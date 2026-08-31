@@ -1,0 +1,30 @@
+  83|     double bx = wm.ball.x, by = wm.ball.y;
+  84|     double vx = wm.ball.vx, vy = wm.ball.vy;
+  85|     double danger = ball_danger_speed(wm);   // 球朝己方门的速度分量（横滚≈0、背离=0，才是真威胁）
+  86|     double db = dist(r.x, r.y, bx, by);      // 守门员到球的当前距离
+  87|     // 死球解围：球停在我方门前 → 门将把它往场地方向顶出去（远离己门），避免门球死循环。
+  88|     //   旧版固定站到球远侧(bx + attack_dir*14)，隐含假设门将在【门侧】才能穿过球推出；
+  89|     //   一旦门将在【场侧】(球夹在门将与门线之间)，它只会越退越远、眼睁睁看球滚进门
+  90|     //   → 乌龙（demo 战 13 球里 11 球是它）。修正：按门将相对球的位置分两种情况。
+  91|     if (std::hypot(vx, vy) < 2.0 && ctx.dist_our_goal(bx) < 40.0 && db < kClearDist) {
+  92|         double ad = ctx.attack_dir();
+  93|         double s = (r.x - bx) * (-ad);   // >0 门将在门侧(球与门线之间)；<0 门将在场侧
+  94|         double px, py;
+  95|         if (s >= 0.0) {
+  96|             // 门将在门侧：直接穿球往场地方向顶出去（原有正确分支）
+  97|             px = bx + ad * (kPushDist + 6.0);
+  98|             py = clamp(by, 78.0, 102.0);
+  99|         } else {
+ 100|             // 门将在场侧：不能直线穿过球（会把球顶进门）。横向绕到球侧方→先到门侧贴位，
+ 101|             //   下一帧门将已到门侧即转入上分支，再把球顶出去。
+ 102|             double side = (by >= 90.0) ? -1.0 : 1.0;   // 朝中线一侧绕（上半→下，下半→上）
+ 103|             px = bx - ad * (kPushDist + 4.0);          // 门侧贴位
+ 104|             py = clamp(by + side * kLateral, 74.0, 106.0);
+ 105|         }
+ 106|         clamp_goalie_area(ctx, px, py);
+ 107|         motion::position(r, px, py);
+ 108|         return;
+ 109|     }
+ 110|     // 门将站位深度：球贴近门线(<15cm)后撤贴门(3cm)，防球沿门线/身后滚过；否则 10cm 封角度
+ 111|     double gx = ctx.our_goal_x() + ctx.attack_dir() *
+ 112|                 (std::fabs(bx - ctx.our_goal_x()) < 15.0 ? 3.0 : kGuardDist);
