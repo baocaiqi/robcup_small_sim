@@ -25,11 +25,12 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 SIM = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'Release', 'sim_bench.exe')
 
-def run_batch(games=50, frames=24000, seed=1, opp='scripted', exe=None):
+def run_batch(games=50, frames=24000, seed=1, opp='scripted', exe=None, strength=2.0):
     exe = exe or os.path.abspath(SIM)
     if not os.path.exists(exe):
         raise SystemExit(f"找不到 sim_bench.exe: {exe}（先 cmake --build build --config Release --target sim_bench）")
-    cmd = [exe, '--games', str(games), '--frames', str(frames), '--opp', opp, '--seed', str(seed)]
+    cmd = [exe, '--games', str(games), '--frames', str(frames), '--opp', opp,
+           '--seed', str(seed), '--strength', str(strength)]
     r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
     if r.returncode != 0:
         raise SystemExit(f"sim_bench 运行失败:\n{r.stderr}")
@@ -39,13 +40,20 @@ def run_batch(games=50, frames=24000, seed=1, opp='scripted', exe=None):
     if not m:
         raise SystemExit(f"无法解析汇总行:\n{out[-500:]}")
     ga = re.search(r'禁区纪律\(我们\): 门区2\+人 均 ([\d.]+) 帧/场, ([\d.]+) 次/场', out)
+    solo = re.search(r'单人停留>20帧 均 ([\d.]+) 帧/场, ([\d.]+) 次/场', out)
+    fb = re.search(r'争球重置 均 ([\d.]+) 次/场\(角区 ([\d.]+)\)，角区救球触发 ([\d.]+) 次/场', out)
     result = dict(
-        games=games, frames=frames, opp=opp, seed=seed,
+        games=games, frames=frames, opp=opp, seed=seed, strength=strength,
         us_mean=float(m.group(3)), opp_mean=float(m.group(4)),
         us_total=int(m.group(1)), opp_total=int(m.group(2)),
         poss=float(m.group(5)), shots=float(m.group(6)),
         ga_frames=float(ga.group(1)) if ga else None,
         ga_episodes=float(ga.group(2)) if ga else None,
+        ga_solo_frames=float(solo.group(1)) if solo else None,
+        ga_solo_episodes=float(solo.group(2)) if solo else None,
+        freeball=float(fb.group(1)) if fb else None,
+        freeball_corner=float(fb.group(2)) if fb else None,
+        corner_rescue=float(fb.group(3)) if fb else None,
     )
     return result
 
@@ -60,6 +68,10 @@ def compare(a, b):
         ('控球率%', a['poss'], b['poss'], '↑好'),
         ('射门', a['shots'], b['shots'], '↑好'),
         ('门区违规/场', a.get('ga_episodes'), b.get('ga_episodes'), '↓好'),
+        ('单人停留>20帧/场', a.get('ga_solo_episodes'), b.get('ga_solo_episodes'), '↓好'),
+        ('争球重置/场(≈FreeBall)', a.get('freeball'), b.get('freeball'), '↓好'),
+        ('角区重置/场', a.get('freeball_corner'), b.get('freeball_corner'), '↓好'),
+        ('角区救球触发/场', a.get('corner_rescue'), b.get('corner_rescue'), '↑好'),
     ]
     for name, va, vb, good in rows:
         if va is None or vb is None:
@@ -86,18 +98,21 @@ def main():
     p_run.add_argument('--frames', type=int, default=24000)
     p_run.add_argument('--seed', type=int, default=1)
     p_run.add_argument('--opp', default='scripted', choices=['scripted', 'yellow', 'self'])
+    p_run.add_argument('--strength', type=float, default=2.0,
+                       help='脚本对手强度（2.0=标定档：我们 vs 脚本 ≈ 3.0:5.3 输，对齐真实 demo 3.5:0.8 方向）')
     p_cmp = sub.add_parser('compare', help='对比两个批次 JSON')
     p_cmp.add_argument('a', help='基线 JSON 路径')
     p_cmp.add_argument('b', help='新代码 JSON 路径')
     args = ap.parse_args()
 
     if args.cmd == 'run':
-        r = run_batch(args.games, args.frames, args.seed, args.opp)
+        r = run_batch(args.games, args.frames, args.seed, args.opp, strength=args.strength)
         path = f"sim_eval_{args.name}.json"
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(r, f, indent=2, ensure_ascii=False)
         print(f"批次 {args.name}: 我们 {r['us_mean']:.1f} : {r['opp_mean']:.1f} "
-              f"控球 {r['poss']:.1f}% 射门 {r['shots']:.0f} 门区违规 {r['ga_episodes']:.1f}次/场")
+              f"控球 {r['poss']:.1f}% 射门 {r['shots']:.0f} 门区违规 {r['ga_episodes']:.1f}次/场 "
+              f"单人>20帧 {r.get('ga_solo_episodes')}次/场 争球重置 {r.get('freeball')}次/场(角区{r.get('freeball_corner')}) 救球{r.get('corner_rescue')}次/场")
         print(f"已存 {path}")
     elif args.cmd == 'compare':
         a = json.load(open(args.a, encoding='utf-8'))

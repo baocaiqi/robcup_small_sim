@@ -84,6 +84,14 @@ struct SimState {
     long zone_blue_third = 0, zone_mid = 0, zone_yellow_third = 0;  // 球位分布
     long ga_we_frames = 0, ga_we_episodes = 0, pa_we_frames = 0;   // 禁区纪律(我们)
     bool prev_ga_viol = false;               // 上一帧是否门区违规（片段计数用）
+    // 单人停留>20帧（FIRA：门区除门将外停留>20周期 → 罚点球；docs/13 方案 C 场景）
+    int solo_cnt[4] = {0};                   // 各非门将机器人在对方门区连续静止停留帧数
+    double solo_prevx[5] = {0}, solo_prevy[5] = {0};   // 单人停留统计的上一帧位置（测活动度）
+    long ga_solo_frames = 0, ga_solo_episodes = 0;
+    bool prev_solo_viol = false;
+    long freeball_count = 0;             // 僵局重置次数（球卡角/停死 → 判争球，真实平台 FreeBall 13 次/场）
+    long freeball_corner = 0;            // 其中：球在角区(距角<30cm)的重置次数
+    long corner_rescue = 0;              // 我方 ACTIVE 角区救球触发次数（world_model 统计）
     double check_x = 110, check_y = 90;   // 僵局检测：每 60 帧对比球位移
     int check_cnt = 0;
     int dbg_contacts = 0;              // 接触事件日志开关（调试用）
@@ -311,7 +319,7 @@ static bool check_goal(SimState &s, Rng *rng, int debug) {
 // 避免「4 台全追球」的蜂群压制（会无限触发我方围困检测导致僵局）
 // 脚本对手（镜像版）：is_blue=true 时操作蓝队(守 x=220)，false 时操作黄队(守 x=0)。
 // 逻辑与攻防方向按守卫侧镜像，保证两侧强度一致（用于测"我们打黄队侧"的半场对称性）。
-static void scripted_opponent(SimState &s, bool is_blue) {
+static void scripted_opponent(SimState &s, bool is_blue, double strength) {
     auto drive = [](SimRobot &r, double tx, double ty, double spd) {
         double dx = tx - r.x, dy = ty - r.y;
         double d = std::hypot(dx, dy);
@@ -330,23 +338,24 @@ static void scripted_opponent(SimState &s, bool is_blue) {
     // 守门员：球进本方禁区附近才快速跟球 y；球远时回中待命。
     // 校准自真实 demo 门将：横向峰值 p90≈47cm/s 但有明显失误（真实跟球 y 差 p50=6.4cm、
     // 25% 时间离球>10cm），脚本门将若完美跟球会封死球门导致进球虚低。
-    // 取 30cm/s + 0.3s 反应延迟（12帧），模拟 demo 门将"追不上快球"的真实表现。
+    // 基础档 30cm/s + 0.3s 反应延迟（12帧）模拟 demo；strength 放大速度/缩小反应间隔。
     SimRobot &gk = R[0];
     static int gk_react = 0;
     static double gk_target = 90.0;
     // 门将目标：球在本方半场才跟 y（蓝守右 → 球 x>160；黄守左 → 球 x<60）
     bool ball_in_own_half = is_blue ? (s.bx > field_w - 60.0) : (s.bx < 60.0);
-    if (s.frames % 12 == 0) {                // 每 0.3s 才重新瞄球（demo 门将反应慢）
+    int react_gap = (int)(12.0 / std::min(strength, 3.0) + 0.5);
+    if (s.frames % react_gap == 0) {             // 每 0.3s/strength 才重新瞄球
         gk_target = ball_in_own_half ? (s.by < 70 ? 70.0 : (s.by > 110 ? 110.0 : s.by)) : 90.0;
         gk_react = 0;
     }
     double dy = gk_target - gk.y;
-    double maxdy = 30.0 / 40.0;              // 30 cm/s 横向限速（demo 峰值 47 但失误多）
+    double maxdy = 30.0 * strength / 40.0;       // 30*strength cm/s 横向限速
     if (dy > maxdy) dy = maxdy; else if (dy < -maxdy) dy = -maxdy;
     gk.y += dy;
-    gk.x = gx_in;                            // 门线站位固定
-    gk.rot = is_blue ? 180.0 : 0.0;          // 面向场内
-    gk.vl = gk.vr = 0;                       // 位置直接控制，不走差速
+    gk.x = gx_in;                                // 门线站位固定
+    gk.rot = is_blue ? 180.0 : 0.0;              // 面向场内
+    gk.vl = gk.vr = 0;                           // 位置直接控制，不走差速
     // 找离球最近的追击手 + 次近协防
     int chaser = 1, support = 2;
     double best = 1e9, second = 1e9;
@@ -359,26 +368,23 @@ static void scripted_opponent(SimState &s, bool is_blue) {
         if (i == chaser) {
             double db = std::hypot(s.bx - R[i].x, s.by - R[i].y);
             // 追击手模拟真实 demo：带球质量低（推球点不准+速度慢），球易被碰丢
-            //  —— 真实 demo 场均只进 0.8 球，脚本追击手若精准推球会失球虚高
-            double wob = 14.0 * std::sin(s.frames * 0.07 + i * 2.4);   // 更大抖动 ±14cm
-            double spd = (db < 20.0) ? 30.0 : 80.0;                    // 近球减速更狠
+            //  —— 真实 demo 场均只进 0.8 球；strength↑ → 抖动↓、近球减速↓（带球更稳）
+            double wob = 14.0 / std::min(strength, 3.0) * std::sin(s.frames * 0.07 + i * 2.4);
+            double spd_near = 30.0 + 25.0 * (strength - 1.0);
+            double spd = (db < 20.0) ? spd_near : (80.0 * (0.6 + 0.4 * strength));
             // 站球后推球（朝对方球门方向）：推球点 = 球后方 6cm = 靠己方门一侧。
-            //   黄队(att_sign=+1)攻+x → 站 bx-6；蓝队(att_sign=-1)攻-x → 站 bx+6。
             drive(R[i], s.bx - att_sign * 6.0 + wob * 0.6, s.by + wob, spd);
         } else if (i == support) {
             // 协防：站到球与己方球门连线 40% 处（截击传球路线），不直接贴球。
-            //   黄队守 x=0 → (bx+0)*0.4；蓝队守 x=220 → (bx+220)*0.6（镜像后同样 40% 贴近己方门）
             double mx = is_blue ? (s.bx + 220.0) * 0.6 : (s.bx + 0.0) * 0.4;
             double my = (s.by + 90.0) * 0.5;
             drive(R[i], mx, my, 50);
         } else {
-            // 阵型站位：中线散开（防反击）；站位点避开球（球在路径附近时让位），
-            // 避免站位机器人路过铲球把球推向己方球门（真实 demo 站位球员不主动碰球）
+            // 阵型站位：中线散开（防反击）；站位点避开球
             double sx = (is_blue ? 125.0 - (i - 1) * 8.0 : 95.0 + (i - 1) * 8.0);
             double sy = (i == 3) ? 50.0 : 130.0;
             double d2b = std::hypot(s.bx - R[i].x, s.by - R[i].y);
             if (d2b < 25.0) {
-                // 球近身：让开——向远离球方向退 20cm（保持阵型意图，但不贴球）
                 double ax = R[i].x - (s.bx - R[i].x);
                 double ay = R[i].y - (s.by - R[i].y);
                 double al = std::hypot(ax - R[i].x, ay - R[i].y);
@@ -393,8 +399,10 @@ static void scripted_opponent(SimState &s, bool is_blue) {
 
 // 一场比赛
 // opp_mode: 0=脚本对手打黄队(我们守x=220, 默认)  1=自我博弈  2=脚本对手打蓝队(我们守x=0, 测半场对称)
-static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_blue, long &r_yellow,
-                       double &r_poss, int &r_shots, long r_zones[3], long &r_ga_frames, long &r_ga_eps) {
+static void play_match(int frames, int opp_mode, int debug, double opp_strength, Rng &rng, long &r_blue, long &r_yellow,
+                       double &r_poss, int &r_shots, long r_zones[3], long &r_ga_frames, long &r_ga_eps,
+                       long &r_ga_solo_frames, long &r_ga_solo_eps, long &r_freeball,
+                       long &r_freeball_corner, long &r_corner_rescue) {
     SimState s;
     init_formation(s, &rng);
     TeamContext ctx_blue{true}, ctx_yellow{false};
@@ -405,7 +413,7 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
     for (int f = 0; f < frames; ++f) {
         // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
         if (opp_mode == 2) {
-            scripted_opponent(s, true);
+            scripted_opponent(s, true, opp_strength);
         } else {
             fill_env(env_b, s, true);
             wm_b.update(&env_b, ctx_blue);
@@ -415,7 +423,7 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
 
         // 黄队决策：opp_mode=0 时黄队是脚本；否则黄队是我们的策略
         if (opp_mode == 0) {
-            scripted_opponent(s, false);
+            scripted_opponent(s, false, opp_strength);
         } else {
             fill_env(env_y, s, false);
             wm_y.update(&env_y, ctx_yellow);
@@ -469,9 +477,13 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
             int blue_in_ga = 0, yellow_in_ga = 0;
             for (int i = 1; i < 5; ++i) {   // 跳过门将(0号)
                 double by = s.blue[i].y;
-                if (s.blue[i].x > ga_lo && s.blue[i].x < ga_hi && by > 62.5 && by < 117.5) blue_in_ga++;
+                // 门区判定口径与 field_info.hpp in_goal_area 一致：y ∈ [75,105]（90±15）。
+                //   此前用「门宽 70~110 外扩 7.5」的宽框 [62.5,117.5]，会数进门角外
+                //   （y<75 或 >105）的非违规帧，且比罚球区还宽，几何上不可能
+                //   （官方规则：罚球区 80×35 包含门区 50×15，见 MiroSot Rules 1.1.4/1.1.5）。
+                if (s.blue[i].x > ga_lo && s.blue[i].x < ga_hi && by > 75.0 && by < 105.0) blue_in_ga++;
                 double yy = s.yellow[i].y;
-                if (s.yellow[i].x > ga_lo && s.yellow[i].x < ga_hi && yy > 62.5 && yy < 117.5) yellow_in_ga++;
+                if (s.yellow[i].x > ga_lo && s.yellow[i].x < ga_hi && yy > 75.0 && yy < 105.0) yellow_in_ga++;
             }
             // 只有"我们"是 opp_mode==2 ? yellow : blue
             int we_in_ga = opp_mode == 2 ? yellow_in_ga : blue_in_ga;
@@ -479,6 +491,47 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
             if (ga_viol) s.ga_we_frames++;
             if (ga_viol && !s.prev_ga_viol) s.ga_we_episodes++;   // 连续片段计数
             s.prev_ga_viol = ga_viol;
+
+            // 单人停留>20帧（docs/13 方案 C 场景）：我们任一非门将在对方门区
+            //   连续停留 >20 帧 → 罚点球（真实平台 8/29 实测 ACTIVE 滞留 21~30 帧被判）
+            {
+                bool solo_viol = false;
+                for (int i = 1; i < 5; ++i) {
+                    double sx = (opp_mode == 2) ? s.yellow[i].x : s.blue[i].x;
+                    double sy = (opp_mode == 2) ? s.yellow[i].y : s.blue[i].y;
+                    if (sx > ga_lo && sx < ga_hi && sy > 75.0 && sy < 105.0) {
+                        // 真实平台判"停留"看活动度：高速移动（追球穿过/撤出途中）不算停留。
+                        // 实测被判的滞留：位置徘徊 ≤1~2cm/帧（sim 40Hz 帧间）；用 <2cm/帧 过滤。
+                        double mdx = sx - s.solo_prevx[i], mdy = sy - s.solo_prevy[i];
+                        s.solo_prevx[i] = sx; s.solo_prevy[i] = sy;
+                        if (std::hypot(mdx, mdy) < 2.0) {
+                            if (++s.solo_cnt[i - 1] > 20) solo_viol = true;
+                        } else {
+                            s.solo_cnt[i - 1] = 0;   // 快速移动中 = 路过/撤离，重置
+                        }
+                    } else {
+                        s.solo_cnt[i - 1] = 0;
+                        s.solo_prevx[i] = sx; s.solo_prevy[i] = sy;
+                    }
+                }
+                if (solo_viol) s.ga_solo_frames++;
+                if (solo_viol && !s.prev_solo_viol) s.ga_solo_episodes++;
+                if (debug) {
+                    // 持续诊断：任一机器人门区连续停留 ≥15 帧时逐帧输出（含角色）
+                    for (int i = 1; i < 5; ++i) {
+                        if (s.solo_cnt[i - 1] >= 15 && s.solo_cnt[i - 1] % 3 == 0) {
+                            int role_i = (opp_mode == 2) ? wm_y.role[i] : wm_b.role[i];
+                            printf("  [滞留] f%d 蓝%d(role%d) 门区连续%d帧 (%.0f,%.0f) 球(%.0f,%.0f) 撤出触发%d\n",
+                                   s.frames, i, role_i, s.solo_cnt[i - 1],
+                                   (opp_mode == 2 ? s.yellow[i].x : s.blue[i].x),
+                                   (opp_mode == 2 ? s.yellow[i].y : s.blue[i].y),
+                                   s.bx, s.by,
+                                   (opp_mode == 2 ? wm_y.ga_retreat_fires : wm_b.ga_retreat_fires));
+                        }
+                    }
+                }
+                s.prev_solo_viol = solo_viol;
+            }
         }
 
         check_goal(s, &rng, debug);
@@ -495,7 +548,12 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
             bool in_wall_zone = (s.bx < 15.0 || s.bx > 205.0) || (s.by < 15.0 || s.by > 165.0);
             double stall_dist = in_wall_zone ? 40.0 : 25.0;
             if (!in_goal_mouth && std::hypot(s.bx - s.check_x, s.by - s.check_y) < stall_dist) {
+                // 角区卡球（距角 <30cm）：真实平台 FreeBall 主因（右下角卡球无人救）
+                if ((s.bx < 30.0 || s.bx > 190.0) && (s.by < 30.0 || s.by > 150.0)) {
+                    s.freeball_corner++;
+                }
                 init_formation(s, &rng);
+                s.freeball_count++;        // 计一次"争球重置"（真实平台 FreeBall）
             }
             s.check_x = s.bx; s.check_y = s.by; s.check_cnt = 0;
         }
@@ -515,17 +573,23 @@ static void play_match(int frames, int opp_mode, int debug, Rng &rng, long &r_bl
     // 球位分布：蓝后(x<73)/中/黄后(x>147) 标签不变（与谁是我们无关）
     r_zones[0] = s.zone_blue_third; r_zones[1] = s.zone_mid; r_zones[2] = s.zone_yellow_third;
     r_ga_frames = s.ga_we_frames; r_ga_eps = s.ga_we_episodes;
+    r_ga_solo_frames = s.ga_solo_frames; r_ga_solo_eps = s.ga_solo_episodes;
+    r_freeball = s.freeball_count;
+    r_freeball_corner = s.freeball_corner;
+    r_corner_rescue = wm_b.corner_rescue_events + wm_y.corner_rescue_events;
 }
 
 int main(int argc, char **argv) {
     int games = 3, frames = 24000;
     int debug = 0;
     int opp_mode = 0;                        // 0=脚本打黄(我们守x=220) 1=自我博弈 2=脚本打蓝(我们守x=0)
+    double opp_strength = 1.0;               // 脚本对手强度倍率（1.0=demo 校准档，>1 更强，见 docs/12）
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--games" && i + 1 < argc) games = std::atoi(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
+        else if (a == "--strength" && i + 1 < argc) opp_strength = std::atof(argv[++i]);
         else if (a == "--opp" && i + 1 < argc) {
             std::string o = argv[++i];
             if (o == "self") opp_mode = 1;
@@ -535,16 +599,16 @@ int main(int argc, char **argv) {
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed = (uint64_t)std::atoll(argv[++i]);
         else if (a == "--help") {
-            printf("sim_bench: --games N --frames N --opp scripted|self|yellow [--debug N] [--seed N]\n");
+            printf("sim_bench: --games N --frames N --opp scripted|self|yellow [--strength X] [--debug N] [--seed N]\n");
             return 0;
         }
     }
     const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : "脚本对手");
-    printf("=== sim_bench: games=%d frames/场=%d 模式=%s ===\n", games, frames, mode_name);
+    printf("=== sim_bench: games=%d frames/场=%d 模式=%s 对手强度=%.2f ===\n", games, frames, mode_name, opp_strength);
     long t_blue = 0, t_yellow = 0;
     double t_poss = 0;
     int t_shots = 0;
-    long t_ga = 0, t_ga_eps = 0;
+    long t_ga = 0, t_ga_eps = 0, t_ga_solo = 0, t_ga_solo_eps = 0, t_fb = 0, t_fb_corner = 0, t_rescue = 0;
     auto t0 = std::chrono::steady_clock::now();
     for (int g = 0; g < games; ++g) {
         // 修复：--seed N 时每场要用不同种子（seed + 场次偏移），
@@ -554,23 +618,26 @@ int main(int argc, char **argv) {
                            : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
         Rng rng(gs);
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
-        long ga_frames = 0, ga_eps = 0;
-        play_match(frames, opp_mode, debug, rng, b, y, poss, shots, zones, ga_frames, ga_eps);
+        long ga_frames = 0, ga_eps = 0, ga_solo = 0, ga_solo_eps = 0, fb = 0, fb_corner = 0, rescue = 0;
+        play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue);
         // play_match 已按 opp_mode 归一化：返回的 b=我们进球、y=对手进球
-        printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次\n",
+        printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次 单人>20帧 %ld帧/%ld次 争球重置 %ld次(角区%ld) 救球%ld次\n",
                g + 1, b, y, poss, shots,
                zones[0] * 100 / (long)frames, zones[1] * 100 / (long)frames, zones[2] * 100 / (long)frames,
-               ga_frames, ga_eps);
+               ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue);
         t_blue += b; t_yellow += y; t_poss += poss; t_shots += shots;
-        t_ga += ga_frames; t_ga_eps += ga_eps;
+        t_ga += ga_frames; t_ga_eps += ga_eps; t_ga_solo += ga_solo; t_ga_solo_eps += ga_solo_eps; t_fb += fb; t_fb_corner += fb_corner; t_rescue += rescue;
     }
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
     printf("=== 汇总: 我们 %ld : %ld 对手 (均 %.1f : %.1f)   平均控球 %.1f%%   平均射门 %.1f\n",
            t_blue, t_yellow, (double)t_blue / games, (double)t_yellow / games,
            t_poss / games, (double)t_shots / games);
-    printf("=== 禁区纪律(我们): 门区2+人 均 %.1f 帧/场, %.1f 次/场 ===\n",
-           (double)t_ga / games, (double)t_ga_eps / games);
+    printf("=== 禁区纪律(我们): 门区2+人 均 %.1f 帧/场, %.1f 次/场；单人停留>20帧 均 %.1f 帧/场, %.1f 次/场；争球重置 均 %.1f 次/场(角区 %.1f)，角区救球触发 %.1f 次/场 ===\n",
+           (double)t_ga / games, (double)t_ga_eps / games,
+           (double)t_ga_solo / games, (double)t_ga_solo_eps / games,
+           (double)t_fb / games, (double)t_fb_corner / games,
+           (double)t_rescue / games);
     printf("=== 耗时 %.2fs, 场均 %.2fs (%.1f 帧/秒) ===\n", sec, sec / games, games * (double)frames / sec);
     return 0;
 }

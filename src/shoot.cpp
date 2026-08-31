@@ -43,6 +43,7 @@ ShootPlan plan_shoot(const WorldModel &wm, int shooter_id) {
     dirx /= len; diry /= len;
 
     plan.aim_y = aim_y;
+    plan.dir_x = dirx; plan.dir_y = diry;   // 推球方向（两段式推射站位用，roles.cpp run_active）
     plan.viable = true;
     plan.target_x = bx - dirx * 8.0;                  // 球后方 8cm 推球点
     plan.target_y = by - diry * 8.0;

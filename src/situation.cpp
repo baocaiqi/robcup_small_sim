@@ -68,7 +68,12 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         // 门前半撤：球攻进对方罚球区时——assist 留禁区外沿当近端短传出球点
         // （治"主攻被围无近端接应"，参考 2008 心得「禁区内能安全倒开球是关键」），
         // mid 回撤中线防反击。
-        if (in_opp_penalty_area(ctx, bx, by)) { ax = opp_box_edge; mx = 110.0; }
+        // 触发条件除罚球区外，还包括球在对方门线附近 55cm 内（含门角外的球：
+        //   球滚到门角 y<72.5 或 >107.5 时不在罚球区判定内，但锚点会贴到门区线
+        //   附近 x≈55-59，落位振荡即踩线送点球——sim 诊断 f6861/f15621 实测）。
+        if (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < 55.0) {
+            ax = opp_box_edge; mx = 110.0;
+        }
     } else {
         // 防守态：助攻/中场回收中线两侧（保持出球点 + 防守纵深）
         ax = 110.0;
@@ -115,6 +120,22 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.assist_x = clamp(gx + ad * 85.0, 15.0, 205.0);
     if (in_penalty_area(ctx, wm.mid_x, wm.mid_y))
         wm.mid_x = clamp(gx + ad * 85.0, 15.0, 205.0);
+    // 对方门区防护带（禁区纪律-进攻侧）：防守锚点也不得进入对方门前 65cm 以内。
+    //   球被压到对方门前时，球-门连线 50cm 锚点会落在门区线正上方（x≈50~60），
+    //   落位振荡即踩线送点球（sim 诊断 f15621/f23607：passive 在真门区 x≈47-50）。
+    //   镜像己方纪律：与对方门线保持 15cm 余量（65 = 门区深 50 + 余量 15，
+    //   与 clamp_out_opp_goal_area 口径一致；10cm 余量实测违规回升且得分无改善）。
+    if (ad < 0) {
+        wm.passive_x = std::max(wm.passive_x, 65.0);     // 蓝方守 x=220：不进 x<65
+        // 助攻/中场同样受门区纪律约束（sim 诊断 f16376：ASSIST 落位/穿行对方
+        //   门区 x≈32-47 连续 21+ 帧送点球；进攻站 x=85 不受影响）
+        wm.assist_x  = std::max(wm.assist_x, 65.0);
+        wm.mid_x     = std::max(wm.mid_x, 65.0);
+    } else {
+        wm.passive_x = std::min(wm.passive_x, 155.0);    // 黄方守 x=0：不进 x>155
+        wm.assist_x  = std::min(wm.assist_x, 155.0);
+        wm.mid_x     = std::min(wm.mid_x, 155.0);
+    }
 }
 
 }  // namespace simuro5

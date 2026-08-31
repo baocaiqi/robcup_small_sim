@@ -24,6 +24,22 @@ void Strategy::run(WorldModel &wm) {
     Situation sit = sit_.analyze(wm);
     wm.we_have_ball = sit.we_have_ball;
 
+    // 1.5 我方主罚点球执行期标志（供 roles 区分"对方门球"vs"我方点球"：
+    //   两者都是"球静止在对方门区"，但点球必须去踢，门球要等对方开出）
+    {
+        bool we_take = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow) ||
+                       (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue);
+        if (we_take) {
+            wm.in_penalty_exec = true;
+        } else if (wm.in_penalty_exec) {
+            // 球离开罚球点（被踢出/被碰走）或 PlayMode 已切走 → 执行期结束
+            bool ball_leaves = std::hypot(wm.ball.vx, wm.ball.vy) > 3.0 ||
+                               std::fabs(wm.ball.x - wm.ctx.opp_goal_x()) > 60.0 ||
+                               std::fabs(wm.ball.y - 90.0) > 30.0;
+            if (wm.game_state != PM_PlayOn || ball_leaves) wm.in_penalty_exec = false;
+        }
+    }
+
     // 2. 攻防状态机（滞回 + 事件 + 威胁）
     update_team_state(wm);
 
@@ -37,14 +53,56 @@ void Strategy::run(WorldModel &wm) {
     update_sweeper(wm);
 
     // 5. 按角色执行（薄壳调度）
+    //    冷却期门区禁令（docs/13 方案 C 扩展）：撤出刚触发 30 帧内，本角色若还在
+    //    对方门区（且非攻门作业/点球执行），直接指令门外、**跳过角色函数**——
+    //    让角色再跑一帧会把 chase/站位目标与撤出目标交替覆盖 vl/vr，机器人
+    //    原地抖振卡在门区（实测蓝1 滞留 45 帧的根因）。
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
+        if (wm.ga_cooldown[i] > 0) {
+            --wm.ga_cooldown[i];
+            bool in_ga = in_opp_goal_area(wm.ctx, wm.home[i].x, wm.home[i].y);
+            bool ball_in_ga = in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y);
+            bool shooting_work = ball_in_ga &&
+                dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
+            bool penalty = wm.in_penalty_exec && wm.role[i] == ROLE_ACTIVE;
+            if (in_ga && !shooting_work && !penalty) {
+                double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
+                motion::position(wm.home[i], ogx - ad * 70.0, clamp(wm.home[i].y, 72.5, 107.5));
+                continue;   // 冷却期禁令：跳过角色函数
+            }
+        }
         switch (wm.role[i]) {
-            case ROLE_GOALIE:   run_goalie(wm, i); break;
             case ROLE_ACTIVE:   run_active(wm, i); break;
             case ROLE_PASSIVE:  run_passive(wm, i); break;
             case ROLE_ASSIST:   run_assist(wm, i); break;
             case ROLE_MIDFIELD: run_midfield(wm, i); break;
             default:            motion::stop(wm.home[i]); break;
+        }
+    }
+
+    // 5.5 全角色对方门区停留时限兜底（docs/13 方案 C 扩展）：
+    //   平台判罚看**实际位置**，clamp 只约束站位点，挡不住追球/锚点振荡实际进区
+    //   （sim 实测：ACTIVE 追角区球路径穿门区滞留 36 帧、ASSIST 锚点停门区边缘）。
+    //   ACTIVE 的 run_active 内方案 C 撤出照旧，这里是兜底：豁免"球在门区且自己
+    //   贴球(≤25cm)"——门前争抢/补射/带球攻门不算滞留；其余（含追球穿区）连续
+    //   >15 帧 → 强制撤到门区前缘外 70cm + 冷却 30 帧（冷却由 5 的调度前置拦截执行）。
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (wm.role[i] == ROLE_GOALIE) continue;
+        double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
+        double hold_x = ogx - ad * 70.0, hold_y = clamp(wm.home[i].y, 72.5, 107.5);
+        bool in_ga = in_opp_goal_area(wm.ctx, wm.home[i].x, wm.home[i].y);
+        if (in_ga) {
+            bool ball_in_ga = in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y);
+            bool shooting_work = ball_in_ga &&
+                dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
+            if (!shooting_work && ++wm.ga_overstay[i] > 15) {
+                wm.ga_overstay[i] = 0;
+                wm.ga_cooldown[i] = 30;
+                motion::position(wm.home[i], hold_x, hold_y);
+            }
+        } else {
+            wm.ga_overstay[i] = 0;
         }
     }
 }

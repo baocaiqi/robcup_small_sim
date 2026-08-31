@@ -15,6 +15,7 @@ struct ShootPlan {
     bool viable = false;
     double target_x = 0, target_y = 90;   // 带球目标点（球门开口侧前方）
     double aim_y = 90;                    // 瞄准的开口 y（调试用）
+    double dir_x = 0, dir_y = 1;          // 推球方向（球→开口的单位向量，两段式推射站位用）
 };
 
 // 计算 4 号前锋的最佳射门方案

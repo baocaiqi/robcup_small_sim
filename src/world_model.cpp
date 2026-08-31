@@ -5,6 +5,7 @@ namespace simuro5 {
 
 void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
     ctx = ctx_;
+    game_state_last = game_state;        // 上一帧 PlayMode（点球执行期识别用）
     game_state = (int)env->gameState;
     whos_ball = env->whosBall;
     field = env->fieldBounds;

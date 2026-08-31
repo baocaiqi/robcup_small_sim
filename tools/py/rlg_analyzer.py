@@ -65,32 +65,40 @@ def report(frames, path):
     n = len(frames)
     gs_counts = {}
     whos_counts = {}
-    goals = []          # 进球帧：球整体越过门线
+    goals = []          # 进球事件（去重：连续帧同一事件只记一次，球回场后才计下一球）
+    last_tag = None
     for i, f in enumerate(frames):
         gs_counts[f["gs"]] = gs_counts.get(f["gs"], 0) + 1
         whos_counts[f["whos"]] = whos_counts.get(f["whos"], 0) + 1
         bx, by = f["ball"]["x"], f["ball"]["y"]
         # 蓝队守 x=220 门，黄队守 x=0 门（日志坐标系已偏移到 0..220）
         if bx > 220.0 and C.GOAL_Y_LOW <= by <= C.GOAL_Y_HIGH:
-            goals.append((i, "蓝队失球(黄队得分)"))
+            tag = "黄队得分(破蓝门)"
         elif bx < 0.0 and C.GOAL_Y_LOW <= by <= C.GOAL_Y_HIGH:
-            goals.append((i, "黄队失球(蓝队得分)"))
+            tag = "蓝队得分(破黄门)"
+        else:
+            tag = None
+        # 同一事件连续帧只记一次（球进网后平台立刻回中圈，下一球必须重新越线）
+        if tag is not None and tag != last_tag:
+            goals.append((i, tag))
+        last_tag = tag
 
     print(f"===== 比赛统计: {os.path.basename(path)} =====")
-    print(f"总帧数: {n}   约 {n / 40:.1f} 秒 (按40Hz)")
+    print(f"总帧数: {n}   约 {n / 40:.1f} 秒 (按40Hz；rlg 常只录部分时段，进球数可能少于整场)")
     print("\n比赛状态分布:")
     for gs in sorted(gs_counts):
         print(f"  {C.PLAY_MODE_NAMES.get(gs, gs):<18} {gs_counts[gs]:>6} 帧 ({gs_counts[gs]/n*100:4.1f}%)")
     print("\n球权分布:")
     for w in sorted(whos_counts):
         print(f"  {C.WHOS_BALL_NAMES.get(w, w):<6} {whos_counts[w]:>6} 帧 ({whos_counts[w]/n*100:4.1f}%)")
-    print("\n进球事件:")
+    print("\n进球事件（去重）:")
     if goals:
         for i, desc in goals:
             print(f"  帧 {i} (~{i/40:.1f}s): {desc}")
-        blue_goals = sum(1 for _, d in goals if "黄队得分" in d)
-        yellow_goals = sum(1 for _, d in goals if "蓝队得分" in d)
-        print(f"  比分 蓝 {yellow_goals} : {blue_goals} 黄")
+        yellow_goals = sum(1 for _, d in goals if d.startswith("黄队得分"))
+        blue_goals = sum(1 for _, d in goals if d.startswith("蓝队得分"))
+        # 与官方 SimuroSot5.log 口径一致：log 比分 = (黄 : 蓝)，首位=黄队（守左门 x=0）
+        print(f"  比分 黄 {yellow_goals} : {blue_goals} 蓝  (与官方 log (黄:蓝) 口径一致)")
     else:
         print("  （未检测到进球，可调帧率或检查坐标偏移）")
 

@@ -132,7 +132,65 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
             plan.target_y = 90.0;
         }
     }
+    // 禁区纪律（对方门区）：防守点也不得落入对方门区（FIRA：门区 2+ 人 → 罚点球）。
+    //   球被压到对方门前/门角时，球-门连线兜底锚点会把防守者带到对方门区边线上，
+    //   转场途中/落位误差就踩线违规（sim 诊断 f2664/f5021：passive 真门区 x<50）。
+    //   统一在这里兜底，覆盖 run_passive 兜底分支与 assist/mid 回防分支。
+    clamp_out_opp_goal_area(ctx, plan.target_x, plan.target_y);
     return plan;
+}
+
+// ============================================================
+// 球-门连线护门点（参考官方 demo CenterDefender 思想，自研实现）
+// ============================================================
+bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
+    const TeamContext &ctx = wm.ctx;
+    double bx = wm.ball.x, by = wm.ball.y;
+    double d_goal = ctx.dist_our_goal(bx);
+
+    if (d_goal > 100.0) {
+        // 球远：站「球→门心」连线、球向门方向 45cm（对应 demo 中卫 ball.x-45）
+        double dx = ctx.our_goal_x() - bx, dy = 90.0 - by;
+        double len = std::hypot(dx, dy);
+        if (len < 1e-6) { out_x = ctx.our_goal_x() + ctx.attack_dir() * 45.0; out_y = 90.0; }
+        else {
+            out_x = bx + dx / len * 45.0;
+            out_y = by + dy / len * 45.0;
+        }
+    } else if (d_goal > 45.0) {
+        // 球中近：站门前 50cm 拦截线、y 跟球（压上断球）
+        out_x = ctx.our_goal_x() + ctx.attack_dir() * 50.0;
+        out_y = clamp(by, 72.5, 107.5);
+    } else {
+        // 球已贴门（<45cm）：站「球与门之间」、球前(朝门方向)8cm——堵推射线。
+        //   注意不能站"门前 20cm 线"：球距门 <20cm 时那条线在球的场侧（球在
+        //   线与门之间），协防者站球后，对方推球时追不上同向的球（rlg 复盘
+        //   f3304：B5 到位 (200,86) 时球已被推进 (220,89)）。必须站球前，
+        //   对方追击手一推球就撞在协防者身上（demo 中卫站 (25,ball.y) 同理，
+        //   对黄队 x=0 门，球 x<25 时 25 在球门侧）。
+        double dx = ctx.our_goal_x() - bx, dy = 90.0 - by;
+        double len = std::hypot(dx, dy);
+        if (len < 1e-6) { out_x = bx + ctx.attack_dir() * 8.0; out_y = by; }
+        else {
+            out_x = bx + dx / len * 8.0;
+            out_y = by + dy / len * 8.0;
+        }
+        // 别越过门线：朝门方向最多到门前 3cm
+        //   door_x = 门线 - attack_dir*3（蓝队 ad=-1 → 220-3=217；黄队 ad=+1 → 0+3=3）
+        //   球若已比 door_x 更靠门（如 (218,90)），护门点无空间，直接站 door_x 堵门。
+        double door_x = ctx.our_goal_x() + ctx.attack_dir() * 3.0;
+        double lo = std::min(bx, door_x), hi = std::max(bx, door_x);
+        out_x = clamp(out_x, lo, hi);
+        if (bx > door_x) out_x = door_x;
+        // 注意：不能走末尾的 kMaxX clamp——kMaxX=208 是断球点约束（防守者不深入
+        //   门区），而贴门护门点必须站到球与门之间（x 可到 213+），会被截断。
+        out_x = clamp(out_x, kMinX, TeamContext::FIELD_LENGTH);
+        out_y = clamp(out_y, kMinY, kMaxY);
+        return true;
+    }
+    out_x = clamp(out_x, kMinX, kMaxX);
+    out_y = clamp(out_y, kMinY, kMaxY);
+    return true;
 }
 
 // ============================================================
@@ -215,6 +273,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
 static constexpr double kDoubleTeamDangerDist = 100.0;  // 持球者离门多近才夹抢(cm)
 static constexpr double kDoubleTeamLateral    = 20.0;   // 夹抢点横向偏移(cm)：与盯人者错开角度
 static constexpr double kDoubleTeamCarryDist  = 15.0;   // 持球者判定：离球 <此值视为正带球
+static constexpr double kDoubleTeamCoverDist  = 45.0;   // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
 
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
@@ -230,8 +289,14 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     }
     if (dribbler < 0 || dmin >= kDoubleTeamCarryDist) return false;
 
-    // 门槛③：球已在己方罚球区 → 交给门将+被动防守，区域防守者不冲进去（禁区纪律）
-    if (in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y)) return false;
+    // 门槛③：球已在己方罚球区 → 原「禁区纪律」直接 return false（门前只剩门将 1v1，
+    //   真 vs demo 2:7×2 复盘：demo 控停门前 (205,90) 后追击手直冲抢点推射）。
+    //   结构性改造（docs 第14轮）：持球者已压到门前 kDoubleTeamCoverDist 内时，
+    //   允许第二人进禁区协防，与门将/passive 形成双人包夹——防守方进己方罚球区
+    //   合法（规则只限制进攻方进对方门区）。球还在禁区边缘/外面则不冲进去。
+    if (in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y)) {
+        if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamCoverDist) return false;
+    }
 
     // 门槛④：持球者已推进到离门 kDoubleTeamDangerDist 内才夹抢——
     //   过早夹抢会把第二人提前调离区域、留出纵深，反被一脚直塞打穿。
@@ -260,9 +325,10 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     out_x = ox + dx * mark_dist() + nx * side * kDoubleTeamLateral;
     out_y = oy + dy * mark_dist() + ny * side * kDoubleTeamLateral;
 
-    // 禁区纪律：夹抢点若落入己方罚球区，退到罚球区前缘外
-    if (in_penalty_area(wm.ctx, out_x, out_y)) {
-        out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
+    // 禁区纪律：夹抢点若落入己方门区（小禁区），退到门区前缘外——门区是门将
+    //   专属活动区，区域防守者不挤进去；罚球区（大禁区）允许进入（协防合法）。
+    if (in_goal_area(wm.ctx, out_x, out_y)) {
+        out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 55.0;
         out_y = clamp(oy, 72.5, 107.5);
     }
     out_x = clamp(out_x, 0.0, TeamContext::FIELD_LENGTH);

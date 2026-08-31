@@ -67,15 +67,19 @@ inline bool in_opp_goal_area(const TeamContext &ctx, double x, double y) {
     return in_goal_area(mirror, x, y);
 }
 
-// 对方门区禁入约束：站位点落入对方门区时，沿 x 推到门区前缘外 5cm（y 夹回门宽内侧）。
+// 对方门区禁入约束：站位点落入对方门区时，沿 x 推到门区前缘外 15cm（y 夹回门宽内侧）。
 // 注意：ACTIVE 带球/射门不调用本函数——单人压门抢射是正常进攻，
 // 规则只罚"2+ 人聚集"和"单人停留>20 帧"。
+// 余量说明：A/B 实测（50 场×2 种子）：
+//   5cm → 落位振荡踩线（违规 ~3.6 次/场）
+//   10cm → 违规回升 1.5~2.1 次/场，得分无改善
+//   15cm → 违规 0.4~0.5 次/场（最佳），得分 -0.5~-0.8（结构性代价，见 docs/06）
 inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y) {
     if (!in_opp_goal_area(ctx, x, y)) return;
     double ogx = ctx.opp_goal_x();
     double ad = ctx.attack_dir();
-    // 对方门区前缘（朝场内方向 50cm 处），再往外让 5cm
-    x = ogx - ad * 55.0;
+    // 对方门区前缘（朝场内方向 50cm 处），再往外让 15cm
+    x = ogx - ad * 65.0;
     y = clamp(y, 70.0, 110.0);
 }
 

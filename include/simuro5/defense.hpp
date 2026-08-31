@@ -143,6 +143,16 @@ struct DefensePlan {
 // defender_id：防守队员在 home[] 中的下标（用于「可达性判断」——我赶不赶得上）
 DefensePlan plan_defense(const WorldModel &wm, int defender_id);
 
+// 球-门连线护门点（参考官方 demo CenterDefender 思想，自研实现）：
+//   demo 中卫永远钉在「球与门之间」——球远站球后 45cm、球进门前站门前 25cm 线，
+//   保证射门/冲锋路径上始终有人。这里按球距门分区给出护门站位：
+//     · 球距门 >100cm：球-门连线、球向门方向 45cm（中远距拦截点）
+//     · 球距门 45~100：门前 50cm 拦截线、y 跟球（压上断球）
+//     · 球距门 <45   ：门前 20cm 线、y 跟球（堵射门角度，对应 demo 门前 25cm）
+//   防守方进己方罚球区协防合法（规则只限制进攻方进对方门区），故不做禁区纪律；
+//   只 clamp 场地边界。由 run_passive「门前协防」分支在对方逼近时调用。
+bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y);
+
 // 纯函数：断球点 = 球运动轨迹 ∩ 球门前 line_dist 处的拦截线
 //   拦截线是与球门线平行、位于球门前 line_dist 处的竖线：
 //     蓝队门 x=220 → 拦截线 x = 220 - 50 = 170（line_dist=50 时）

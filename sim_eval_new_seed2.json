@@ -1,0 +1,14 @@
+{
+  "games": 50,
+  "frames": 24000,
+  "opp": "scripted",
+  "seed": 2,
+  "us_mean": 6.2,
+  "opp_mean": 2.3,
+  "us_total": 309,
+  "opp_total": 115,
+  "poss": 34.5,
+  "shots": 968.4,
+  "ga_frames": 2.0,
+  "ga_episodes": 0.4
+}

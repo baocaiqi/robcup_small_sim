@@ -47,7 +47,20 @@ struct WorldModel {
     Bounds field;            // 场地边界(平台给)
     Bounds goal;             // 球门边界(平台给)
     int game_state = 0;      // PlayMode
+    int game_state_last = 0; // 上一帧 PlayMode（点球/定位球执行期识别：PenaltyKick→PlayOn 过渡）
     long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
+    // 我方主罚点球执行中（strategy.cpp 每帧维护）：球静止在罚球点、我方必须去踢。
+    // roles 用它区分"对方门球"（不抢）vs"我方点球"（必须射门）——两者都是球静止在对方门区。
+    bool in_penalty_exec = false;
+    // 全角色对方门区停留时限（strategy.cpp 调度后兜底，docs/13 方案 C 扩展）：
+    //   平台判罚看实际位置，clamp 站位点挡不住 ASSIST/MID/PASSIVE 追球/振荡进区；
+    //   连续停留 >15 帧强制撤出 + 冷却（防撤出-回区拉锯）。
+    int ga_overstay[PLAYERS_PER_SIDE] = {0};
+    int ga_cooldown[PLAYERS_PER_SIDE] = {0};
+    // 死球等待计时（run_active）：球静止在对方门区（对方门球/卡死）的连续帧数。
+    //   超时（>100 帧）→ 判定"对方不开球/球卡死"，ACTIVE 主动去推球（真实 8/31 镜像
+    //   内战 0:0 根因：球卡对方门区 135 秒，进攻方死球等待永不超时、门将清球不穿过）。
+    int dead_ball_frames = 0;
     double threat_level = 0.0; // 威胁等级 0~1（状态机输出：状态+球位稳定计算）
     bool we_have_ball = false; // 球权是否在我方（简版判断）
 
@@ -61,6 +74,21 @@ struct WorldModel {
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举
     // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
+
+    // ACTIVE 在对方门区停留计数（docs/13 方案 C：防"门区单人停留>20 周期"罚点球）
+    // roles.cpp run_active 每帧更新；超限强制撤出（射门/传球/带球出区）。
+    //   active_ga_frames ：纯停留帧数（人在门区 且 球不在门区或不在脚下>25cm）——主判据
+    //   active_ga_total  ：门区总时长（含带球推射）——兜底：球被门将挡回反复推
+    //                      也是真实平台罚点球场景（8/29 实测 21~30 帧被罚），不能无限续
+    //   ga_retreat_fires ：超限撤出触发次数（sim_bench 诊断用）
+    int active_ga_frames = 0;
+    int active_ga_total = 0;
+    int ga_retreat_fires = 0;
+
+    // 角区救球触发次数（sim_bench 统计用：验证"FreeBall 13 次/场"角区卡球是否被救）
+    int corner_rescue_events = 0;
+    // 球在角区且静止的连续帧数（>30 帧才算"真卡住"，防路过/刚弹到角的球误触发救球）
+    int corner_ball_frames = 0;
 
     // 清道夫（远侧覆盖）：球在防守三区拉边时，指定一个区域防守者钉中路封远门柱/横传。
     //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。

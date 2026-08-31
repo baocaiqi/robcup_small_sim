@@ -1,0 +1,20 @@
+{
+  "games": 50,
+  "frames": 24000,
+  "opp": "scripted",
+  "seed": 1,
+  "strength": 2.0,
+  "us_mean": 2.6,
+  "opp_mean": 6.1,
+  "us_total": 128,
+  "opp_total": 306,
+  "poss": 26.1,
+  "shots": 292.0,
+  "ga_frames": 3.3,
+  "ga_episodes": 0.7,
+  "ga_solo_frames": 21.0,
+  "ga_solo_episodes": 3.8,
+  "freeball": 115.9,
+  "freeball_corner": 43.5,
+  "corner_rescue": 75.8
+}
