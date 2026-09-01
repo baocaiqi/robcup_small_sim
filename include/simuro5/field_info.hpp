@@ -63,11 +63,23 @@ inline bool in_opp_penalty_area(const TeamContext &ctx, double x, double y) {
 // 真实比赛我方场均被罚 1.9 个点球（sim_bench 复现：12.9 次违规/场），
 // 非持球进攻者的站位必须避开对方门区。
 inline bool in_opp_goal_area(const TeamContext &ctx, double x, double y) {
-    TeamContext mirror = ctx; mirror.is_blue = !ctx.is_blue;
-    return in_goal_area(mirror, x, y);
+    // 对方门区 y 范围 = 门宽 70~110 外扩 7.5 = [62.5,117.5]，比 in_goal_area（我方门区防守用 [75,105]）宽；
+    // 不能复用 in_goal_area 镜像，否则 y∈[62.5,75)∪(105,117.5] 的边缘闯入不会被判罚。
+    double ogx = ctx.opp_goal_x();
+    double ad = ctx.attack_dir();
+    double x_lo = std::min(ogx, ogx - ad * 50.0);
+    double x_hi = std::max(ogx, ogx - ad * 50.0);
+    return in_rect(x, y, x_lo, x_hi, 62.5, 117.5);
 }
 
-// 对方门区禁入约束：站位点落入对方门区时，沿 x 推到门区前缘外 15cm（y 夹回门宽内侧）。
+// 对方门区禁入约束：站位点落入对方门区时，沿 x 推到门区前缘外 15cm（y 夹回门区 y 域）。
+// 对方门区前缘推荐站位：x = 门区前缘外 15cm（朝场内，配合 A/B 实测最佳余量，见下方 clamp 注释），
+// y = 夹回对方门区 y 域 [62.5,117.5]。
+// 供 clamp_out_opp_goal_area 与 run_passive 复用，消除魔法数字 65/62.5/117.5。
+inline void opp_goal_area_front(const TeamContext &ctx, double y_ref, double &x, double &y) {
+    x = ctx.opp_goal_x() - ctx.attack_dir() * 65.0;
+    y = clamp(y_ref, 62.5, 117.5);
+}
 // 注意：ACTIVE 带球/射门不调用本函数——单人压门抢射是正常进攻，
 // 规则只罚"2+ 人聚集"和"单人停留>20 帧"。
 // 余量说明：A/B 实测（50 场×2 种子）：
@@ -76,11 +88,9 @@ inline bool in_opp_goal_area(const TeamContext &ctx, double x, double y) {
 //   15cm → 违规 0.4~0.5 次/场（最佳），得分 -0.5~-0.8（结构性代价，见 docs/06）
 inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y) {
     if (!in_opp_goal_area(ctx, x, y)) return;
-    double ogx = ctx.opp_goal_x();
-    double ad = ctx.attack_dir();
-    // 对方门区前缘（朝场内方向 50cm 处），再往外让 15cm
-    x = ogx - ad * 65.0;
-    y = clamp(y, 70.0, 110.0);
+    double fx = 0.0, fy = 0.0;
+    opp_goal_area_front(ctx, y, fx, fy);   // x 推出前缘外 15cm，y 夹回判定域（当前为恒等，保留语义兜底）
+    x = fx; y = fy;
 }
 
 // 是否在场地内

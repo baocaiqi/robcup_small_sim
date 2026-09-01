@@ -1,4 +1,4 @@
-﻿#include "simuro5/pass.hpp"
+#include "simuro5/pass.hpp"
 #include "simuro5/geometry.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/role_assignment.hpp"
@@ -44,6 +44,18 @@ double count_near_opponent(const WorldModel &wm, double x, double y)
         }
     }
     return threat;
+}
+
+// 统计目标点周围「前方威胁」：比目标点更靠对方球门的对手
+int count_front_opponent(const WorldModel &wm, double x, double y, double ad) {
+    int cnt = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double dx = wm.opp[i].x - x, dy = wm.opp[i].y - y;
+        if (dx*dx + dy*dy < THREAT_RADIUS * THREAT_RADIUS) {
+            if (ad * (wm.opp[i].x - x) > 0.0) cnt++;   // 前方 = 对方球门方向
+        }
+    }
+    return cnt;
 }
 
 // 把接应点夹回场内，并避免深入对方罚球区（带球/接应不该进禁区）。
@@ -101,10 +113,11 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
 
         // —— 威胁评估：在接应点（不是队友当前位置）按距离加权统计对手盯防 ——
         double threat = count_near_opponent(wm, tx, ty);
+        int front_threat = count_front_opponent(wm, tx, ty, ad);   // 前方威胁（比目标点更靠对方球门）
 
         // —— 评分：越靠前越好 + 威胁越低越好 + 传球越短越稳 ——
         double goal_dist = std::fabs(tx - ctx.opp_goal_x());
-        double score = goal_dist + threat * 20.0 + pass_dist * 0.5;
+        double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
 
         if (score < best_score) {
             best_score = score;

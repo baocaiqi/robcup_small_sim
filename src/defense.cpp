@@ -137,6 +137,20 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     //   转场途中/落位误差就踩线违规（sim 诊断 f2664/f5021：passive 真门区 x<50）。
     //   统一在这里兜底，覆盖 run_passive 兜底分支与 assist/mid 回防分支。
     clamp_out_opp_goal_area(ctx, plan.target_x, plan.target_y);
+    // 对方门区禁入（后置夹取）：防守兜底点 x 须与对方门区前缘保持 8cm 余量。
+    //   球深压对方门区时 passive_x≈球+50≈49~58，正好压/越门区前缘(x=50)，夹到 58 起；
+    //   无球回防时 passive/assist/mid 三人共用此兜底点，夹回门区前缘防 2+ 犯规。
+    //   注意：只「夹」不「覆盖」——球在对方门区内中等深度时 passive_x=球+50≈60~95
+    //   本就在门区外、更远离对方球门；若强行覆盖成固定 58，反而把人往门区方向拉。
+    double ogx = ctx.opp_goal_x();
+    double ad  = ctx.attack_dir();
+    double opp_front = ogx - ad * 58.0;   // 蓝:58, 黄:162
+    if (ad < 0.0) {
+        if (plan.target_x < opp_front) plan.target_x = opp_front;
+    } else {
+        if (plan.target_x > opp_front) plan.target_x = opp_front;
+    }
+
     return plan;
 }
 
