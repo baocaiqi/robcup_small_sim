@@ -15,7 +15,20 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
     ball_last.x = env->lastBall.pos.x;      ball_last.y = env->lastBall.pos.y;
     ball_last.valid = true;
     ball.x = env->currentBall.pos.x;        ball.y = env->currentBall.pos.y;
-    ball.vx = ball.x - ball_last.x;         ball.vy = ball.y - ball_last.y;
+    // 球速跳变滤波：进球/FreeBall/定位球重置时球位瞬间跳变（实测 227→110 = -117cm/帧），
+    //   直接差分会产出虚假巨大速度 → 死球判定失效 + 外推/预测方向误导
+    //   （真实 9/2 丢球 2：重置后 ACTIVE 追错方向 40 帧脱位）。与对方机器人同款处理：
+    //   单帧位移超上限视为复位跳变、速度清零。
+    //   ⚠️ 阈值教训（0:3 惨败）：初版 12cm/帧 太激进——demo 传球/解围/射门球速常达
+    //   20+cm/帧（sim 实测 22），被清零后 run_active "对方门球等待"误触发（球已高速
+    //   开出但 vx=0 → 永远等球"动起来"）→ ACTIVE 不追球、进攻瘫痪（射门威胁 0.4%）。
+    //   30cm/帧 滤掉重置跳变（100+），保留正常球速（≤22）。
+    const double kMaxBallVel = 30.0;
+    {
+        double bvx = ball.x - ball_last.x, bvy = ball.y - ball_last.y;
+        ball.vx = (std::fabs(bvx) > kMaxBallVel) ? 0.0 : bvx;
+        ball.vy = (std::fabs(bvy) > kMaxBallVel) ? 0.0 : bvy;
+    }
     ball.valid = true;
     ball_pred.x = env->predictedBall.pos.x; ball_pred.y = env->predictedBall.pos.y;
     ball_pred.valid = true;

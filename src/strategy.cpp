@@ -19,6 +19,12 @@ namespace simuro5 {
 // ============================================================
 static const int kStateHysteresisFrames = 3;   // 滞回帧数（可调，见 docs/06）
 
+// 反击快攻窗口帧数（docs/13 攻击强化 方案 A）：
+//   断球瞬间起 30 帧（≈0.75s）内，assist/midfield 豁免回防条件立即前插接应，
+//   让 ACTIVE 断球后有传球选择；窗口过后恢复正常回防逻辑。
+//   30 帧约等于 demo 就地反抢到位所需时间——窗口内把球传/带过半场即成功。
+static const int kCounterWindowFrames = 30;
+
 void Strategy::run(WorldModel &wm) {
     // 1. 局势分析（球权/半场/禁区）
     Situation sit = sit_.analyze(wm);
@@ -111,6 +117,15 @@ void Strategy::update_team_state(WorldModel &wm) {
     // 滞回计数
     if (wm.we_have_ball) { ++wm.possession_frames; wm.no_possession_frames = 0; }
     else                 { ++wm.no_possession_frames; wm.possession_frames = 0; }
+
+    // 反击快攻窗口（docs/13 方案 A）：
+    //   失球→持球转换帧 = 断球成功，置窗口让 assist/mid 立即前插（不等滞回切进攻态）；
+    //   窗口每帧递减，归零后恢复正常回防。
+    if (wm.we_have_ball && !wm.prev_we_have_ball && wm.game_state == PM_PlayOn) {
+        wm.counter_attack_frames = kCounterWindowFrames;
+    }
+    if (wm.counter_attack_frames > 0) --wm.counter_attack_frames;
+    wm.prev_we_have_ball = wm.we_have_ball;
 
     TeamState prev = wm.team_state;
     if (wm.team_state == TS_DEFENSE && wm.possession_frames >= kStateHysteresisFrames)

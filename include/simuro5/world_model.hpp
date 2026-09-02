@@ -69,6 +69,14 @@ struct WorldModel {
     int possession_frames = 0;         // 连续持球帧数（滞回计数）
     int no_possession_frames = 0;      // 连续失球帧数
     bool state_transition = false;     // 本帧是否刚发生攻防切换（事件标志，供即时响应）
+    // 反击快攻窗口（docs/13 攻击强化 方案 A）：
+    //   断球（失球→持球转换）瞬间置 counter_attack_frames = kCounterWindow，
+    //   窗口内 run_assist/run_midfield 豁免回防条件、立即前插接应，
+    //   治"反击时前场真空——assist/mid 还在防守位，ACTIVE 1 打 5 攻不出去"
+    //   （真实平台 9/2 vs demo：球在蓝半场 79%、0 射门威胁的根因之一）。
+    //   prev_we_have_ball：上一帧球权，供检测转换帧。
+    bool prev_we_have_ball = false;
+    int counter_attack_frames = 0;
 
     // 角色分配结果（由 RoleAssignment 填写）
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举

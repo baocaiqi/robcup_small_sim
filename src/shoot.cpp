@@ -15,6 +15,8 @@ ShootPlan plan_shoot(const WorldModel &wm, int shooter_id) {
 
     // 条件：球在本方前方、距对方球门不太远（<70cm 才考虑射门）
     double dgoal = dist(bx, by, ogx, 90.0);
+    // [A/B 隔离中] 点球放宽曾导致真机 0:3（14:46 场，黄攻蓝门区 2.5%→45%）——
+    //   怀疑 in_penalty_exec 误判使运动战也放宽。先回退验证因果，确认后再恢复。
     if (dgoal > 70.0 || dgoal < 5.0) return plan;
 
     // 找对方守门员（对手 0 号或离门最近者）的 y

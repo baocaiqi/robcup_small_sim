@@ -516,20 +516,6 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
                 }
                 if (solo_viol) s.ga_solo_frames++;
                 if (solo_viol && !s.prev_solo_viol) s.ga_solo_episodes++;
-                if (debug) {
-                    // 持续诊断：任一机器人门区连续停留 ≥15 帧时逐帧输出（含角色）
-                    for (int i = 1; i < 5; ++i) {
-                        if (s.solo_cnt[i - 1] >= 15 && s.solo_cnt[i - 1] % 3 == 0) {
-                            int role_i = (opp_mode == 2) ? wm_y.role[i] : wm_b.role[i];
-                            printf("  [滞留] f%d 蓝%d(role%d) 门区连续%d帧 (%.0f,%.0f) 球(%.0f,%.0f) 撤出触发%d\n",
-                                   s.frames, i, role_i, s.solo_cnt[i - 1],
-                                   (opp_mode == 2 ? s.yellow[i].x : s.blue[i].x),
-                                   (opp_mode == 2 ? s.yellow[i].y : s.blue[i].y),
-                                   s.bx, s.by,
-                                   (opp_mode == 2 ? wm_y.ga_retreat_fires : wm_b.ga_retreat_fires));
-                        }
-                    }
-                }
                 s.prev_solo_viol = solo_viol;
             }
         }
