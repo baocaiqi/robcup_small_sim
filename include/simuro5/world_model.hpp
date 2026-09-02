@@ -62,6 +62,11 @@ struct WorldModel {
     // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
 
+    // 多人盯人分配结果（每帧由 defense::assign_marks 写入）：
+    //   mark_assign[i] = 己方第 i 号球员该盯的对方球员下标，-1 = 区域防守。
+    //   固定角色里只有 PASSIVE/ASSIST/MIDFIELD 会被赋盯人目标。
+    int mark_assign[PLAYERS_PER_SIDE] = {-1, -1, -1, -1, -1};
+
     // 清道夫（远侧覆盖）：球在防守三区拉边时，指定一个区域防守者钉中路封远门柱/横传。
     //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。
     int sweeper_id = -1;

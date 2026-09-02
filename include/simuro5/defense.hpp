@@ -20,6 +20,7 @@
 
 #include "simuro5/world_model.hpp"
 #include "simuro5/geometry.hpp"
+#include "simuro5/field_info.hpp"
 
 namespace simuro5 {
 
@@ -101,6 +102,22 @@ inline bool predict_y_at_x_reflect(double x, double y, double vx, double vy,
     double t_rem  = t_total - t_wall;             // 反射后剩余时间（vx 不变）
     out_y = wall_y + (-vy) * t_rem;               // 反射后 vy' = -vy
     return true;
+}
+
+// 球门覆盖基准：球→两门柱射门角的角平分线在门线处的 y。
+//   用途：区域防守者分散站位（assist/midfield 的 ±30）不应围着「球轨迹 y」散，
+//   而应围着「球门覆盖中心」散。球在边路(y=10)时球轨迹 y≈10，若围绕它 ±30
+//   两人都会挤在边线侧(≈40/20)，远门柱彻底漏空；角平分线会自然收敛到门心
+//   (≈85~90)，±30 后约 [55,115]，正好一个贴边、一个守远柱。
+//   与守门员 run_goalie 的「安全区域选位」同一几何，统一复用此函数。
+inline double goal_mouth_bisect_y(const WorldModel &wm) {
+    double ogx = wm.ctx.our_goal_x();
+    double bx = wm.ball.x, by = wm.ball.y;
+    double a_lo = std::atan2(goal_y_low()  - by, ogx - bx);
+    double a_hi = std::atan2(goal_y_high() - by, ogx - bx);
+    double y = by + std::tan(0.5 * (a_lo + a_hi)) * (ogx - bx);
+    if (!std::isfinite(y)) y = 90.0;                 // 球贴门线/门柱死角时退到门心
+    return clamp(y, goal_y_low(), goal_y_high());
 }
 
 // 对方射门是否「在门框内且朝门」：球会到达己方门线且落点在门宽内。
@@ -190,6 +207,18 @@ double mark_threat(double d_ball, double d_goal,
 //   最后做危险门限：被盯者须离球或离门够近才值得贴，否则返回 -1（回区域防守）。
 //   current_target：上一帧目标（-1=无）。返回新目标下标（-1=无人值得盯）。
 int pick_mark_target(const WorldModel &wm, int current_target);
+
+// 多人盯人分配（匈牙利）：威胁 >=0.6 时，把 PASSIVE/ASSIST/MIDFIELD 三个
+//   防守者与「威胁最高的前 N 个对方球员」做最小成本匹配（成本=行程距离），
+//   形成链式防守——不只贴一人、漏掉插上的接应者。结果写入 wm.mark_assign[]。
+//   门控：只盯「离球近(持球/抢点) 或 离门近(门前埋伏)」的对手，最多盯
+//   防守者数量个；多余防守者回区域防守（zone），不全部前压。
+void assign_marks(WorldModel &wm);
+
+// 盯人站位点：站在被盯对手「速度前馈未来位置」与参考点之间、mark_dist 处。
+//   参考点选择同旧 run_passive：被盯者离球 15~40cm 视为接球者 → 堵传球线(参考球)；
+//   否则堵射门线(参考球门心)。返回已夹场地边界 + 禁区纪律后的站位点 (mx,my)。
+void mark_opponent_point(const WorldModel &wm, int opp_idx, double &mx, double &my);
 
 // 二抢一（双人夹击）站位：持球者带球推进到门前危险区时，为区域防守者
 //   （assist/midfield 中非清道夫、离持球者更近者）算夹抢点。

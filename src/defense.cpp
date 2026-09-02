@@ -270,4 +270,146 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     return true;
 }
 
+// ============================================================
+// 盯人站位点：站在被盯对手「速度前馈未来位置」与其参考点之间、mark_dist 处。
+//   参考点选择同旧 run_passive：被盯者离球 15~40cm 视为接球者 → 堵传球线(参考球)；
+//   否则堵射门线(参考球门心)。返回已夹场地边界 + 禁区纪律后的站位点 (mx,my)。
+// ============================================================
+void mark_opponent_point(const WorldModel &wm, int opp_idx, double &mx, double &my) {
+    const TeamContext &ctx = wm.ctx;
+    double gx = ctx.our_goal_x(), gy = 90.0;
+    double px = wm.opp[opp_idx].x + wm.opp_vx[opp_idx] * mark_lead();
+    double py = wm.opp[opp_idx].y + wm.opp_vy[opp_idx] * mark_lead();
+
+    double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[opp_idx].x, wm.opp[opp_idx].y);
+    double ref_x = gx, ref_y = gy;                       // 默认 goal-side（堵射门线）
+    if (d_ball > 15.0 && d_ball < mark_pass_lane_dist()) {
+        ref_x = wm.ball.x; ref_y = wm.ball.y;            // 接球者 → 堵传球线
+    }
+    double dx = ref_x - px, dy = ref_y - py;
+    double len = std::hypot(dx, dy);
+    if (len > 1e-6) { dx /= len; dy /= len; }
+    mx = px + dx * mark_dist();
+    my = py + dy * mark_dist();
+    // 禁区纪律：站位点落入己方罚球区 → 推到罚球区前缘外（非门将不进禁区）
+    if (in_penalty_area(ctx, mx, my)) {
+        mx = gx + ctx.attack_dir() * 85.0;
+        my = clamp(py, 72.5, 107.5);
+    }
+    mx = clamp(mx, 0.0, TeamContext::FIELD_LENGTH);
+    my = clamp(my, 0.0, TeamContext::FIELD_WIDTH);
+}
+
+// ============================================================
+// 匈牙利最小成本指派（n 行 ≤ m 列，n,m ≤ 3）。经典 1-indexed O(n²m)。
+//   cost 是 n×m 连续数组；每行(目标)恰好匹配一个互不相同的列(防守者)，最小总成本。
+//   返回 assignment[i] = 行 i 匹配到的列下标（0-based）。
+// ============================================================
+static void hungarian(int n, int m, const double *cost, int *assignment) {
+    const double INF = 1e18;
+    double u[4] = {0}, v[4] = {0};
+    int    p[4] = {0}, way[4] = {0};
+    for (int i = 1; i <= n; ++i) {
+        p[0] = i;
+        int j0 = 0;
+        double minv[4];
+        bool   used[4] = {false};
+        for (int j = 0; j <= m; ++j) minv[j] = INF;
+        do {
+            used[j0] = true;
+            int i0 = p[j0], j1 = 0;
+            double delta = INF;
+            for (int j = 1; j <= m; ++j) {
+                if (used[j]) continue;
+                double cur = cost[(i0 - 1) * m + (j - 1)] - u[i0] - v[j];
+                if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (int j = 0; j <= m; ++j) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else         minv[j] -= delta;
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+        do {
+            int j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0);
+    }
+    for (int j = 1; j <= m; ++j)
+        if (p[j] > 0) assignment[p[j] - 1] = j - 1;
+}
+
+// ============================================================
+// 多人盯人分配（链式防守）：威胁 >=0.6 时，把 PASSIVE/ASSIST/MIDFIELD 三个
+//   防守者与「威胁最高的前 N 个对方球员」做最小成本匹配（成本=行程距离）。
+//   治「只有 PASSIVE 一人盯、对方二过一/边锋插上漏人」的根因。
+//   门控：只盯「离球近(持球/抢点) 或 离门近(门前埋伏)」的对手；最多盯
+//   防守者数量个；多余的防守者回区域防守(zone)，不全部前压。
+// ============================================================
+void assign_marks(WorldModel &wm) {
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_assign[i] = -1;
+
+    if (wm.threat_level < 0.6) return;   // 威胁不够 → 全区域防守
+
+    const TeamContext &ctx = wm.ctx;
+    double danger = ball_danger_speed(wm);
+
+    // 持球者（离球最近的对方球员）
+    int dribbler = -1;
+    double dmin = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        if (d < dmin) { dmin = d; dribbler = i; }
+    }
+
+    // 逐人威胁打分 + 是否值得盯
+    double threat[PLAYERS_PER_SIDE];
+    bool   worth[PLAYERS_PER_SIDE];
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        double d_goal = ctx.dist_our_goal(wm.opp[i].x);
+        double appr = ball_approach_speed(wm, wm.opp[i].x, wm.opp[i].y);
+        threat[i] = mark_threat(d_ball, d_goal, appr, danger, i == dribbler);
+        worth[i] = (d_ball < mark_engage_ball_dist()) || (d_goal < mark_engage_goal_dist());
+    }
+
+    // 盯人者集合：PASSIVE / ASSIST / MIDFIELD，且排除清道夫（清道夫钉中路/远柱）
+    int defenders[PLAYERS_PER_SIDE];
+    int nr = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        int r = wm.role[i];
+        if ((r == ROLE_PASSIVE || r == ROLE_ASSIST || r == ROLE_MIDFIELD) && i != wm.sweeper_id)
+            defenders[nr++] = i;
+    }
+    if (nr == 0) return;
+
+    // 目标集合：按威胁降序取「值得盯」的前 min(3, nr) 个
+    int order[PLAYERS_PER_SIDE];
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) order[i] = i;
+    std::sort(order, order + PLAYERS_PER_SIDE,
+              [&](int a, int b){ return threat[a] > threat[b]; });
+    int targets[PLAYERS_PER_SIDE];
+    int nt = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE && nt < nr; ++i)
+        if (worth[order[i]]) targets[nt++] = order[i];
+    if (nt == 0) return;
+
+    // 成本矩阵：cost[目标][防守者] = 防守者到目标速度前馈位置的行程距离
+    double cost[9];   // nt*nr <= 3*3
+    for (int i = 0; i < nt; ++i) {
+        double tx = wm.opp[targets[i]].x + wm.opp_vx[targets[i]] * mark_lead();
+        double ty = wm.opp[targets[i]].y + wm.opp_vy[targets[i]] * mark_lead();
+        for (int j = 0; j < nr; ++j)
+            cost[i * nr + j] = dist(wm.home[defenders[j]].x, wm.home[defenders[j]].y, tx, ty);
+    }
+
+    int assignment[3];
+    hungarian(nt, nr, cost, assignment);
+
+    for (int i = 0; i < nt; ++i)
+        wm.mark_assign[defenders[assignment[i]]] = targets[i];
+}
+
 }  // namespace simuro5

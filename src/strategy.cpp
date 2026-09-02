@@ -36,6 +36,9 @@ void Strategy::run(WorldModel &wm) {
     // 4.5 清道夫指派（球在防守三区拉边时，抽一个区域防守者钉中路封远门柱/横传）
     update_sweeper(wm);
 
+    // 4.6 多人盯人分配（威胁高时，PASSIVE/ASSIST/MIDFIELD 贴防对方多核，链式防守）
+    assign_marks(wm);
+
     // 5. 按角色执行（薄壳调度）
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         switch (wm.role[i]) {
