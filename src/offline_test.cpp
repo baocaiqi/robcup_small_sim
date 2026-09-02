@@ -320,6 +320,7 @@ static int test_pass() {
     wm.home[4].x = 80; wm.home[4].y = 170;
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     wm.opp[0].x = 64; wm.opp[0].y = 53;      // 距 A 接应点 20cm，且不挡传球线
+    wm.ball.valid = true; wm.ball.x = 80; wm.ball.y = 90;   // 接力源=球位（docs/14 口径）
     {
         PassPlan p = plan_pass(wm, 0);
         if (!p.viable || p.receiver_id != 2) {
@@ -336,6 +337,7 @@ static int test_pass() {
     wm.home[3].x = 150; wm.home[3].y = 50;
     wm.home[4].x = 150; wm.home[4].y = 120;
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 20 + i * 25; }
+    wm.ball.valid = true; wm.ball.x = 40; wm.ball.y = 50;   // 接力源=球位
     {
         PassPlan p = plan_pass(wm, 0);
         if (!p.viable || p.receiver_id != 1) {
@@ -360,6 +362,7 @@ static int test_pass() {
     wm.home[3].x = 160; wm.home[3].y = 90;   // 其余队友距离>60，不可选
     wm.home[4].x = 80; wm.home[4].y = 170;
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.ball.valid = true; wm.ball.x = 80; wm.ball.y = 90;   // 接力源=球位
     {
         PassPlan p = plan_pass(wm, 0);
         if (!p.viable || p.receiver_id != 1) {
@@ -385,6 +388,7 @@ static int test_pass() {
     wm.mid_x = 150;    wm.mid_y = 150;        // MIDFIELD 站位点远
     wm.passive_x = 150; wm.passive_y = 30;    // PASSIVE 站位点远
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.ball.valid = true; wm.ball.x = 80; wm.ball.y = 90;   // 接力源=球位（持球者=home[1]）
     {
         PassPlan p = plan_pass(wm, 1);
         if (!p.viable || p.receiver_id != 2) {
@@ -472,12 +476,127 @@ static int test_pass_threat_weight() {
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     wm.opp[0].x = 37.4; wm.opp[0].y = 59.5;  // A 后方 18cm：距(52,70)=18、距传球线=18(>15 不挡)
     wm.opp[1].x = 30.8; wm.opp[1].y = 125.1; // B 后方 26cm：距(52,110)=26、距传球线=26(>15 不挡)
+    wm.ball.valid = true; wm.ball.x = 80; wm.ball.y = 90;   // 接力源=球位
     PassPlan p = plan_pass(wm, 0);
     if (!p.viable || p.receiver_id != 2) {
         printf("FAIL: 距离加权应选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
         return 1;
     }
     printf("pass threat weight: OK (近盯防惩罚>远盯防)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/14 图论链规划单测：多跳价值(方案A) + 车道风险连续化(方案B) + 死胡同排除
+// 注意：接力源=球位（plan_pass 内部口径），场景均显式摆 wm.ball = 持球者位置。
+// ============================================================
+static int test_pass_chain() {
+    TeamContext ctx{true};               // 蓝队：门 x=220，攻向左（对方门 x=0）
+    WorldModel wm;
+    wm.ctx = ctx;
+
+    // —— 场景①：死胡同接应被排除，选有活链通向射门区的 B ——
+    // A(home[1]) 在下走廊 (180,60)：链最深到 (144,60)，距上方走廊(y=121)任何节点
+    //   ≥60cm、离对方门 >70cm → 预算内到不了「可射门」= 死胡同（旧单跳会选它）。
+    // B(home[2]) 在上走廊 (180,121) 有活链：B→(144,121)→C(home[3] (95,121) 的 d0
+    //   (89,121))→C-d2 (59,121) 进入射程（y=60/121 均不在罚球区带内，阶段点不被夹走）。
+    {
+        wm.ball.valid = true; wm.ball.x = 172; wm.ball.y = 110;
+        wm.home[0].x = 172; wm.home[0].y = 110;   // 持球者
+        wm.home[1].x = 180; wm.home[1].y = 60;    // A（下走廊死胡同）
+        wm.home[2].x = 180; wm.home[2].y = 121;   // B（上走廊，有活链）
+        wm.home[3].x = 95;  wm.home[3].y = 121;   // C（中转，d2=(59,121) 可射门）
+        wm.home[4].x = 30;  wm.home[4].y = 170;   // 远端孤立
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 5; wm.opp[i].y = 20 + i * 10; }
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 2) {
+            printf("FAIL: 死胡同应排除A、选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+        if (fabs(p.target_x - 174.0) > 0.5 || fabs(p.target_y - 121.0) > 0.5) {
+            printf("FAIL: 场景①第一跳应为B的d0(174,121) got (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+        if (p.chain_len < 2 || p.hop2_id < 0) {
+            printf("FAIL: 场景①应有>=2跳活链 chain_len=%d hop2=%d\n", p.chain_len, p.hop2_id);
+            return 1;
+        }
+        if (in_opp_goal_area(ctx, p.target_x, p.target_y)) {
+            printf("FAIL: 场景①目标落入对方门区 (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+    }
+
+    // —— 场景②：车道风险连续化——同距同终点威胁下，擦线(16cm)路线受罚、选开阔车道 ——
+    // A(home[1]) 与 B(home[2]) 关于球心对称，仅 A 的车道 s→(89,60) 中段有一个距线
+    // 16cm 的对手（不构成硬挡）。旧二值逻辑(≥15cm 都算干净)无法区分；新 lane_risk
+    // 罚 A → 必选 B。
+    {
+        wm.ball.valid = true; wm.ball.x = 120; wm.ball.y = 90;
+        wm.home[0].x = 120; wm.home[0].y = 90;    // 持球者
+        wm.home[1].x = 95; wm.home[1].y = 60;     // A → d0 (89,60)
+        wm.home[2].x = 95; wm.home[2].y = 120;    // B → d0 (89,120)
+        wm.home[3].x = 190; wm.home[3].y = 30;
+        wm.home[4].x = 190; wm.home[4].y = 170;
+        wm.opp[0].x = 115.6; wm.opp[0].y = 63.5;  // 距 A 车道 16cm（险线但不挡）
+        wm.opp[1].x = 40;  wm.opp[1].y = 160;     // 其余远离车道
+        wm.opp[2].x = 60;  wm.opp[2].y = 160;
+        wm.opp[3].x = 80;  wm.opp[3].y = 160;
+        wm.opp[4].x = 100; wm.opp[4].y = 160;
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 2) {
+            printf("FAIL: 车道擦线应受罚、选开阔B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+    }
+
+    // —— 场景③：全部第一跳车道被对手硬挡 → 不传（viable=false，沿用旧行为）——
+    {
+        wm.ball.valid = true; wm.ball.x = 100; wm.ball.y = 90;
+        wm.home[0].x = 100; wm.home[0].y = 90;    // 持球者
+        wm.home[1].x = 75; wm.home[1].y = 80;
+        wm.home[2].x = 75; wm.home[2].y = 100;
+        wm.home[3].x = 75; wm.home[3].y = 60;
+        wm.home[4].x = 75; wm.home[4].y = 120;
+        // 5 个对手横在 s→各 d0 的扇面上（x=84），每条第一跳车道都被硬挡
+        wm.opp[0].x = 84; wm.opp[0].y = 63;
+        wm.opp[1].x = 84; wm.opp[1].y = 74;
+        wm.opp[2].x = 84; wm.opp[2].y = 85;
+        wm.opp[3].x = 84; wm.opp[3].y = 95;
+        wm.opp[4].x = 84; wm.opp[4].y = 106;
+        PassPlan p = plan_pass(wm, 0);
+        if (p.viable) {
+            printf("FAIL: 车道全挡应不传 got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+    }
+
+    // —— 场景④：所有可行接应都是死胡同 → 回退旧行为，仍保底传最优 d0（不闷头前压）——
+    // 同场景①几何但去掉上走廊的 B/C：只剩 A(home[1]) 一个可行 d0 且无活链。
+    {
+        wm.ball.valid = true; wm.ball.x = 172; wm.ball.y = 110;
+        wm.home[0].x = 172; wm.home[0].y = 110;   // 持球者
+        wm.home[1].x = 180; wm.home[1].y = 60;    // A（唯一可行 d0，死胡同）
+        wm.home[2].x = 30;  wm.home[2].y = 170;
+        wm.home[3].x = 30;  wm.home[3].y = 40;
+        wm.home[4].x = 40;  wm.home[4].y = 160;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 5; wm.opp[i].y = 20 + i * 10; }
+        PassPlan p = plan_pass(wm, 0);
+        if (!p.viable || p.receiver_id != 1) {
+            printf("FAIL: 全死胡同应回退保底传A(home[1]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+            return 1;
+        }
+        if (fabs(p.target_x - 174.0) > 0.5 || fabs(p.target_y - 60.0) > 0.5) {
+            printf("FAIL: 场景④保底目标应为A的d0(174,60) got (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+        if (p.hop2_id != -1) {
+            printf("FAIL: 场景④保底链不应有第二跳 hop2=%d\n", p.hop2_id);
+            return 1;
+        }
+    }
+
+    printf("pass chain: OK (死胡同排除/风险梯度/全挡不传/全死保底)\n");
     return 0;
 }
 
@@ -701,6 +820,7 @@ int main() {
     rc |= test_fixed_roles();
     rc |= test_pass();
     rc |= test_pass_threat_weight();
+    rc |= test_pass_chain();
     rc |= test_goalie_scenarios();
     rc |= test_roles_spread();
     rc |= test_shoot_plan();
