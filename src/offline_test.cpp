@@ -280,7 +280,31 @@ static int test_team_state() {
     if (wm.team_state != TS_DEFENSE) { printf("FAIL: 连续失球 3 帧应回防守态\n"); return 1; }
     if (wm.threat_level < 0.5) { printf("FAIL: 防守态(蓝半场)威胁应 0.6 got %.2f\n", wm.threat_level); return 1; }
 
-    printf("team state: OK (滞回防抖/事件标志/威胁分级)\n");
+    // —— P0-2 连续威胁断言：球越靠己方门威胁越高；对方贴球比球孤立威胁高 ——
+    {
+        // 罚球区外（x∈[120,130]，己方半场）测单调性，避开罚球区 0.9 保底
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 120; wm.opp[i].y = 90; }
+        wm.ball.x = 120; wm.ball.y = 90;
+        strat.run(wm);
+        double t_far = wm.threat_level;
+        wm.ball.x = 130; wm.ball.y = 90;            // 距门更近 10cm
+        strat.run(wm);
+        double t_near = wm.threat_level;
+        if (t_near <= t_far) {
+            printf("FAIL: 球越靠己方门威胁应越高 (近 %.2f vs 远 %.2f)\n", t_near, t_far);
+            return 1;
+        }
+        // 对手全部远离（球孤立）→ 威胁应明显低于对方贴球同位置
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 40; wm.opp[i].y = 90; }
+        strat.run(wm);
+        double t_lone = wm.threat_level;
+        if (t_lone >= t_near) {
+            printf("FAIL: 球孤立威胁应低于对方贴球 (孤立 %.2f vs 贴球 %.2f)\n", t_lone, t_near);
+            return 1;
+        }
+    }
+
+    printf("team state: OK (滞回防抖/事件标志/威胁分级连续化)\n");
     return 0;
 }
 

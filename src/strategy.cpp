@@ -140,21 +140,51 @@ void Strategy::update_team_state(WorldModel &wm) {
 
 double Strategy::threat_from_state(const WorldModel &wm) const {
     const TeamContext &ctx = wm.ctx;
-    if (wm.team_state == TS_ATTACK) return 0.1;   // 我方控球：低威胁
-    // 防守态：按球的位置分级
-    if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return 1.0;   // 球在己方罚球区
-    bool our_half = ctx.attack_dir() > 0 ? (wm.ball.x < 110.0) : (wm.ball.x > 110.0);
-    double threat = our_half ? 0.6 : 0.4;
+    if (wm.team_state == TS_ATTACK) return 0.1;   // 我方控球：低威胁（下游阈值 0.1 精确比较）
 
-    // 球速方向加成（team-level danger）：球快速朝门滚时提前升档，让全队早回防。
-    //   danger = 球朝己方门的速度分量（defense.hpp 点积投影），横滚/背离=0，不会误判。
-    //   朝门且快 → 对方半场 0.4→0.6（提前触发人盯人）、己方半场 0.6→0.8（预留更高档）。
-    //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人——升 0.6 是真正的提前回防收益。
-    const double kThreatDangerSpeed = 6.0;   // cm/帧：朝门有效速度阈值（同 kDribbleSpeed 量级，可调）
-    if (ball_danger_speed(wm) > kThreatDangerSpeed) {
-        threat = our_half ? 0.8 : 0.6;
+    // —— 连续威胁函数（docs/14 #2，P0-2 真机驱动改造）——
+    //   原实现 = 半场二值(0.6/0.4) + 球速一档升(→0.8/0.6)，球位在阈值附近会跳变；
+    //   本版 = 空间连续 × 侧偏 × 持球 × 球速 四因子连续调制，语义对齐下游阈值：
+    //     >0.3 assist/mid 回防、>=0.6 passive 人盯人、罚球区≈1.0 全员回缩。
+    const double gx = ctx.our_goal_x();
+    const double bx = wm.ball.x, by = wm.ball.y;
+    const double dist_x = std::fabs(bx - gx);          // 到己方门线 x 距离 0..220
+
+    // 1) 空间因子（取代半场二值）：门线=1.0 → 罚球区边缘(80cm)≈0.86 → 中线=0.62 →
+    //    对方门线≈0.28。分段线性、单调无跳变；己方半场内越靠门威胁越高。
+    double spatial;
+    if (dist_x <= 110.0) spatial = 1.0 - 0.38 * (dist_x / 110.0);
+    else                 spatial = 0.62 - 0.34 * ((dist_x - 110.0) / 110.0);
+
+    // 2) 侧偏因子：球偏离门心 y=90 越远，直接射门角度越小 → 微降（贴边最多 -15%）。
+    //    治原实现的盲点：球贴着边线纵深推进时威胁与中路同档，回防过度。
+    const double side = std::min(1.0, std::fabs(by - 90.0) / 90.0);
+    const double side_f = 1.0 - 0.15 * side;
+
+    // 3) 持球因子（仅己方半场生效）：对方贴球(≤15cm)能立刻起脚/推进 → ×1.15；
+    //    球孤立(≥40cm)大概率被我方夺回 → ×0.8；线性过渡。
+    //    对方半场不乘：球没过中线前不因贴球提前人盯人（原语义：只有快速推进才升档）。
+    double press_f = 1.0;
+    if (dist_x <= 110.0) {
+        double opp_dmin = 1e9;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+            opp_dmin = std::min(opp_dmin, dist(bx, by, wm.opp[i].x, wm.opp[i].y));
+        press_f = 1.15;
+        if (opp_dmin > 15.0)
+            press_f = 1.15 - 0.35 * std::min(1.0, (opp_dmin - 15.0) / 25.0);
     }
-    return threat;
+
+    // 4) 球速因子（team-level danger，连续取代原 >6 单档）：
+    //    danger = 球朝己方门的速度分量（defense.hpp 点积投影，横滚/背离=0）。
+    //    0 → ×1.0；12cm/帧(≈480cm/s 高速射门) → ×1.2；24 → ×1.4（封顶）。
+    const double danger = ball_danger_speed(wm);
+    double speed_f = 1.0 + 0.0167 * danger;
+    if (speed_f > 1.4) speed_f = 1.4;
+
+    double t = spatial * side_f * press_f * speed_f;
+    // 罚球区保底：球进己方罚球区（含门区）→ ≥0.9（原恒 1.0，语义保留为"接近全员回缩"）
+    if (in_penalty_area(ctx, bx, by)) t = std::max(t, 0.9);
+    return std::max(0.15, std::min(1.0, t));
 }
 
 void Strategy::update_sweeper(WorldModel &wm) {
