@@ -89,6 +89,34 @@ inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y
     x = fx; y = fy;
 }
 
+// ============================================================
+// 禁止推球区（四角黄色区域，规则 7.2.6）
+//   任何队伍 2 个以上机器人在禁止推球区推球 → 犯规；
+//   每半场每 4 次犯规 → 对手 +1 进球；犯规判争球。
+//   位置：docs/00 实测记录为「场地四角黄色区域」；官方规则图 4 显示
+//   黄色区域位于场地两端（8cm 标注，避开禁区高度带）。
+//   实现按「四角矩形」可配置，尺寸 D6 真平台校准后只需改 CFG_CORNER_PUSH_SIZE。
+// ============================================================
+constexpr double CFG_CORNER_PUSH_SIZE = 8.0;   // 禁推区向场内尺寸 cm（初值：图 4 的 8cm 标注）
+
+inline bool in_forbidden_push_area(double x, double y) {
+    const double s = CFG_CORNER_PUSH_SIZE;
+    const bool corner_x = (x <= s) || (x >= TeamContext::FIELD_LENGTH - s);
+    const bool corner_y = (y <= s) || (y >= TeamContext::FIELD_WIDTH - s);
+    return corner_x && corner_y;
+}
+
+// 点落入禁推区 → 推到边缘外 2cm（带出角区，避免 2+ 人在角里推球犯规）
+inline void clamp_out_forbidden_push_area(double &x, double &y) {
+    if (!in_forbidden_push_area(x, y)) return;
+    const double s = CFG_CORNER_PUSH_SIZE;
+    const double out = s + 2.0;
+    if (x <= s) x = out;
+    else if (x >= TeamContext::FIELD_LENGTH - s) x = TeamContext::FIELD_LENGTH - out;
+    if (y <= s) y = out;
+    else if (y >= TeamContext::FIELD_WIDTH - s) y = TeamContext::FIELD_WIDTH - out;
+}
+
 // 是否在场地内
 inline bool in_field(double x, double y) {
     return in_rect(x, y, 0.0, TeamContext::FIELD_LENGTH, 0.0, TeamContext::FIELD_WIDTH);

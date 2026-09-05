@@ -67,6 +67,10 @@ struct WorldModel {
     double assist_x = 0, assist_y = 90;
     double mid_x = 110, mid_y = 90;
 
+    // D1 纪律：ACTIVE 在对方门区连续停留帧数（roles.cpp run_active 维护，
+    // 规则 7.10.1 单人停留 >20 周期判点球，≥18 帧强制撤离）
+    int active_goal_area_frames[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};
+
     // 每周期从平台环境刷新
     void update(const Environment *env, const TeamContext &ctx_);
 

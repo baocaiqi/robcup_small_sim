@@ -36,3 +36,14 @@ notes/
 
 # 仿真评估结果
 sim_eval_*.json
+
+# 一次性临时文件（补丁脚本/规则截图/规则提取）
+_patch_*.py
+_fix_tests.py
+_rule_*.png
+_fig9_*.png
+_rule_text.txt
+_tmp_user_img*.png
+
+# 真平台目录（exe/dll/官方demo，体积大不进仓库）
+Strategy/
