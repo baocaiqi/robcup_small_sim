@@ -454,20 +454,36 @@ static int test_goalie_scenarios() {
         printf("FAIL: 解围场景轮速异常\n"); return 1;
     }
 
-    // 场景6：门线横滚威胁（9/6 demo 战术B修复）——球贴门线横滚(非静止)、
-    //   demo 补射者 40cm 外冲点（未贴球）→ 新分支应触发：GK 抢先穿球清离门线。
-    //   若新分支失效会落到常规站位看球滚进门（真机丢球模式）。
+    // 场景6：门线横滚威胁 v2（9/6 demo 战术B两轮迭代）——球距门 20cm 慢滚
+    //   （非静止）、demo 补射者 40cm 外冲点（未贴球）→ 新分支触发：GK 站
+    //   球-门连线封路（球前 ~10cm），不拉离门线。
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
-    wm.ball.x = 215; wm.ball.y = 85; wm.ball.vx = 0.5; wm.ball.vy = 2.0;  // 沿门线横滚
-    wm.opp[0].x = 175; wm.opp[0].y = 85;   // 补射者 40cm 外（25~60 区间）
-    wm.home[0].x = 218; wm.home[0].y = 85; wm.home[0].rot = 180;  // 贴门线跟滚位
+    wm.ball.x = 200; wm.ball.y = 85; wm.ball.vx = 0.5; wm.ball.vy = 2.0;  // 慢滚向门
+    wm.opp[0].x = 160; wm.opp[0].y = 85;   // 补射者 40cm 外（25~60 区间）
+    wm.home[0].x = 218; wm.home[0].y = 85; wm.home[0].rot = 180;  // 门线附近
     run_goalie(wm, 0);
     if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
         printf("FAIL: 门线横滚场景轮速异常\n"); return 1;
     }
-    // 语义：目标 = 球前 20cm 场侧 (195,85)，GK(218,85) 面 -x → 应直行清球(vl≈vr>0)
+    // 语义：dgo=20 → back=8 depth=10 → 目标 (210,88)，GK(218,85) 面 -x → 直行封路
     if (!(wm.home[0].vl > 0.0 && wm.home[0].vr > 0.0)) {
-        printf("FAIL: 门线横滚应朝场侧清球 got vl=%.1f vr=%.1f\n",
+        printf("FAIL: 门线横滚应站球-门连线封路 got vl=%.1f vr=%.1f\n",
+               wm.home[0].vl, wm.home[0].vr);
+        return 1;
+    }
+
+    // 场景6b：球已贴门线(<12cm)慢滚 → GK 守门线 3cm 等球撞（不离开门线出击）
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
+    wm.ball.x = 214; wm.ball.y = 100; wm.ball.vx = 0.3; wm.ball.vy = 1.5;
+    wm.opp[0].x = 185; wm.opp[0].y = 100;   // 29cm 外
+    wm.home[0].x = 212; wm.home[0].y = 95; wm.home[0].rot = 0;   // rot=0 面 +x
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 贴门线球场景轮速异常\n"); return 1;
+    }
+    // 语义：dgo=6<12 → 目标 (217,100)，GK(212,95) 面 +x 朝门线方向 → vl/vr>0 直行
+    if (!(wm.home[0].vl > 0.0 && wm.home[0].vr > 0.0)) {
+        printf("FAIL: 贴门线球应守门线等球撞 got vl=%.1f vr=%.1f\n",
                wm.home[0].vl, wm.home[0].vr);
         return 1;
     }
