@@ -153,15 +153,6 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id);
 //   只 clamp 场地边界。由 run_passive「门前协防」分支在对方逼近时调用。
 bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y);
 
-// 门前清球指派（docs/06 第27轮：demo 门前僵持补射反制）
-//   球在我方门前 80cm 内、球速慢(<3)、对方任一<150cm（补射者逼近）时，
-//   离球最近的非 GK 防守者接管"门线清球"：已贴球(<12cm)推离门线，否则站
-//   挡线点等补射者冲脸。返回 true 并填 out_x/out_y = 接管目标点；
-//   false = 本角色不接管（非最近者 / 条件不满足），各自正常防守。
-//   真机根因：11:21 场帧3441-3499 协防只在 run_passive（被动者距球远+慢速
-//   晚到），离球最近的 assist 角色被盯人任务拉走 → 门前静止球无人清。
-bool door_clear_assign(const WorldModel &wm, int id, double &out_x, double &out_y);
-
 // 纯函数：断球点 = 球运动轨迹 ∩ 球门前 line_dist 处的拦截线
 //   拦截线是与球门线平行、位于球门前 line_dist 处的竖线：
 //     蓝队门 x=220 → 拦截线 x = 220 - 50 = 170（line_dist=50 时）

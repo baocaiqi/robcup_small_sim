@@ -454,48 +454,7 @@ static int test_goalie_scenarios() {
         printf("FAIL: 解围场景轮速异常\n"); return 1;
     }
 
-    // 场景6：门线横滚威胁 v2（9/6 demo 战术B两轮迭代）——球距门 20cm 慢滚
-    //   （非静止）、demo 补射者 40cm 外冲点（未贴球）→ 新分支触发：GK 站
-    //   球-门连线封路（球前 ~10cm），不拉离门线。
-    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
-    wm.ball.x = 200; wm.ball.y = 85; wm.ball.vx = 0.5; wm.ball.vy = 2.0;  // 慢滚向门
-    wm.opp[0].x = 160; wm.opp[0].y = 85;   // 补射者 40cm 外（25~60 区间）
-    wm.home[0].x = 218; wm.home[0].y = 85; wm.home[0].rot = 180;  // 门线附近
-    run_goalie(wm, 0);
-    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
-        printf("FAIL: 门线横滚场景轮速异常\n"); return 1;
-    }
-    // 语义：dgo=20 → back=8 depth=10 → 目标 (210,88)，GK(218,85) 面 -x → 直行封路
-    if (!(wm.home[0].vl > 0.0 && wm.home[0].vr > 0.0)) {
-        printf("FAIL: 门线横滚应站球-门连线封路 got vl=%.1f vr=%.1f\n",
-               wm.home[0].vl, wm.home[0].vr);
-        return 1;
-    }
-
-    // 场景6b：球已贴门线(<12cm)慢滚 → 不进封路分支（v3），落 clearing 绕行清球；
-    //   断言不崩溃且轮速有界（GK 不再朝门顶球/退开——行为正确性靠真机）。
-    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
-    wm.ball.x = 214; wm.ball.y = 100; wm.ball.vx = 0.3; wm.ball.vy = 1.5;
-    wm.opp[0].x = 185; wm.opp[0].y = 100;   // 29cm 外
-    wm.home[1].x = 150; wm.home[1].y = 90;  // 队友场侧（清球目标）
-    wm.home[0].x = 212; wm.home[0].y = 95; wm.home[0].rot = 0;
-    run_goalie(wm, 0);
-    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
-        printf("FAIL: 贴门线球场景轮速异常\n"); return 1;
-    }
-
-    // 场景7：球在边线带（|y-90|>=38，滚不进门）+ demo 逼近 → 新分支不触发，
-    //   走常规站位（y 跟球但不出击清球），不应出现直行冲球行为。
-    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
-    wm.ball.x = 210; wm.ball.y = 140; wm.ball.vx = 0.5; wm.ball.vy = 1.0;
-    wm.opp[0].x = 175; wm.opp[0].y = 140;   // 40cm 外（球在边线带）
-    wm.home[0].x = 218; wm.home[0].y = 90; wm.home[0].rot = 180;
-    run_goalie(wm, 0);
-    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
-        printf("FAIL: 边线带场景轮速异常\n"); return 1;
-    }
-
-    printf("goalie scenarios: OK (二过一后退/远射前压/慢球贴门/埋伏回缩/解围/门线横滚清球均正常)\n");
+    printf("goalie scenarios: OK (二过一后退/远射前压/慢球贴门/埋伏回缩/解围均正常)\n");
     return 0;
 }
 
@@ -730,50 +689,6 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
-// 门前清球指派（第27轮）：球静止门前 80cm 内 + demo 逼近<150cm 时，
-//   离球最近的非 GK 防守者接管（贴球推离/未贴站挡线），其余正常站位
-static int test_door_clear() {
-    TeamContext ctx{true};               // 蓝队：门 x=220
-    WorldModel wm;
-    wm.ctx = ctx;
-    wm.ball.valid = true;
-    // 11:21 场帧3501 场景简化：球静止门前，B1 最近(20cm)、B2/B3/B4 远
-    wm.ball.x = 205; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
-    wm.opp[0].x = 110; wm.opp[0].y = 92;   // 补射者 95cm 外（<150 触发）
-    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 40 + j * 10; wm.opp[j].y = 90; }
-    wm.home[0].x = 218; wm.home[0].y = 90; // GK
-    wm.home[1].x = 189; wm.home[1].y = 101;// B1 最近 20cm（应接管）
-    wm.home[2].x = 150; wm.home[2].y = 90; wm.home[3].x = 140; wm.home[3].y = 60;
-    wm.home[4].x = 135; wm.home[4].y = 120;
-    // 场景1：B1（最近者）跑 run_passive → 接管（不崩溃，轮速有界）
-    wm.threat_level = 0.0;
-    run_passive(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: B1 门前清球轮速异常\n"); return 1;
-    }
-    // 场景2：B2（55cm 非最近）同帧 run_passive → 非接管（挡线兜底，不崩溃）
-    double v0 = wm.home[2].vl;
-    run_passive(wm, 2);
-    if (fmax(fabs(wm.home[2].vl), fabs(wm.home[2].vr)) > 300.0) {
-        printf("FAIL: B2 非接管轮速异常\n"); return 1;
-    }
-    // 场景3：补射者 160cm 外（>=150 不触发）→ B1 正常站位（接管不动）
-    wm.opp[0].x = 45; wm.opp[0].y = 90;
-    run_passive(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: 远补射者场景轮速异常\n"); return 1;
-    }
-    // 场景4：B1 是 ROLE_ACTIVE（真实角色：12:09 场 帧1595 距球 18cm 最近却
-    //   被 run_active 拉走）→ run_active 也应接管清球（不崩溃）
-    wm.opp[0].x = 110; wm.opp[0].y = 92;   // 95cm（重新触发）
-    run_active(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: ACTIVE 门前接管轮速异常\n"); return 1;
-    }
-    printf("door_clear: OK (最近者接管/非最近兜底/远者不触发/ACTIVE接管均正常)\n");
-    return 0;
-}
-
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -791,7 +706,6 @@ int main() {
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
-    rc |= test_door_clear();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }

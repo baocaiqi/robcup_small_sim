@@ -208,40 +208,6 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
 }
 
 // ============================================================
-// 门前清球指派（docs/06 第27轮：demo 门前僵持补射反制）
-// ============================================================
-bool door_clear_assign(const WorldModel &wm, int id, double &out_x, double &out_y) {
-    const TeamContext &ctx = wm.ctx;
-    // 触发：球在我方门前 80cm 内、球速慢（静止/慢滚，可清）、对方已逼近
-    if (ctx.dist_our_goal(wm.ball.x) >= 80.0) return false;
-    if (std::hypot(wm.ball.vx, wm.ball.vy) >= 3.0) return false;
-    double opp_dmin = 1e9;
-    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
-        if (d < opp_dmin) opp_dmin = d;
-    }
-    if (opp_dmin >= 150.0) return false;   // 150cm（第15轮 100cm 实测仍晚到）
-
-    // 只有离球最近的非 GK 防守者接管（避免多人冲球撞车）
-    double my_db = dist(wm.home[id].x, wm.home[id].y, wm.ball.x, wm.ball.y);
-    for (int j = 1; j < PLAYERS_PER_SIDE; ++j) {
-        if (j == id) continue;
-        double d = dist(wm.home[j].x, wm.home[j].y, wm.ball.x, wm.ball.y);
-        if (d < my_db) return false;
-    }
-
-    if (my_db < 12.0) {
-        // 已贴球：推离门线（球向场侧 15cm，从门侧穿球心推走）
-        out_x = wm.ball.x + ctx.attack_dir() * 15.0;
-        out_y = clamp(wm.ball.y, 72.5, 107.5);
-    } else {
-        // 未贴球：站挡线点（goal_cover_point，球前 8cm 朝门堵推射线）
-        goal_cover_point(wm, out_x, out_y);
-    }
-    return true;
-}
-
-// ============================================================
 // 人盯人：威胁打分 + 目标选择（见 defense.hpp 注释）
 // ============================================================
 double mark_threat(double d_ball, double d_goal,
