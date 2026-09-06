@@ -655,7 +655,47 @@ static int test_shoot_plan() {
             return 1;
         }
     }
-    printf("shoot plan: OK (可射/dir单位/推球点/GK远侧开口)\n");
+    // 贴线球（块②B）：球 x=3 贴门线（dgoal=3）应可射（直线推穿 2-3cm 过线）
+    wm.ball.x = 3.0; wm.ball.y = 90.0;
+    wm.opp[0].x = 6.0; wm.opp[0].y = 106.0;   // GK 贴上柱 → 应瞄下开口 74
+    {
+        ShootPlan p3 = plan_shoot(wm, 1);
+        if (!p3.viable) { printf("FAIL: 贴线球应可射\n"); return 1; }
+        if (p3.dir_x >= 0.0) { printf("FAIL: 贴线球推球方向应朝门内 (dir_x=%.2f)\n", p3.dir_x); return 1; }
+    }
+    printf("shoot plan: OK (可射/dir单位/推球点/GK远侧开口/贴线球可射)\n");
+    return 0;
+}
+
+// 死球等待豁免（块②B）：球静止对方门区 = demo 门球 → 我方无贴球才等待；
+//   我方贴球（刚带球进对方门区）→ 不等待、直接落射门（不崩溃）
+static int test_deadball_exempt() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.x = 3.0; wm.ball.y = 90.0;   // 对方门区贴线静止
+    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 215; wm.home[0].y = 90;
+    wm.home[1].x = 8.0; wm.home[1].y = 90;   // B1 贴球 5cm
+    wm.home[2].x = 80; wm.home[2].y = 90;
+    wm.home[3].x = 100; wm.home[3].y = 50;
+    wm.home[4].x = 120; wm.home[4].y = 130;
+    // demo GK 贴上柱 + 其余中场（我方贴球 → 豁免等待）
+    wm.opp[0].x = 6.0; wm.opp[0].y = 106.0;
+    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 60 + j * 15; wm.opp[j].y = 40 + j * 20; }
+    run_active(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: 我方贴球豁免场景轮速异常\n"); return 1;
+    }
+    // 对照组：demo 贴球（Y0 距球 3cm）→ 走死球等待（我方不贴）
+    wm.opp[0].x = 4.0; wm.opp[0].y = 90.0;
+    wm.home[1].x = 30.0; wm.home[1].y = 90.0;   // B1 不贴球
+    run_active(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: demo 贴球等待场景轮速异常\n"); return 1;
+    }
+    printf("deadball exempt: OK (我方贴球不等待/demo贴球等待均正常)\n");
     return 0;
 }
 
@@ -771,6 +811,7 @@ int main() {
     rc |= test_goalie_scenarios();
     rc |= test_roles_spread();
     rc |= test_shoot_plan();
+    rc |= test_deadball_exempt();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
     rc |= test_angle_trap();
