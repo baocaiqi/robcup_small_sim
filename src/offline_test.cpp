@@ -724,6 +724,38 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
+// 门角陷阱退出（进攻强化块②A）：贴球在对方门线角区且 demo 挡线者不在
+//   <20cm（不触发围困）→ 不再死带 150 帧——回传/撤向中场
+static int test_angle_trap() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    // 12:28 帧3171-3322 死带场景：球贴对方门线角区 (2,160)
+    wm.ball.x = 2.0; wm.ball.y = 160.0;
+    wm.home[0].x = 215; wm.home[0].y = 90;
+    wm.home[1].x = 5.0; wm.home[1].y = 152.0;  // B1 贴球 9cm
+    wm.home[2].x = 100; wm.home[2].y = 90;     // 队友中场可接应
+    wm.home[3].x = 120; wm.home[3].y = 50;
+    wm.home[4].x = 130; wm.home[4].y = 130;
+    // demo 挡线者 22cm（>20 不触发围困，只触发角区陷阱）
+    wm.opp[0].x = 4.0; wm.opp[0].y = 138.0;
+    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 25 + j * 10; wm.opp[j].y = 90; }
+    run_active(wm, 1);
+    double v1 = fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr));
+    if (v1 > 300.0) { printf("FAIL: 门角陷阱轮速异常 %.1f\n", v1); return 1; }
+    // 对照组：球在门宽中路 (3,90)（非陷阱）→ 正常射门/带球路径，不崩溃
+    wm.ball.y = 90.0;
+    wm.home[1].x = 8.0; wm.home[1].y = 90.0;
+    run_active(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: 中路对照组轮速异常\n"); return 1;
+    }
+    printf("angle trap: OK (门角死带退出/中路正常射门均不崩溃)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -741,6 +773,7 @@ int main() {
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
+    rc |= test_angle_trap();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
