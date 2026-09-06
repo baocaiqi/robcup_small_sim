@@ -763,7 +763,14 @@ static int test_door_clear() {
     if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
         printf("FAIL: 远补射者场景轮速异常\n"); return 1;
     }
-    printf("door_clear: OK (最近者接管/非最近兜底/远者不触发均正常)\n");
+    // 场景4：B1 是 ROLE_ACTIVE（真实角色：12:09 场 帧1595 距球 18cm 最近却
+    //   被 run_active 拉走）→ run_active 也应接管清球（不崩溃）
+    wm.opp[0].x = 110; wm.opp[0].y = 92;   // 95cm（重新触发）
+    run_active(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: ACTIVE 门前接管轮速异常\n"); return 1;
+    }
+    printf("door_clear: OK (最近者接管/非最近兜底/远者不触发/ACTIVE接管均正常)\n");
     return 0;
 }
 
