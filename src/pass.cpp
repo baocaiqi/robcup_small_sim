@@ -83,6 +83,25 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     double best_score = 1e9;
     double best_tx = 0, best_ty = 0;
 
+    // —— 围困检测（与 roles.cpp 围困分支同口径）——
+    //   持球者周围 25cm ≥2 个对手 或 最近对手 <12cm = 被围，球即将被断：
+    //   此时出球优先级从"最靠前"切换为"最近安全点"——短传保球权，不再追前。
+    //   真实 9/3 vs demo 复盘（12:03 场）：我方持球段 43 段里 32 段横移/原地
+    //   平均 2 秒推不出去——根因之一就是围困时仍按 goal_dist 偏爱前方 50~60cm
+    //   点，前方被 demo 卡死路线就死带；侧后 30cm 的安全短传反被"不够靠前"落选。
+    int swarm = 0;
+    double opp_near = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(px, py, wm.opp[i].x, wm.opp[i].y);
+        if (d < 25.0) ++swarm;
+        if (d < opp_near) opp_near = d;
+    }
+    const bool besieged = (swarm >= 2) || (opp_near < 12.0);
+    const double kGoalW = besieged ? 0.0 : 1.0;   // 被围：不再为"更靠前"冒险
+    const double kDistW = besieged ? 2.5 : 0.5;   // 被围：短传权重 ×5（每 cm 罚 2.5 分）
+    const double kFrontW = besieged ? 0.0 : 12.0; // 被围：不看"前方威胁"（贴球者多在本方
+                                                  //   前方，会误伤近侧后出球点）
+
     for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
 
@@ -116,8 +135,9 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
         int front_threat = count_front_opponent(wm, tx, ty, ad);   // 前方威胁（比目标点更靠对方球门）
 
         // —— 评分：越靠前越好 + 威胁越低越好 + 传球越短越稳 ——
+        //   被围(besieged)时去掉"靠前"加分并放大短传权重 → 选最近的安全接应。
         double goal_dist = std::fabs(tx - ctx.opp_goal_x());
-        double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
+        double score = kGoalW * goal_dist + threat * 20.0 + kFrontW * front_threat + kDistW * pass_dist;
 
         if (score < best_score) {
             best_score = score;
