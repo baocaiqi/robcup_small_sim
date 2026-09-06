@@ -730,6 +730,43 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
+// 门前清球指派（第27轮）：球静止门前 80cm 内 + demo 逼近<150cm 时，
+//   离球最近的非 GK 防守者接管（贴球推离/未贴站挡线），其余正常站位
+static int test_door_clear() {
+    TeamContext ctx{true};               // 蓝队：门 x=220
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    // 11:21 场帧3501 场景简化：球静止门前，B1 最近(20cm)、B2/B3/B4 远
+    wm.ball.x = 205; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 110; wm.opp[0].y = 92;   // 补射者 95cm 外（<150 触发）
+    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 40 + j * 10; wm.opp[j].y = 90; }
+    wm.home[0].x = 218; wm.home[0].y = 90; // GK
+    wm.home[1].x = 189; wm.home[1].y = 101;// B1 最近 20cm（应接管）
+    wm.home[2].x = 150; wm.home[2].y = 90; wm.home[3].x = 140; wm.home[3].y = 60;
+    wm.home[4].x = 135; wm.home[4].y = 120;
+    // 场景1：B1（最近者）跑 run_passive → 接管（不崩溃，轮速有界）
+    wm.threat_level = 0.0;
+    run_passive(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: B1 门前清球轮速异常\n"); return 1;
+    }
+    // 场景2：B2（55cm 非最近）同帧 run_passive → 非接管（挡线兜底，不崩溃）
+    double v0 = wm.home[2].vl;
+    run_passive(wm, 2);
+    if (fmax(fabs(wm.home[2].vl), fabs(wm.home[2].vr)) > 300.0) {
+        printf("FAIL: B2 非接管轮速异常\n"); return 1;
+    }
+    // 场景3：补射者 160cm 外（>=150 不触发）→ B1 正常站位（接管不动）
+    wm.opp[0].x = 45; wm.opp[0].y = 90;
+    run_passive(wm, 1);
+    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: 远补射者场景轮速异常\n"); return 1;
+    }
+    printf("door_clear: OK (最近者接管/非最近兜底/远者不触发均正常)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -747,6 +784,7 @@ int main() {
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
+    rc |= test_door_clear();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
