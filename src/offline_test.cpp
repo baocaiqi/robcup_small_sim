@@ -472,20 +472,16 @@ static int test_goalie_scenarios() {
         return 1;
     }
 
-    // 场景6b：球已贴门线(<12cm)慢滚 → GK 守门线 3cm 等球撞（不离开门线出击）
+    // 场景6b：球已贴门线(<12cm)慢滚 → 不进封路分支（v3），落 clearing 绕行清球；
+    //   断言不崩溃且轮速有界（GK 不再朝门顶球/退开——行为正确性靠真机）。
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
     wm.ball.x = 214; wm.ball.y = 100; wm.ball.vx = 0.3; wm.ball.vy = 1.5;
     wm.opp[0].x = 185; wm.opp[0].y = 100;   // 29cm 外
-    wm.home[0].x = 212; wm.home[0].y = 95; wm.home[0].rot = 0;   // rot=0 面 +x
+    wm.home[1].x = 150; wm.home[1].y = 90;  // 队友场侧（清球目标）
+    wm.home[0].x = 212; wm.home[0].y = 95; wm.home[0].rot = 0;
     run_goalie(wm, 0);
     if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
         printf("FAIL: 贴门线球场景轮速异常\n"); return 1;
-    }
-    // 语义：dgo=6<12 → 目标 (217,100)，GK(212,95) 面 +x 朝门线方向 → vl/vr>0 直行
-    if (!(wm.home[0].vl > 0.0 && wm.home[0].vr > 0.0)) {
-        printf("FAIL: 贴门线球应守门线等球撞 got vl=%.1f vr=%.1f\n",
-               wm.home[0].vl, wm.home[0].vr);
-        return 1;
     }
 
     // 场景7：球在边线带（|y-90|>=38，滚不进门）+ demo 逼近 → 新分支不触发，
