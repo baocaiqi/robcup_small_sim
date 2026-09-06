@@ -421,7 +421,42 @@ static int test_pass() {
         }
     }
 
-    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点)\n");
+    // 场景⑤（P0-1）：持球者被围（周围 25cm ≥2 对手）→ 出球从"最靠前"切"最近安全点"。
+    //   持球者(100,90)，demo 上下贴球(100,66)/(100,114)；ASSIST 站位点在前(82,90)
+    //   （接应点 76,90，更靠对方门=旧评分胜出方），MIDFIELD 站位点侧后(118,90)
+    //   （接应点 112,90，更近）。被围后应选近的 MIDFIELD——侧后短传出球，不再死带。
+    wm.role[0] = ROLE_GOALIE;
+    wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST;
+    wm.role[3] = ROLE_MIDFIELD;
+    wm.role[4] = ROLE_PASSIVE;
+    wm.home[0].x = 210; wm.home[0].y = 90;
+    wm.home[1].x = 100; wm.home[1].y = 90;   // 持球者(ACTIVE)
+    wm.home[2].x = 150; wm.home[2].y = 90;   // ASSIST 本体远，用站位点
+    wm.home[3].x = 150; wm.home[3].y = 150;  // MIDFIELD 本体远，用站位点
+    wm.home[4].x = 150; wm.home[4].y = 30;
+    wm.assist_x = 82;  wm.assist_y = 90;     // 前方接应点(76,90) 距 24cm
+    wm.mid_x = 118;    wm.mid_y = 90;        // 侧后接应点(112,90) 距 12cm
+    wm.passive_x = 150; wm.passive_y = 30;
+    wm.opp[0].x = 100; wm.opp[0].y = 66;     // 上下贴球：swarm=2 → 被围
+    wm.opp[1].x = 100; wm.opp[1].y = 114;
+    wm.opp[2].x = 200; wm.opp[2].y = 30;
+    wm.opp[3].x = 200; wm.opp[3].y = 90;
+    wm.opp[4].x = 200; wm.opp[4].y = 150;
+    {
+        PassPlan p = plan_pass(wm, 1);
+        if (!p.viable || p.receiver_id != 3) {
+            printf("FAIL: 场景⑤被围应选近侧后点MID(home[3]) got viable=%d recv=%d\n",
+                   p.viable, p.receiver_id);
+            return 1;
+        }
+        if (fabs(p.target_x - 112.0) > 0.5 || fabs(p.target_y - 90.0) > 0.5) {
+            printf("FAIL: 场景⑤被围接应点应为(112,90) got (%.1f,%.1f)\n", p.target_x, p.target_y);
+            return 1;
+        }
+    }
+
+    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点/被围近点)\n");
     return 0;
 }
 
