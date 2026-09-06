@@ -748,6 +748,36 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
+// 对方罚球区角落死球等待单测（真机 9/6 点球修复）：
+//   球静止对方门前角落（y 距门心 >20 但 <40，如 (14.8,69.6)）——旧容差(|y-90|<20)
+//   不触发等待 → ACTIVE 冲进罚球区推球撞 demo → 判点球（真机 7 次之一）。
+//   新容差(|y-90|<40)：应触发等待，ACTIVE 站罚球区外沿 (85, clamp(y)) 不冲抢。
+static int test_active_deadball_wait() {
+    TeamContext ctx{true};               // 蓝队：对方门 x=0
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.x = 14.8; wm.ball.y = 69.6;  // 罚球区角落死球（y 容差 20.4，旧判漏）
+    wm.ball.vx = 0.0; wm.ball.vy = 0.0;  // 静止
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 30 + i * 20; }
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.home[1].x = 30; wm.home[1].y = 90; wm.home[1].rot = 0;  // ACTIVE 在对方门区附近
+    wm.active_ga_frames = 0;
+    wm.corner_ball_frames = 0;
+    wm.dead_ball_frames = 0;
+    run_active(wm, 1);
+    // 等待目标 = (85, clamp(69.6→72.5))：从 (30,90) 出发朝 +x 走（vl/vr>0）；
+    //   若旧逻辑（冲球推射）会朝球(-x 方向,球在 x=14.8)走 → vl/vr<0
+    if (!(wm.home[1].vl > 0.0 && wm.home[1].vr > 0.0) ||
+        fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
+        printf("FAIL: 罚球区角落死球应等待不冲抢 got vl=%.1f vr=%.1f\n",
+               wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+    printf("active dead-ball wait: OK (罚球区角落死球撤到外沿等, 防冲推判点)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -765,6 +795,7 @@ int main() {
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
+    rc |= test_active_deadball_wait();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }
