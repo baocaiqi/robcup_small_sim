@@ -454,7 +454,36 @@ static int test_goalie_scenarios() {
         printf("FAIL: 解围场景轮速异常\n"); return 1;
     }
 
-    printf("goalie scenarios: OK (二过一后退/远射前压/慢球贴门/埋伏回缩/解围均正常)\n");
+    // 场景6：门线横滚威胁（9/6 demo 战术B修复）——球贴门线横滚(非静止)、
+    //   demo 补射者 40cm 外冲点（未贴球）→ 新分支应触发：GK 抢先穿球清离门线。
+    //   若新分支失效会落到常规站位看球滚进门（真机丢球模式）。
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
+    wm.ball.x = 215; wm.ball.y = 85; wm.ball.vx = 0.5; wm.ball.vy = 2.0;  // 沿门线横滚
+    wm.opp[0].x = 175; wm.opp[0].y = 85;   // 补射者 40cm 外（25~60 区间）
+    wm.home[0].x = 218; wm.home[0].y = 85; wm.home[0].rot = 180;  // 贴门线跟滚位
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 门线横滚场景轮速异常\n"); return 1;
+    }
+    // 语义：目标 = 球前 20cm 场侧 (195,85)，GK(218,85) 面 -x → 应直行清球(vl≈vr>0)
+    if (!(wm.home[0].vl > 0.0 && wm.home[0].vr > 0.0)) {
+        printf("FAIL: 门线横滚应朝场侧清球 got vl=%.1f vr=%.1f\n",
+               wm.home[0].vl, wm.home[0].vr);
+        return 1;
+    }
+
+    // 场景7：球在边线带（|y-90|>=38，滚不进门）+ demo 逼近 → 新分支不触发，
+    //   走常规站位（y 跟球但不出击清球），不应出现直行冲球行为。
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100 + i * 10; wm.opp[i].y = 90; }
+    wm.ball.x = 210; wm.ball.y = 140; wm.ball.vx = 0.5; wm.ball.vy = 1.0;
+    wm.opp[0].x = 175; wm.opp[0].y = 140;   // 40cm 外（球在边线带）
+    wm.home[0].x = 218; wm.home[0].y = 90; wm.home[0].rot = 180;
+    run_goalie(wm, 0);
+    if (fmax(fabs(wm.home[0].vl), fabs(wm.home[0].vr)) > 300.0) {
+        printf("FAIL: 边线带场景轮速异常\n"); return 1;
+    }
+
+    printf("goalie scenarios: OK (二过一后退/远射前压/慢球贴门/埋伏回缩/解围/门线横滚清球均正常)\n");
     return 0;
 }
 
