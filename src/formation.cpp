@@ -32,7 +32,10 @@ void defense_formation(const TeamContext &c, Robot *r) {
 // 修复：原罚球人放 id4(PASSIVE 只防守不追球) → 发球没人踢；改 id1(ACTIVE) 带球推进天然覆盖
 void kickoff_formation(const TeamContext &c, Robot *r) {
     put(r, 0, M(c, 215), 90, goalie_rot(c));
-    put(r, 1, M(c, 100), 90, field_rot(c));   // ACTIVE：球(110)后 10cm，开球即推
+    put(r, 1, M(c, 120), 90, field_rot(c));   // ACTIVE：球(110)后 10cm（远离对方门侧），开球即直线推对方门
+    // 修复：原 M(c,100)=球前(蓝100/黄120)方向反了——ACTIVE 从球前出发要绕球后，
+    //   路径穿过球把球撞向己方门/边路（rlg 实测开球球 x 109→126 往右下角滚丢球、
+    //   5~10 帧才碰到球）。球后=attack_dir 反侧：蓝 120、黄 100。
     put(r, 2, M(c, 150), 60, field_rot(c));
     put(r, 3, M(c, 150), 120, field_rot(c));
     put(r, 4, M(c, 185), 90, field_rot(c));
