@@ -429,6 +429,10 @@ static void wall_opponent(SimState &s) {
     gk.y += dy;
     gk.x = 8.0; gk.rot = 0.0; gk.vl = gk.vr = 0;
     double wy[4] = {55.0, 78.0, 102.0, 145.0};
+    // 双层深度（9/7 真机 demo 战术：球压前场时双层弧 x20-60 y60-150，
+    //   见 docs/06 第34轮热区 x40-60 y90-120 最密 417）——按球 x 动态前压：
+    //   球 x<40 贴线关门（原单层）；x40-110 双层弧前压；x>110 回中圈
+    double dline[4] = {24.0, 36.0, 48.0, 55.0};   // 双层弧各员 x 深度
     for (int i = 1; i < 5; ++i) {
         double db = std::hypot(s.bx - R[i].x, s.by - R[i].y);
         // 解围优先：贴线者距球<13 且球贴门线(x<30) → 推球回中场
@@ -436,11 +440,17 @@ static void wall_opponent(SimState &s) {
         double tx, ty;
         if (i == 4) {
             if (s.bx < 60.0) { tx = s.bx + 8.0; ty = s.by; }   // 机动关门（挡我们推线）
-            else { tx = 60.0; ty = 90.0; }
+            else if (s.bx < 110.0) { tx = 70.0; ty = (s.by > 90 ? 40.0 : 140.0); }  // 中场边路截击
+            else { tx = 95.0; ty = 90.0; }
         } else {
-            tx = 10.0 + (i - 1) * 4.0; ty = wy[i - 1];          // 贴线墙位
+            if (s.bx >= 40.0) {
+                tx = dline[i - 1] + (s.bx > 80.0 ? 6.0 : 0.0);   // 双层弧前压
+            } else {
+                tx = 10.0 + (i - 1) * 4.0;                        // 贴线深度（球已压到门前）
+            }
+            ty = wy[i - 1];                                       // 墙位
             if (s.bx < 40.0 && std::fabs(s.by - wy[i - 1]) < 25.0) {
-                tx = s.bx + 6.0; ty = s.by;                     // 球压近 → 关门位
+                tx = s.bx + 6.0; ty = s.by;                       // 球压近 → 关门位
             }
         }
         drive(R[i], tx, ty, 55.0);
