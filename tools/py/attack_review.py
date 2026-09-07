@@ -34,7 +34,7 @@ def main():
     n = len(frames)
     print(f"### {os.path.basename(rlg)}  ({n/40:.0f}s)")
 
-    # 我方进球/失球（断档法）
+    # 我方进球/失球（断档法）+ 进球方式分类
     our_g = []; opp_g = []
     for i in range(1, n):
         b0, b1 = frames[i-1]["ball"], frames[i]["ball"]
@@ -43,6 +43,15 @@ def main():
             if b0["x"] < 1.5 and 70 < b0["y"] < 110: our_g.append(i)
             if b0["x"] > 218.5 and 70 < b0["y"] < 110: opp_g.append(i)
     print(f"   我方进球断档: {our_g}   对方进球断档: {opp_g}")
+    # 进球分类：断档帧前 0.5s 我方最近者距球 <25cm = 我方贴球终结（运动战）；
+    #   >25cm = 球自己滚进（demo 失误/推大）
+    for g in our_g:
+        p = max(0, g - 20)
+        b = frames[p]["ball"]
+        dmin = min(((frames[p]["blue"][j]["x"]-b["x"])**2 + (frames[p]["blue"][j]["y"]-b["y"])**2)**0.5 for j in range(5))
+        ymin = min(((frames[p]["yellow"][j]["x"]-b["x"])**2 + (frames[p]["yellow"][j]["y"]-b["y"])**2)**0.5 for j in range(5))
+        typ = "运动战(我方贴球)" if dmin < 25 else "demo失误/球自滚"
+        print(f"   我方进球@{g/40:.1f}s: {typ}  我方最近{dmin:.0f}cm demo最近{ymin:.0f}cm")
 
     # 死带检测：我方(非GK)贴球(d<15) 且 球速<2(帧间差分) 且 持续>30帧
     stalls = []
