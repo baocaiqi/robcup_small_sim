@@ -397,6 +397,66 @@ static void scripted_opponent(SimState &s, bool is_blue, double strength) {
     }
 }
 
+// demo 式门线堆人墙（参考真机 12:28 铁证：demo 5 人堆门线防我们贴线推射，
+//   自研实现）——只防守不主动进攻，专测"我们进攻 vs 5 人墙"的终结能力：
+//   0=GK 门线慢横移跟球；1-3 贴线 y 墙(55/78/102/145 覆盖门宽上下+翼侧)；
+//   4=机动：球压到本方门前 60cm → 贴球关门（球朝中场 8cm，挡我们推线），
+//   球远 → 回门口 (60,90)。任何墙员距球<13 且球 x<30 → 把球推回中场（解围）。
+static void wall_opponent(SimState &s) {
+    auto drive = [](SimRobot &r, double tx, double ty, double spd) {
+        double dx = tx - r.x, dy = ty - r.y;
+        double d = std::hypot(dx, dy);
+        if (d < 1e-6) { r.vl = 0; r.vr = 0; return; }
+        double want = std::atan2(dy, dx) * 180.0 / 3.14159265358979;
+        double te = want - r.rot; while (te > 180) te -= 360; while (te < -180) te += 360;
+        double v = spd * (d > 8 ? 1.0 : d / 8.0);
+        double ka = 0.8;
+        r.vl = v - ka * te; r.vr = v + ka * te;
+    };
+    SimRobot *R = s.yellow;
+    // GK：门线跟球（30cm/s 限速、12 帧反应）——同 scripted 校准档
+    SimRobot &gk = R[0];
+    static int gk_react = 0;
+    static double gk_target = 90.0;
+    bool ball_in_own_half = s.bx < 60.0;
+    if (s.frames % 12 == 0) {
+        gk_target = ball_in_own_half ? (s.by < 70 ? 70.0 : (s.by > 110 ? 110.0 : s.by)) : 90.0;
+        gk_react = 0;
+    }
+    double dy = gk_target - gk.y;
+    double maxdy = 30.0 / 40.0;
+    if (dy > maxdy) dy = maxdy; else if (dy < -maxdy) dy = -maxdy;
+    gk.y += dy;
+    gk.x = 8.0; gk.rot = 0.0; gk.vl = gk.vr = 0;
+    double wy[4] = {55.0, 78.0, 102.0, 145.0};
+    // 双层深度（9/7 真机 demo 战术：球压前场时双层弧 x20-60 y60-150，
+    //   见 docs/06 第34轮热区 x40-60 y90-120 最密 417）——按球 x 动态前压：
+    //   球 x<40 贴线关门（原单层）；x40-110 双层弧前压；x>110 回中圈
+    double dline[4] = {24.0, 36.0, 48.0, 55.0};   // 双层弧各员 x 深度
+    for (int i = 1; i < 5; ++i) {
+        double db = std::hypot(s.bx - R[i].x, s.by - R[i].y);
+        // 解围优先：贴线者距球<13 且球贴门线(x<30) → 推球回中场
+        if (db < 13.0 && s.bx < 30.0) { drive(R[i], s.bx + 10.0, s.by, 90.0); continue; }
+        double tx, ty;
+        if (i == 4) {
+            if (s.bx < 60.0) { tx = s.bx + 8.0; ty = s.by; }   // 机动关门（挡我们推线）
+            else if (s.bx < 110.0) { tx = 70.0; ty = (s.by > 90 ? 40.0 : 140.0); }  // 中场边路截击
+            else { tx = 95.0; ty = 90.0; }
+        } else {
+            if (s.bx >= 40.0) {
+                tx = dline[i - 1] + (s.bx > 80.0 ? 6.0 : 0.0);   // 双层弧前压
+            } else {
+                tx = 10.0 + (i - 1) * 4.0;                        // 贴线深度（球已压到门前）
+            }
+            ty = wy[i - 1];                                       // 墙位
+            if (s.bx < 40.0 && std::fabs(s.by - wy[i - 1]) < 25.0) {
+                tx = s.bx + 6.0; ty = s.by;                       // 球压近 → 关门位
+            }
+        }
+        drive(R[i], tx, ty, 55.0);
+    }
+}
+
 // 一场比赛
 // opp_mode: 0=脚本对手打黄队(我们守x=220, 默认)  1=自我博弈  2=脚本对手打蓝队(我们守x=0, 测半场对称)
 static void play_match(int frames, int opp_mode, int debug, double opp_strength, Rng &rng, long &r_blue, long &r_yellow,
@@ -421,9 +481,11 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
         }
 
-        // 黄队决策：opp_mode=0 时黄队是脚本；否则黄队是我们的策略
+        // 黄队决策：opp_mode=0 时黄队是脚本；3=门线堆人墙；否则黄队是我们的策略
         if (opp_mode == 0) {
             scripted_opponent(s, false, opp_strength);
+        } else if (opp_mode == 3) {
+            wall_opponent(s);
         } else {
             fill_env(env_y, s, false);
             wm_y.update(&env_y, ctx_yellow);
@@ -580,6 +642,7 @@ int main(int argc, char **argv) {
             std::string o = argv[++i];
             if (o == "self") opp_mode = 1;
             else if (o == "yellow") opp_mode = 2;      // 我们打黄队侧(守x=0)，脚本打蓝
+            else if (o == "wall") opp_mode = 3;        // 我们打 demo 式门线堆人墙
             else opp_mode = 0;                          // scripted（默认）
         }
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
@@ -589,7 +652,7 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : "脚本对手");
+    const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : (opp_mode == 3 ? "门线堆人墙" : "脚本对手"));
     printf("=== sim_bench: games=%d frames/场=%d 模式=%s 对手强度=%.2f ===\n", games, frames, mode_name, opp_strength);
     long t_blue = 0, t_yellow = 0;
     double t_poss = 0;
