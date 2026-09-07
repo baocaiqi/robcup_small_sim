@@ -4,6 +4,7 @@
 #include "simuro5/field_info.hpp"
 #include "simuro5/defense.hpp"
 #include <cmath>
+#include <algorithm>
 
 namespace simuro5 {
 
@@ -141,20 +142,42 @@ void Strategy::update_team_state(WorldModel &wm) {
 double Strategy::threat_from_state(const WorldModel &wm) const {
     const TeamContext &ctx = wm.ctx;
     if (wm.team_state == TS_ATTACK) return 0.1;   // 我方控球：低威胁
-    // 防守态：按球的位置分级
-    if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return 1.0;   // 球在己方罚球区
+
+    // —— 球位连续基础威胁：以原档位为骨架（对方半场 0.4 / 我方半场 0.6 / 罚球区 1.0），
+    //    在档内按「球离己方门距离」加连续梯度：门前 80cm 内 0.6→1.0 爬升 ——
+    //    原 4 档 if-else 对"球在门前 90cm vs 球在门线上"给同样威胁；连续梯度让
+    //    临界位置（球正被推向门前）威胁提前爬升，下游回防/人盯人响应更平滑。
+    double gx = ctx.our_goal_x();
+    double dg = std::fabs(wm.ball.x - gx);   // 距己方门距离（0~220）
     bool our_half = ctx.attack_dir() > 0 ? (wm.ball.x < 110.0) : (wm.ball.x > 110.0);
     double threat = our_half ? 0.6 : 0.4;
+    if (dg < 80.0) threat += (80.0 - dg) / 80.0 * 0.4;   // 门前 80cm 内连续爬升到 1.0
+    if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) threat = 1.0;   // 罚球区直接拉满
 
-    // 球速方向加成（team-level danger）：球快速朝门滚时提前升档，让全队早回防。
+    // —— 球速朝门加成（保留原 team-level danger）：球快速朝门滚时提前升档 ——
     //   danger = 球朝己方门的速度分量（defense.hpp 点积投影），横滚/背离=0，不会误判。
-    //   朝门且快 → 对方半场 0.4→0.6（提前触发人盯人）、己方半场 0.6→0.8（预留更高档）。
-    //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人——升 0.6 是真正的提前回防收益。
-    const double kThreatDangerSpeed = 6.0;   // cm/帧：朝门有效速度阈值（同 kDribbleSpeed 量级，可调）
-    if (ball_danger_speed(wm) > kThreatDangerSpeed) {
-        threat = our_half ? 0.8 : 0.6;
+    //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人。
+    const double kThreatDangerSpeed = 6.0;   // cm/帧：朝门有效速度阈值（可调）
+    if (ball_danger_speed(wm) > kThreatDangerSpeed) threat += 0.15;
+
+    // —— 对方逼近加成（新增）：离球 80cm 内的对手速度越快，威胁越高 ——
+    //    对方持球快速冲锋 vs 慢速控球，同球位下威胁本应不同（原档位无此区分）；
+    //    用 opp_vx/opp_vy 差分速度，1.5cm/帧 起步，最多 +0.10。
+    double opp_speed = 0.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        if (d < 80.0) opp_speed = std::max(opp_speed, std::hypot(wm.opp_vx[i], wm.opp_vy[i]));
     }
-    return threat;
+    if (opp_speed > 1.5) threat += std::min((opp_speed - 1.5) * 0.05, 0.10);
+
+    // —— 对方人数加成（新增）：我方半场内对方 ≥4 人压上（5v5 全压）→ 小加成 ——
+    int opp_in_our_half = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (ctx.attack_dir() > 0 ? (wm.opp[i].x < 110.0) : (wm.opp[i].x > 110.0)) opp_in_our_half++;
+    }
+    if (opp_in_our_half >= 4) threat += 0.05;
+
+    return std::min(threat, 1.0);
 }
 
 void Strategy::update_sweeper(WorldModel &wm) {
