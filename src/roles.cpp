@@ -675,9 +675,12 @@ void run_passive(WorldModel &wm, int id) {
             if (len > 1e-6) { dx /= len; dy /= len; }
             double mx = px + dx * mark_dist();
             double my = py + dy * mark_dist();
-            // 站位点若落入己方罚球区（只有门将能进）→ 推到罚球区前缘 5cm
-            if (in_penalty_area(wm.ctx, mx, my)) {
-                mx = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
+            // 站位点若落入己方小禁区/门区（球门前 50cm，只有门将能进）→ 推到门区前缘外 5cm；
+            // 大禁区放行（docs/16）：盯人者合法站进己方大禁区中部正面拦截
+            //   demo 带球推进——旧口径把盯人推出大禁区外沿(x=135)，门前 135~170
+            //   无人走廊让 demo 直通门区、只剩门将 1v1（门区 2+人红线下方仍兜底）。
+            if (in_goal_area(wm.ctx, mx, my)) {
+                mx = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 55.0;
                 my = clamp(py, 72.5, 107.5);
             }
             mx = clamp(mx, 0.0, TeamContext::FIELD_LENGTH);

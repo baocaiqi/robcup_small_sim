@@ -919,6 +919,91 @@ static int test_lead_defense() {
     return 0;
 }
 
+// ============================================================
+// docs/16 禁区前沿围堵：防守动态目标「大禁区放行、小禁区红线」单测
+//   规则只罚「己方门区(球门前50cm)2+人」；大禁区(50~80cm带)非门将 ≤3 合法。
+//   旧口径把 plan_defense/人盯人一律推出大禁区外沿(x=135) → 门前 135~170
+//   无人走廊，demo 直通门区。本测试验证：拦截点可进大禁区(>135)但绝不进
+//   小禁区(x>168)；double_team 提前(≤145cm)与大禁区带球合围。
+// ============================================================
+static int test_box_edge_block() {
+    TeamContext ctx{true};                 // 蓝：守 x=220（小禁区 x∈[170,220]）
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE; wm.role[2] = ROLE_PASSIVE;
+    wm.role[3] = ROLE_ASSIST; wm.role[4] = ROLE_MIDFIELD;
+
+    // ① plan_defense：demo 带球压到禁区前(x=160)、球静止 → 兜底锚点若在小禁区
+    //   深处(210) → 应钳到小禁区外（165），防推球再推离球 8cm → ~168（大禁区内部），
+    //   而非旧口径推出 135
+    wm.ball.x = 160; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+    wm.passive_x = 210; wm.passive_y = 90;
+    {
+        DefensePlan p = plan_defense(wm, 1);
+        if (in_goal_area(ctx, p.target_x, p.target_y)) {
+            printf("FAIL: 断球点进了己方小禁区 (%.1f,%.1f)\n", p.target_x, p.target_y); return 1;
+        }
+        if (p.target_x <= 135.0) {
+            printf("FAIL: 大禁区应放行拦截（旧口径推出 135）got x=%.1f\n", p.target_x); return 1;
+        }
+        if (p.target_x >= 170.0) {
+            printf("FAIL: 断球点不得进小禁区 got x=%.1f\n", p.target_x); return 1;
+        }
+        if (dist(p.target_x, p.target_y, wm.ball.x, wm.ball.y) < 8.0) {
+            printf("FAIL: 断球点贴球 <8cm（防推球犯规）\n"); return 1;
+        }
+    }
+    // ② plan_defense：快球朝门滚 → 断球点(拦截线 x=170)也须在小禁区外
+    wm.ball.x = 160; wm.ball.y = 90; wm.ball.vx = 6.0; wm.ball.vy = 0;
+    wm.home[1].x = 162; wm.home[1].y = 90;   // 防守者贴球侧，可达
+    {
+        DefensePlan p = plan_defense(wm, 1);
+        if (!p.approaching) { printf("FAIL: 快球应判逼近\n"); return 1; }
+        if (in_goal_area(ctx, p.target_x, p.target_y)) {
+            printf("FAIL: 断球点进了己方小禁区 (%.1f,%.1f)\n", p.target_x, p.target_y); return 1;
+        }
+        if (p.target_x <= 135.0) {
+            printf("FAIL: 断球点应在大禁区前沿 got x=%.1f\n", p.target_x); return 1;
+        }
+    }
+    // ③ double_team 提前触发：demo 持球者 x=100（距门 120 ≤145；旧 100cm 门槛不触发）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+    wm.opp[0].x = 101; wm.opp[0].y = 90;     // demo 持球者（离球 1cm）
+    wm.threat_level = 0.6;
+    wm.home[3].x = 80; wm.home[3].y = 90;    // assist（本防守者）离持球者 21cm
+    wm.home[4].x = 150; wm.home[4].y = 90;   // mid 更远，不抢夹抢权
+    wm.sweeper_id = 2;                        // passive 位=清道夫（跳过）
+    {
+        double dx = 0, dy = 0;
+        if (!double_team_point(wm, 3, dx, dy)) {
+            printf("FAIL: 持球者距门120cm应已触发提前合围\n"); return 1;
+        }
+        if (dx < 0 || dx > 220 || dy < 0 || dy > 180) {
+            printf("FAIL: 夹抢点出界 (%.1f,%.1f)\n", dx, dy); return 1;
+        }
+    }
+    // ④ double_team 大禁区带球合围：demo 持球 x=160（距门 60，旧门槛③距门>45 拒绝）
+    wm.ball.x = 160; wm.ball.y = 90;
+    wm.opp[0].x = 161; wm.opp[0].y = 90;
+    wm.home[3].x = 150; wm.home[3].y = 90;
+    {
+        double dx = 0, dy = 0;
+        if (!double_team_point(wm, 3, dx, dy)) {
+            printf("FAIL: demo 已带球入大禁区应合围（旧口径拒绝）\n"); return 1;
+        }
+        if (in_goal_area(ctx, dx, dy)) {
+            printf("FAIL: 夹抢点进了己方小禁区 (%.1f,%.1f)\n", dx, dy); return 1;
+        }
+        if (dx < 0 || dx > 220 || dy < 0 || dy > 180) {
+            printf("FAIL: 夹抢点出界 (%.1f,%.1f)\n", dx, dy); return 1;
+        }
+    }
+    printf("box edge block: OK (大禁区放行拦截/小禁区红线/double_team提前+禁区内合围)\n");
+    return 0;
+}
+
 // 射门方案单测（docs/15 P0-3 前：docs/06 第 11 轮两段式推射配套）：
 //   dir 单位向量、指向对方球门、推球点=球后 8cm、开口选 GK 远侧（连续值）
 static int test_shoot_plan() {
@@ -1109,6 +1194,7 @@ int main() {
     rc |= test_active_aggressive();
     rc |= test_score_counting();
     rc |= test_lead_defense();
+    rc |= test_box_edge_block();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
