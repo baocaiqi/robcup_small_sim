@@ -367,6 +367,13 @@ void run_goalie(WorldModel &wm, int id) {
 //   带球推射（球在门区且贴脚≤25cm）不累计，限 8 不影响攻门。
 //   总时长兜底 20 帧：带球反复推不进（真实平台 8/29 实测 21~30 帧被判 3 点球）
 //   也不能无限续命，规则红线就是 20，宁可放弃机会不送点球。
+// —— 补射跟进（docs/17 讲解稿规划）：射门被挡后球在门前低速反弹 → 追进去补一脚 ——
+//   判据：球在门前锥形区内且球速低于可抢阈值 + 我方就近（距离限制保证追进门区
+//   途中 4~8 帧内贴球，"纯停留"帧计数不超限）；贴球(≤25cm)后 active_ga_frames
+//   清零（攻门作业不累计），走带球/推射链（plan_shoot 每帧重评，球距门<70cm 即射）；
+//   追不到/超时由 kActiveGaLimit 撤出分支兜底，不会赖在门区送判罚。
+constexpr double kReboundRushSpeed = 8.0;   // cm/帧：反弹球可抢速度阈值（GK扑出/挡回典型 <10）
+constexpr double kReboundRushDist  = 90.0;  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
 static const int kActiveGaLimit  = 8;
 static const int kActiveGaTotal  = 18;  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
@@ -561,8 +568,16 @@ void run_active(WorldModel &wm, int id) {
         //   （sim debug：球射偏出门线 y=41，ACTIVE 追球穿门区 16 帧 = 2+ 人违规主因），
         //   追到门区外沿等球弹出；射门分支优先不受影响。
         if (wm.ctx.dist_opp_goal(chased.x) < 100.0 && std::fabs(chased.y - 90.0) < 45.0) {
-            chased.x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * 85.0;
-            chased.y = clamp(chased.y, 72.5, 107.5);
+            // 补射跟进：球在门前低速且我方就近 → 豁免 clamp、追进球区补射
+            //   （球被 GK 扑出/防守者挡回的反弹是第二落点机会，错过了就白射；
+            //   球高速滚向门 / 距球太远时不豁免——追不过去、也不值得长途进场）。
+            double bspeed = std::hypot(wm.ball.vx, wm.ball.vy);
+            bool rebound_rush = (bspeed < kReboundRushSpeed) &&
+                                dist(r.x, r.y, chased.x, chased.y) < kReboundRushDist;
+            if (!rebound_rush) {
+                chased.x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * 85.0;
+                chased.y = clamp(chased.y, 72.5, 107.5);
+            }
         }
         // docs/15 P0-4：追球避障——直线被对方挡才绕行（plan_route 2r 邻域裁剪
         //   后开销约全图 1/10）；decel=true 保留接近减速防冲过头。
