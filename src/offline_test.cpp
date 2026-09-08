@@ -14,6 +14,8 @@
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
 #include "simuro5/defense.hpp"
+#include "simuro5/route.hpp"
+#include "simuro5/motion.hpp"
 #include "simuro5/roles.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/pass.hpp"
@@ -689,6 +691,153 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
+static int test_segment_circle() {
+    CircleObstacle o[2], hit;
+    // 相离 → 不挡
+    o[0] = {10, 10, 3};
+    if (!segment_clear_of_circles(0, 0, 10, 0, o, 1)) { printf("FAIL: 相离圆不应挡\n"); return 1; }
+    // 相交（圆压在线段上）→ 挡
+    o[0] = {5, 0, 3};
+    if (segment_clear_of_circles(0, 0, 10, 0, o, 1)) { printf("FAIL: 相交圆应挡\n"); return 1; }
+    // 端点在圆内 → 挡
+    o[0] = {1, 0, 3};
+    if (segment_clear_of_circles(0, 0, 10, 0, o, 1)) { printf("FAIL: 端点在圆内应挡\n"); return 1; }
+    // 相切（圆心距线段 == r）→ 挡
+    o[0] = {5, 3, 3};
+    if (segment_clear_of_circles(0, 0, 10, 0, o, 1)) { printf("FAIL: 相切应挡\n"); return 1; }
+    // 多圆：最近挡路者命中更深的那个
+    o[0] = {5, 3, 2};    // 距线段 3 > 2：不挡
+    o[1] = {6, 0, 4};    // 挡（穿透 4）
+    if (segment_clear_of_circles(0, 0, 10, 0, o, 2, &hit)) { printf("FAIL: 应检测到挡路\n"); return 1; }
+    if (fabs(hit.x - 6) > 1e-9 || fabs(hit.r - 4) > 1e-9) { printf("FAIL: hit 应指向挡路圆\n"); return 1; }
+    // 空障碍数组 → 恒不挡
+    if (!segment_clear_of_circles(0, 0, 10, 0, nullptr, 0)) { printf("FAIL: 无障应恒通\n"); return 1; }
+    printf("segment circle: OK (相离/相交/端点在内/相切/多圆取最深/空数组)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/15 P0-1：路径规划单测 —— 直线最优（不绕路）
+// ============================================================
+static int test_route_straight() {
+    RoutePlan p = plan_route(50, 90, 150, 90, nullptr, 0);
+    if (!p.found || p.n_wp != 2) { printf("FAIL: 无障应直线两点\n"); return 1; }
+    if (fabs(p.length - 100.0) > 0.01) { printf("FAIL: 直线长度 %.1f\n", p.length); return 1; }
+    // 有障碍但不挡 S-T 直线 → 仍走直线（最优 = 不绕远路）
+    CircleObstacle o = {50, 150, 10};
+    p = plan_route(50, 90, 150, 90, &o, 1);
+    if (!p.found || p.n_wp != 2) { printf("FAIL: 不挡路的圆不应触发绕行\n"); return 1; }
+    printf("route straight: OK (无障直线/远处障碍不绕路)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/15 P0-1：路径规划单测 —— 单圆盘绕行（最优性：绕行且不穿盘）
+// ============================================================
+static int test_route_avoid() {
+    CircleObstacle o = {100, 90, 10};        // 挡在 S(50,90)→T(150,90) 正中间
+    RoutePlan p = plan_route(50, 90, 150, 90, &o, 1);
+    if (!p.found) { printf("FAIL: 单圆盘应可绕行\n"); return 1; }
+    // 路径逐段粗采样：离圆心的最小距离 > 8（r=10 已 inflate，留 2cm 判定余量）
+    double min_d = 1e9;
+    for (int i = 0; i < p.n_wp - 1; ++i) {
+        double ax = p.wp_x[i], ay = p.wp_y[i], bx = p.wp_x[i + 1], by = p.wp_y[i + 1];
+        for (int s = 0; s <= 10; ++s) {
+            double t = s / 10.0;
+            double x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
+            double d = std::hypot(x - 100.0, y - 90.0);
+            if (d < min_d) min_d = d;
+        }
+    }
+    if (min_d < 8.0) { printf("FAIL: 路径穿障碍 min_d=%.2f\n", min_d); return 1; }
+    // 最优性：绕行总长应只比直线略长（绕半圈 ≈ +2r），且终点精确
+    if (p.length <= 100.0 || p.length > 200.0) { printf("FAIL: 绕行长度异常 %.1f\n", p.length); return 1; }
+    if (fabs(p.wp_x[p.n_wp - 1] - 150.0) > 0.5 || fabs(p.wp_y[p.n_wp - 1] - 90.0) > 0.5) {
+        printf("FAIL: 终点错\n"); return 1;
+    }
+    printf("route avoid: OK (绕行不穿盘/长度最优界内/终点精确)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/15 P0-1：路径规划单测 —— 错位栅栏可通 / 围死回退 / 起点圆内
+// ============================================================
+static int test_route_cluster() {
+    // 错位栅栏（三圆不重叠 r=10，绕行需走圆-圆外公切线）→ 应有安全通路
+    CircleObstacle bar[3] = {{90, 78, 10}, {90, 102, 10}, {130, 90, 10}};
+    RoutePlan p = plan_route(30, 90, 190, 90, bar, 3);
+    if (!p.found) { printf("FAIL: 错位栅栏应有通路\n"); return 1; }
+    for (int i = 0; i < p.n_wp - 1; ++i) {
+        double ax = p.wp_x[i], ay = p.wp_y[i], bx = p.wp_x[i + 1], by = p.wp_y[i + 1];
+        for (int k = 0; k < 3; ++k) {
+            double d = point_to_segment_dist(bar[k].x, bar[k].y, ax, ay, bx, by);
+            if (d < bar[k].r - 1.0) { printf("FAIL: 栅栏路径穿盘 d=%.1f\n", d); return 1; }
+        }
+    }
+    // 竖向密排夹道（相切圆列）：路径不穿盘（可能绕不过 → found=false 回退也算过）
+    CircleObstacle wall[3] = {{90, 70, 10}, {90, 90, 10}, {90, 110, 10}};
+    p = plan_route(30, 90, 170, 90, wall, 3);
+    if (p.found) {
+        for (int i = 0; i < p.n_wp - 1; ++i)
+            for (int k = 0; k < 3; ++k) {
+                double d = point_to_segment_dist(wall[k].x, wall[k].y,
+                                                 p.wp_x[i], p.wp_y[i], p.wp_x[i + 1], p.wp_y[i + 1]);
+                if (d < wall[k].r - 1.0) { printf("FAIL: 夹道场景不应有穿盘路径\n"); return 1; }
+            }
+    }
+    // S 在障碍内 → found=false（调用方回退直线，防 NAN）
+    CircleObstacle o = {100, 90, 10};
+    p = plan_route(100, 90, 150, 90, &o, 1);   // S == 圆心
+    if (p.found) { printf("FAIL: 起点在圆内应不可规划\n"); return 1; }
+    printf("route cluster: OK (错位栅栏可通/夹道不穿盘/起点圆内回退)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/15 P0-2：motion::follow_route 逐段执行单测
+// ============================================================
+static int test_follow_route() {
+    RoutePlan rt;
+    rt.found = true;
+    rt.n_wp = 3;
+    rt.wp_x[0] = 0;    rt.wp_y[0] = 0;     // S
+    rt.wp_x[1] = 60;   rt.wp_y[1] = 0;     // 中间点
+    rt.wp_x[2] = 120;  rt.wp_y[2] = 0;     // T
+    RobotState r;
+    r.x = 5; r.y = 0; r.rot = 0; r.vl = r.vr = 0;
+    int wp_next = 0;
+    // 机器人位于路径起点 S=(0,0) 的 8cm 内 → 自动切到段 1，目标 (60,0) 在 +x → vl≈vr>0
+    motion::follow_route(r, rt, wp_next);
+    if (wp_next != 1) { printf("FAIL: 起点处应切到段1 got %d\n", wp_next); return 1; }
+    if (!(r.vl > 0.0 && r.vr > 0.0)) { printf("FAIL: 第1段应朝+x走 vl=%.1f vr=%.1f\n", r.vl, r.vr); return 1; }
+    // 到达段1终点 (60,0)（1cm 内）→ 自动切段 2，目标 (120,0) 仍朝 +x
+    r.x = 59;
+    motion::follow_route(r, rt, wp_next);
+    if (wp_next != 2) { printf("FAIL: 到达后应推进到段2 got %d\n", wp_next); return 1; }
+    if (!(r.vl > 0.0 && r.vr > 0.0)) { printf("FAIL: 第2段应朝+x走\n"); return 1; }
+    // 越过跳段：重置 wp_next=0 但机器人已在终点附近 → 应经中间段直接跳到末段
+    wp_next = 0;
+    r.x = 118;
+    motion::follow_route(r, rt, wp_next);
+    if (wp_next != 2) { printf("FAIL: 越过后应推进到段2 got %d\n", wp_next); return 1; }
+    // 终点慢速接近
+    if (!(r.vl > 0.0)) { printf("FAIL: 末段应继续朝终点\n"); return 1; }
+    // found=false → 兜底停车
+    RoutePlan bad;
+    bad.found = false;
+    motion::follow_route(r, bad, wp_next);
+    if (fabs(r.vl) > 1e-6 || fabs(r.vr) > 1e-6) { printf("FAIL: found=false 应停车\n"); return 1; }
+    printf("follow route: OK (分段推进/到达切段/越过跳段/不可规划停车)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/15 P0-4：run_active 激进档位冒烟（防崩溃/NaN/轮速有界）
+//   A: 70~110 动态区远射档（quality≥0.35 → 进入射门执行体）
+//   B: 动态区 GK 封死（开口<8° → 拒绝远射，落围困带离）
+//   C: 追球避障路径（直线被挡 → route 绕行，不穿圆盘）
+// ============================================================
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -703,6 +852,11 @@ int main() {
     rc |= test_pass_threat_weight();
     rc |= test_goalie_scenarios();
     rc |= test_roles_spread();
+    rc |= test_segment_circle();
+    rc |= test_route_straight();
+    rc |= test_route_avoid();
+    rc |= test_route_cluster();
+    rc |= test_follow_route();
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();

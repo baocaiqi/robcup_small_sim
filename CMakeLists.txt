@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # FIRA 仿真 5v5 策略工程
 # 产出: Strategy4Blue.dll / Strategy4Yellow.dll (32 位, 必须!)
 # ============================================================
@@ -23,6 +23,7 @@ set(CORE_SOURCES
   src/shoot.cpp
   src/pass.cpp
   src/defense.cpp
+  src/route.cpp
   src/roles.cpp
   src/formation.cpp
   src/strategy.cpp

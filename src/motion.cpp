@@ -72,5 +72,20 @@ void chase_ball(RobotState &r, const BallState &pred) {
     }
 }
 
+void follow_route(RobotState &r, const RoutePlan &rt, int &wp_next) {
+    if (!rt.found || rt.n_wp < 2) { stop(r); return; }   // 不可规划：调用方回退直线
+    if (wp_next < 0) wp_next = 0;
+    if (wp_next > rt.n_wp - 1) wp_next = rt.n_wp - 1;
+
+    // 段推进：到达当前 wp（≤8cm）或已明显越过（离下一点更近 8cm+）→ 切下一段
+    while (wp_next < rt.n_wp - 1) {
+        double d_cur  = dist(r.x, r.y, rt.wp_x[wp_next], rt.wp_y[wp_next]);
+        double d_next = dist(r.x, r.y, rt.wp_x[wp_next + 1], rt.wp_y[wp_next + 1]);
+        if (d_cur < 8.0 || d_next < d_cur - 8.0) ++wp_next;
+        else break;
+    }
+    position(r, rt.wp_x[wp_next], rt.wp_y[wp_next]);
+}
+
 }  // namespace motion
 }  // namespace simuro5

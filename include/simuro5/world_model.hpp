@@ -101,7 +101,11 @@ struct WorldModel {
     // 清道夫（远侧覆盖）：球在防守三区拉边时，指定一个区域防守者钉中路封远门柱/横传。
     //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。
     int sweeper_id = -1;
-    double sweeper_x = 0, sweeper_y = 90;   // 清道夫站位点（罚球区前缘外侧、中路）
+    double sweeper_x = 0, sweeper_y = 90;
+    // 路径执行状态（docs/15 P0：motion::follow_route 用，按机器人索引）
+    //   每帧角色层算出 RoutePlan 后从 wm.route_wp_next[i]=0 起推进；
+    //   跨帧保留段索引防抖（沿用旧 waypoint），路径重算后由角色层重置。
+    int route_wp_next[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 清道夫站位点（罚球区前缘外侧、中路）
 
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;
