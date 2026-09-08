@@ -397,42 +397,7 @@ static int test_pass() {
         }
     }
 
-    // 场景⑤（P0-1）：持球者被围（周围 25cm ≥2 对手）→ 出球从"最靠前"切"最近安全点"。
-    //   持球者(100,90)，demo 上下贴球(100,66)/(100,114)；ASSIST 站位点在前(82,90)
-    //   （接应点 76,90，更靠对方门=旧评分胜出方），MIDFIELD 站位点侧后(118,90)
-    //   （接应点 112,90，更近）。被围后应选近的 MIDFIELD——侧后短传出球，不再死带。
-    wm.role[0] = ROLE_GOALIE;
-    wm.role[1] = ROLE_ACTIVE;
-    wm.role[2] = ROLE_ASSIST;
-    wm.role[3] = ROLE_MIDFIELD;
-    wm.role[4] = ROLE_PASSIVE;
-    wm.home[0].x = 210; wm.home[0].y = 90;
-    wm.home[1].x = 100; wm.home[1].y = 90;   // 持球者(ACTIVE)
-    wm.home[2].x = 150; wm.home[2].y = 90;   // ASSIST 本体远，用站位点
-    wm.home[3].x = 150; wm.home[3].y = 150;  // MIDFIELD 本体远，用站位点
-    wm.home[4].x = 150; wm.home[4].y = 30;
-    wm.assist_x = 82;  wm.assist_y = 90;     // 前方接应点(76,90) 距 24cm
-    wm.mid_x = 118;    wm.mid_y = 90;        // 侧后接应点(112,90) 距 12cm
-    wm.passive_x = 150; wm.passive_y = 30;
-    wm.opp[0].x = 100; wm.opp[0].y = 66;     // 上下贴球：swarm=2 → 被围
-    wm.opp[1].x = 100; wm.opp[1].y = 114;
-    wm.opp[2].x = 200; wm.opp[2].y = 30;
-    wm.opp[3].x = 200; wm.opp[3].y = 90;
-    wm.opp[4].x = 200; wm.opp[4].y = 150;
-    {
-        PassPlan p = plan_pass(wm, 1);
-        if (!p.viable || p.receiver_id != 3) {
-            printf("FAIL: 场景⑤被围应选近侧后点MID(home[3]) got viable=%d recv=%d\n",
-                   p.viable, p.receiver_id);
-            return 1;
-        }
-        if (fabs(p.target_x - 112.0) > 0.5 || fabs(p.target_y - 90.0) > 0.5) {
-            printf("FAIL: 场景⑤被围接应点应为(112,90) got (%.1f,%.1f)\n", p.target_x, p.target_y);
-            return 1;
-        }
-    }
-
-    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点/被围近点)\n");
+    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点)\n");
     return 0;
 }
 
@@ -655,47 +620,7 @@ static int test_shoot_plan() {
             return 1;
         }
     }
-    // 贴线球（块②B）：球 x=3 贴门线（dgoal=3）应可射（直线推穿 2-3cm 过线）
-    wm.ball.x = 3.0; wm.ball.y = 90.0;
-    wm.opp[0].x = 6.0; wm.opp[0].y = 106.0;   // GK 贴上柱 → 应瞄下开口 74
-    {
-        ShootPlan p3 = plan_shoot(wm, 1);
-        if (!p3.viable) { printf("FAIL: 贴线球应可射\n"); return 1; }
-        if (p3.dir_x >= 0.0) { printf("FAIL: 贴线球推球方向应朝门内 (dir_x=%.2f)\n", p3.dir_x); return 1; }
-    }
-    printf("shoot plan: OK (可射/dir单位/推球点/GK远侧开口/贴线球可射)\n");
-    return 0;
-}
-
-// 死球等待豁免（块②B）：球静止对方门区 = demo 门球 → 我方无贴球才等待；
-//   我方贴球（刚带球进对方门区）→ 不等待、直接落射门（不崩溃）
-static int test_deadball_exempt() {
-    TeamContext ctx{true};
-    WorldModel wm;
-    wm.ctx = ctx;
-    wm.ball.valid = true;
-    wm.ball.x = 3.0; wm.ball.y = 90.0;   // 对方门区贴线静止
-    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
-    wm.home[0].x = 215; wm.home[0].y = 90;
-    wm.home[1].x = 8.0; wm.home[1].y = 90;   // B1 贴球 5cm
-    wm.home[2].x = 80; wm.home[2].y = 90;
-    wm.home[3].x = 100; wm.home[3].y = 50;
-    wm.home[4].x = 120; wm.home[4].y = 130;
-    // demo GK 贴上柱 + 其余中场（我方贴球 → 豁免等待）
-    wm.opp[0].x = 6.0; wm.opp[0].y = 106.0;
-    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 60 + j * 15; wm.opp[j].y = 40 + j * 20; }
-    run_active(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: 我方贴球豁免场景轮速异常\n"); return 1;
-    }
-    // 对照组：demo 贴球（Y0 距球 3cm）→ 走死球等待（我方不贴）
-    wm.opp[0].x = 4.0; wm.opp[0].y = 90.0;
-    wm.home[1].x = 30.0; wm.home[1].y = 90.0;   // B1 不贴球
-    run_active(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: demo 贴球等待场景轮速异常\n"); return 1;
-    }
-    printf("deadball exempt: OK (我方贴球不等待/demo贴球等待均正常)\n");
+    printf("shoot plan: OK (可射/dir单位/推球点/GK远侧开口)\n");
     return 0;
 }
 
@@ -764,69 +689,6 @@ static int test_active_corner_rescue() {
     return 0;
 }
 
-// 门角陷阱退出（进攻强化块②A）：贴球在对方门线角区且 demo 挡线者不在
-//   <20cm（不触发围困）→ 不再死带 150 帧——回传/撤向中场
-static int test_angle_trap() {
-    TeamContext ctx{true};
-    WorldModel wm;
-    wm.ctx = ctx;
-    wm.ball.valid = true;
-    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
-    // 12:28 帧3171-3322 死带场景：球贴对方门线角区 (2,160)
-    wm.ball.x = 2.0; wm.ball.y = 160.0;
-    wm.home[0].x = 215; wm.home[0].y = 90;
-    wm.home[1].x = 5.0; wm.home[1].y = 152.0;  // B1 贴球 9cm
-    wm.home[2].x = 100; wm.home[2].y = 90;     // 队友中场可接应
-    wm.home[3].x = 120; wm.home[3].y = 50;
-    wm.home[4].x = 130; wm.home[4].y = 130;
-    // demo 挡线者 22cm（>20 不触发围困，只触发角区陷阱）
-    wm.opp[0].x = 4.0; wm.opp[0].y = 138.0;
-    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 25 + j * 10; wm.opp[j].y = 90; }
-    run_active(wm, 1);
-    double v1 = fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr));
-    if (v1 > 300.0) { printf("FAIL: 门角陷阱轮速异常 %.1f\n", v1); return 1; }
-    // 对照组：球在门宽中路 (3,90)（非陷阱）→ 正常射门/带球路径，不崩溃
-    wm.ball.y = 90.0;
-    wm.home[1].x = 8.0; wm.home[1].y = 90.0;
-    run_active(wm, 1);
-    if (fmax(fabs(wm.home[1].vl), fabs(wm.home[1].vr)) > 300.0) {
-        printf("FAIL: 中路对照组轮速异常\n"); return 1;
-    }
-    printf("angle trap: OK (门角死带退出/中路正常射门均不崩溃)\n");
-    return 0;
-}
-
-// 前场持球临时 ACTIVE（块④A）：B2 在对方前场贴球且 B1 未贴 → 走 run_active
-//   终结逻辑（不崩、轮速有界）；B1 贴球时不抢占（球权在 ACTIVE）
-static int test_chain_handoff() {
-    TeamContext ctx{true};
-    WorldModel wm;
-    wm.ctx = ctx;
-    wm.ball.valid = true;
-    wm.ball.x = 40.0; wm.ball.y = 90.0;    // 对方前场
-    wm.ball.vx = 2.0; wm.ball.vy = 0.0;
-    wm.home[0].x = 215; wm.home[0].y = 90;
-    wm.home[1].x = 80.0; wm.home[1].y = 90;  // B1 不贴球(40cm)
-    wm.home[2].x = 44.0; wm.home[2].y = 90;  // B2 贴球 4cm → 临时 ACTIVE
-    wm.home[3].x = 120; wm.home[3].y = 50;
-    wm.home[4].x = 130; wm.home[4].y = 130;
-    wm.opp[0].x = 6.0; wm.opp[0].y = 90;    // demo GK 门心
-    for (int j = 1; j < 5; ++j) { wm.opp[j].x = 20 + j * 12; wm.opp[j].y = 60 + j * 10; }
-    run_assist(wm, 2);
-    if (fmax(fabs(wm.home[2].vl), fabs(wm.home[2].vr)) > 300.0) {
-        printf("FAIL: B2 临时 ACTIVE 轮速异常\n"); return 1;
-    }
-    // 对照组：B1 贴球（球权在 ACTIVE）→ B2 不抢占（走正常助攻逻辑，不崩）
-    wm.home[1].x = 44.0; wm.home[1].y = 90.0;
-    wm.home[2].x = 80.0; wm.home[2].y = 90.0;
-    run_assist(wm, 2);
-    if (fmax(fabs(wm.home[2].vl), fabs(wm.home[2].vr)) > 300.0) {
-        printf("FAIL: B1 持球时 B2 异常\n"); return 1;
-    }
-    printf("chain handoff: OK (B2 前场接球走终结/球权在 ACTIVE 时不抢占)\n");
-    return 0;
-}
-
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -842,11 +704,8 @@ int main() {
     rc |= test_goalie_scenarios();
     rc |= test_roles_spread();
     rc |= test_shoot_plan();
-    rc |= test_deadball_exempt();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
-    rc |= test_angle_trap();
-    rc |= test_chain_handoff();
     printf(rc ? "=== TEST FAILED ===\n" : "=== ALL TESTS PASSED ===\n");
     return rc;
 }

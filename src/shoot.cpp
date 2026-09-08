@@ -17,10 +17,7 @@ ShootPlan plan_shoot(const WorldModel &wm, int shooter_id) {
     double dgoal = dist(bx, by, ogx, 90.0);
     // [A/B 隔离中] 点球放宽曾导致真机 0:3（14:46 场，黄攻蓝门区 2.5%→45%）——
     //   怀疑 in_penalty_exec 误判使运动战也放宽。先回退验证因果，确认后再恢复。
-    // [进攻块②B] dgoal<5（球贴门线 x0-5）原不射——真机 15 段到门前全卡贴线
-    //   阶段；贴线球恰是最短推线距离（2-5cm 过线），GK 横移慢追不上直线推穿。
-    //   放宽到 dgoal<1（仅球已压线/进门不算），run_active 射门直线推穿可终结。
-    if (dgoal > 70.0 || dgoal < 1.0) return plan;
+    if (dgoal > 70.0 || dgoal < 5.0) return plan;
 
     // 找对方守门员（对手 0 号或离门最近者）的 y
     double gk_y = 90.0;
