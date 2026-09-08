@@ -107,28 +107,29 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         plan.target_y = wm.passive_y;
     }
 
-    // 规则红线：断球点不得进入己方小禁区/门区（球门前 50cm，只有守门员能进）。
-    //   蓝队门区 x∈[170,220]；拦截线本身 x=170 正压门区前缘，
+    // 规则红线：断球点不得进入己方门区（只有守门员能进）。
+    //   蓝队门区 x∈[170,220]；拦截线本身 x=170 正好压门区前缘，
     //   若 y 也落在门宽范围内则再往外推 5cm，避免踩线犯规。
-    // 大禁区（球门前 50~80cm 带）**放行**（docs/16 禁区前沿围堵）：
-    //   防守方非门将合法进入己方大禁区（≤3 人即可，规则只罚"门区 2+人"），
-    //   旧口径把断球点推出大禁区外沿(x=135) → 门前 135~170 成无人走廊，
-    //   demo 高速带球直通门区、门前只剩门将 1v1——这正是要堵住的洞。
     if (in_goal_area(ctx, plan.target_x, plan.target_y)) {
         plan.target_x = clamp(ctx.our_goal_x() + ctx.attack_dir() * 55.0, kMinX, kMaxX);
         plan.target_y = clamp(wm.ball.y, 75.0, 105.0);
     }
 
+    // 兑底（本地第4轮）：防守点若落入己方大禁区则推出（防堆叠送点球）
+    if (in_penalty_area(ctx, plan.target_x, plan.target_y)) {
+        plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
+        plan.target_y = 90.0;
+    }
     // 防推球犯规（本地第7轮）：防守点距球保持 >= 8cm（球周围不挤球不推球）
     double db = dist(plan.target_x, plan.target_y, wm.ball.x, wm.ball.y);
     if (db < 8.0) {
         double ang = atan2(wm.ball.y - plan.target_y, wm.ball.x - plan.target_x);
         plan.target_x = wm.ball.x - 8.0 * cos(ang);
         plan.target_y = wm.ball.y - 8.0 * sin(ang);
-        // 推球点可能又被推回小禁区（球贴门区前缘时），再夹一次防门区 2+ 人
-        if (in_goal_area(ctx, plan.target_x, plan.target_y)) {
-            plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 55.0;
-            plan.target_y = clamp(wm.ball.y, 75.0, 105.0);
+        // 推球点可能又被推回罚球区（球贴罚球区前缘时），再夹一次防送点球
+        if (in_penalty_area(ctx, plan.target_x, plan.target_y)) {
+            plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
+            plan.target_y = 90.0;
         }
     }
     // 禁区纪律（对方门区）：防守点也不得落入对方门区（FIRA：门区 2+ 人 → 罚点球）。
@@ -283,14 +284,10 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
 //   只让 assist/midfield 里「非清道夫、且离持球者更近」的那一个上前，
 //   另一个留在区域里保持纵深（两个同时压上会被一脚直塞打穿）。
 // ============================================================
-static constexpr double kDoubleTeamDangerDist = 145.0;  // 持球者离门多近才夹抢(cm)
-                                                         // 100→145（docs/16）：demo 从弧顶带球直冲门区，
-                                                         // 100cm 触发时距禁区仅 20cm，5 帧内就冲进禁区，
-                                                         // 第二人根本来不及到位；145cm（蓝 x≈75）提前合围
-                                                         // （145 vs 125 A/B：125 无改善且 seed1 更差，定 145）
+static constexpr double kDoubleTeamDangerDist = 100.0;  // 持球者离门多近才夹抢(cm)
 static constexpr double kDoubleTeamLateral    = 20.0;   // 夹抢点横向偏移(cm)：与盯人者错开角度
 static constexpr double kDoubleTeamCarryDist  = 15.0;   // 持球者判定：离球 <此值视为正带球
-static constexpr double kDoubleTeamCoverDist  = 45.0;   // （废弃语义保留）旧：持球者距门 <此值才准进禁区协防
+static constexpr double kDoubleTeamCoverDist  = 45.0;   // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
 
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
@@ -306,11 +303,17 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     }
     if (dribbler < 0 || dmin >= kDoubleTeamCarryDist) return false;
 
+    // 门槛③：球已在己方罚球区 → 原「禁区纪律」直接 return false（门前只剩门将 1v1，
+    //   真 vs demo 2:7×2 复盘：demo 控停门前 (205,90) 后追击手直冲抢点推射）。
+    //   结构性改造（docs 第14轮）：持球者已压到门前 kDoubleTeamCoverDist 内时，
+    //   允许第二人进禁区协防，与门将/passive 形成双人包夹——防守方进己方罚球区
+    //   合法（规则只限制进攻方进对方门区）。球还在禁区边缘/外面则不冲进去。
+    if (in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y)) {
+        if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamCoverDist) return false;
+    }
+
     // 门槛④：持球者已推进到离门 kDoubleTeamDangerDist 内才夹抢——
     //   过早夹抢会把第二人提前调离区域、留出纵深，反被一脚直塞打穿。
-    // 大禁区（球门前 50~80cm 带）放行（docs/16）：第二人可合法进己方大禁区
-    //   合围 demo 带球者（非门将同时在大禁区 ≤3 人，规则只罚门区 2+人），
-    //   与盯人者形成「正面挡 + 侧面封」口袋。夹抢点下方小禁区前缘钳制兜底。
     if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamDangerDist) return false;
 
     // 只让「非清道夫、且离持球者更近」的那一个上前；离得远的留区域保持纵深。

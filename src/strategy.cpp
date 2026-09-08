@@ -3,7 +3,6 @@
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/defense.hpp"
-#include "simuro5/geometry.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -27,9 +26,6 @@ static const int kStateHysteresisFrames = 3;   // 滞回帧数（可调，见 do
 static const int kCounterWindowFrames = 30;
 
 void Strategy::run(WorldModel &wm) {
-    // 0. 比分自数（docs/15 §3.1）+ 领先防守加强标志（须在局势分析前，供全链读取）
-    update_score(wm);
-
     // 1. 局势分析（球权/半场/禁区）
     Situation sit = sit_.analyze(wm);
     wm.we_have_ball = sit.we_have_ball;
@@ -117,54 +113,6 @@ void Strategy::run(WorldModel &wm) {
     }
 }
 
-// ============================================================
-// P1 比分自数（docs/15 §3.1）
-//   平台环境无比分字段，只能从事件推断进球。判据（按真实平台时序设计）：
-//   A. 平台事件（主判据）：进球后失球方开球（docs/06 L347 实测 rlg 三场方向吻合：
-//      "PlaceKick X = X 刚失球"）。检测 PlayOn → PlaceKick_X 转换：
-//        蓝视角：PlaceKick_Yellow = 黄开球 = 黄刚失球 = 我方得分；
-//                PlaceKick_Blue   = 蓝开球 = 蓝刚失球 = 对方得分；黄视角反之。
-//      前置：①已见过活球（ball_seen_moving，挡开局开球误判）；
-//            ②goalline armed 未锁（上次计分后比赛已恢复）。
-//      已知开放风险（docs/15 §3.1）：若平台中场休息期间保持 PlayMode=PlayOn，
-//      下半场黄队开球会被误计为我方得分——真机第一件事验证，必要时加半场守卫。
-//   B. 越线兜底：球完全越过门线且 y∈[70,110]（field_info 口径同平台判罚）。
-//      真实平台若进球后球停门内若干帧可触发；sim_bench 进球瞬间即重置、
-//      策略永远看不到越线状态（该判据在 sim 恒不可达，属预期）。
-//   两判据共享 goal_line_armed：计分后锁存，直到比赛恢复（PlayOn）且球离开
-//   双方门区才解锁——同一次进球只计一次。
-// ============================================================
-void Strategy::update_score(WorldModel &wm) {
-    const TeamContext &ctx = wm.ctx;
-    double spd = std::hypot(wm.ball.vx, wm.ball.vy);
-    if (spd > 2.0) wm.ball_seen_moving = true;
-
-    bool in_us_goal  = is_ball_in_our_goal(ctx, wm.ball.x, wm.ball.y);
-    bool in_opp_goal = is_ball_in_opp_goal(ctx, wm.ball.x, wm.ball.y);
-
-    bool scored = false;
-    // —— 判据 A：PlayOn → PlaceKick 转换（进球后失球方开球）——
-    if (!wm.goal_line_armed && wm.ball_seen_moving &&
-        wm.game_state_last == PM_PlayOn &&
-        (wm.game_state == PM_PlaceKick_Blue || wm.game_state == PM_PlaceKick_Yellow)) {
-        bool yellow_kick = (wm.game_state == PM_PlaceKick_Yellow);
-        bool we_scored = ctx.is_blue ? yellow_kick : !yellow_kick;
-        if (we_scored) ++wm.score_us; else ++wm.score_them;
-        wm.goal_line_armed = true;
-        scored = true;
-    }
-    // —— 判据 B：越线兜底 ——
-    if (!scored && !wm.goal_line_armed) {
-        if (in_opp_goal)      { ++wm.score_us;   wm.goal_line_armed = true; scored = true; }
-        else if (in_us_goal)  { ++wm.score_them; wm.goal_line_armed = true; scored = true; }
-    }
-    // 解锁：比赛恢复（PlayOn）且球离开双方门区
-    if (!in_us_goal && !in_opp_goal && wm.game_state == PM_PlayOn)
-        wm.goal_line_armed = false;
-
-    wm.lead_by_two = (wm.score_us - wm.score_them) >= 2;
-}
-
 void Strategy::update_team_state(WorldModel &wm) {
     // 滞回计数
     if (wm.we_have_ball) { ++wm.possession_frames; wm.no_possession_frames = 0; }
@@ -173,11 +121,8 @@ void Strategy::update_team_state(WorldModel &wm) {
     // 反击快攻窗口（docs/13 方案 A）：
     //   失球→持球转换帧 = 断球成功，置窗口让 assist/mid 立即前插（不等滞回切进攻态）；
     //   窗口每帧递减，归零后恢复正常回防。
-    //   P1（docs/15 §3.2）：领先 ≥2 时窗口减半（30→15）——不追大比分，
-    //   断球后本队收缩保胜果，前插接应窗口缩短。
     if (wm.we_have_ball && !wm.prev_we_have_ball && wm.game_state == PM_PlayOn) {
-        wm.counter_attack_frames = wm.lead_by_two ? kCounterWindowFrames / 2
-                                                  : kCounterWindowFrames;
+        wm.counter_attack_frames = kCounterWindowFrames;
     }
     if (wm.counter_attack_frames > 0) --wm.counter_attack_frames;
     wm.prev_we_have_ball = wm.we_have_ball;
@@ -209,9 +154,6 @@ double Strategy::threat_from_state(const WorldModel &wm) const {
     if (ball_danger_speed(wm) > kThreatDangerSpeed) {
         threat = our_half ? 0.8 : 0.6;
     }
-    // P1（docs/15 §3.2）：领先 ≥2 全链威胁 +0.2——0.4 中场球升 0.6 触发人盯人、
-    //   0.6 己方半场升 0.8 更早回防；持球态 0.1 不受影响（已 return）。
-    if (wm.lead_by_two) threat = clamp(threat + 0.2, 0.0, 1.0);
     return threat;
 }
 

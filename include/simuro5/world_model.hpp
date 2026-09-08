@@ -103,28 +103,17 @@ struct WorldModel {
     int sweeper_id = -1;
     double sweeper_x = 0, sweeper_y = 90;   // 清道夫站位点（罚球区前缘外侧、中路）
 
-    // 路径执行状态（docs/15 P0：motion::follow_route 用，按机器人索引）
-    //   每帧角色层算出 RoutePlan 后从 wm.route_wp_next[i]=0 起推进；
-    //   跨帧保留段索引防抖（沿用旧 waypoint），路径重算后由角色层重置。
-    int route_wp_next[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};
-
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;
     double assist_x = 0, assist_y = 90;
     double mid_x = 110, mid_y = 90;
 
-    // —— P1 自数比分（docs/15 §3.1）——
-    // 平台环境无比分字段，由 strategy.cpp 每帧按"球完全越过门线"事件自数。
-    //   score_us/score_them ：我方/对方得分（ctx.is_blue 视角）
-    //   goal_line_armed     ：越线锁存——球停在门内期间只计一次分，离开门区解锁
-    //   lead_by_two         ：领先 ≥2 触发防守加强（threat/锚点/反击窗口/冒险度共用）
-    int score_us = 0, score_them = 0;
-    bool goal_line_armed = false;
-    bool lead_by_two = false;
-    bool ball_seen_moving = false;   // 曾见过活球（spd>2）：挡开局 PlaceKick 被误判为进球
-
     // 每周期从平台环境刷新
     void update(const Environment *env, const TeamContext &ctx_);
+
+    // 距离辅助
+    double ball_opp_goal_dist() const { return std::fabs(ball.x - ctx.opp_goal_x()); }
+    double ball_our_goal_dist() const { return std::fabs(ball.x - ctx.our_goal_x()); }
 };
 
 }  // namespace simuro5

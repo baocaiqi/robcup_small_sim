@@ -7,6 +7,15 @@ namespace motion {
 
 void stop(RobotState &r) { r.vl = 0.0; r.vr = 0.0; }
 
+void angle(RobotState &r, double desired_angle) {
+    double te = angle_diff(desired_angle, r.rot);   // (-180,180]
+    double w = 0.0;
+    if (te > 50.0 || te < -50.0)      w = 9.0 / 90.0 * te;
+    else if (te > 20.0 || te < -20.0) w = 11.0 / 90.0 * te;
+    r.vl = -w;
+    r.vr =  w;
+}
+
 void position(RobotState &r, double tx, double ty) {
     // —— 移植官方 demo Position()：以 sigmoid(d) 控制车速 + Ka*theta_e 修正转向 ——
     double dx = tx - r.x, dy = ty - r.y;
@@ -61,21 +70,6 @@ void chase_ball(RobotState &r, const BallState &pred) {
         r.vl *= db / 10.0;
         r.vr *= db / 10.0;
     }
-}
-
-void follow_route(RobotState &r, const RoutePlan &rt, int &wp_next) {
-    if (!rt.found || rt.n_wp < 2) { stop(r); return; }   // 不可规划：调用方回退直线
-    if (wp_next < 0) wp_next = 0;
-    if (wp_next > rt.n_wp - 1) wp_next = rt.n_wp - 1;
-
-    // 段推进：到达当前 wp（≤8cm）或已明显越过（离下一点更近 8cm+）→ 切下一段
-    while (wp_next < rt.n_wp - 1) {
-        double d_cur  = dist(r.x, r.y, rt.wp_x[wp_next], rt.wp_y[wp_next]);
-        double d_next = dist(r.x, r.y, rt.wp_x[wp_next + 1], rt.wp_y[wp_next + 1]);
-        if (d_cur < 8.0 || d_next < d_cur - 8.0) ++wp_next;
-        else break;
-    }
-    position(r, rt.wp_x[wp_next], rt.wp_y[wp_next]);
 }
 
 }  // namespace motion
