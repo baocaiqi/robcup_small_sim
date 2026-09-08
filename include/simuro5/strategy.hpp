@@ -16,6 +16,10 @@ public:
     // 一周期决策（只读 wm 输入，决策写入 wm.home[i].vl/vr）
     void run(WorldModel &wm);
 
+    // P1 比分自数（docs/15 §3.1）：越线即进球事实，armed 锁存防重复计分。
+    //   独立公开方法供 offline_test 直接构造越线场景验证。
+    void update_score(WorldModel &wm);
+
 private:
     SituationModule sit_;
     RoleAssignment ra_;

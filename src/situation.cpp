@@ -56,10 +56,13 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     double opp_box_edge = ctx.opp_goal_x() - ad * 85.0;
 
     // —— 助攻/中场目标点（先算局部变量，走滞回后再写入）——
+    // P1（docs/15 §3.2）：领先 ≥2 锚点整体后撤——进攻态助攻点球前 40→20cm、
+    //   防守态反击支点 30→10cm，全队收缩保胜果（多退 20cm 不压上）。
+    double retreat = wm.lead_by_two ? 20.0 : 0.0;
     double ax, ay, mx, my;
     if (attack) {
         // 进攻态：助攻球前 40cm 偏上、中场中线前压 0.5 偏下，均不进入对方禁区
-        ax = clamp(bx + ad * 40.0, 15.0, 205.0);
+        ax = clamp(bx + ad * (40.0 - retreat), 15.0, 205.0);
         ay = clamp(by + 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, ax, ay)) ax = opp_box_edge;
         mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
@@ -82,8 +85,8 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         //     蹲防守位，断球后前场真空、ACTIVE 1 打 5）。
         //   威胁 >=0.6（球在我们半场/门前）：回收中线两侧保纵深（原逻辑）。
         if (wm.threat_level < 0.6) {
-            ax = 110.0 + ad * 30.0;
-            mx = 110.0 + ad * 30.0;
+            ax = 110.0 + ad * (30.0 - retreat);
+            mx = 110.0 + ad * (30.0 - retreat);
         } else {
             ax = 110.0;
             mx = 110.0;

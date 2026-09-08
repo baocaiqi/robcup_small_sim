@@ -93,11 +93,6 @@ inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y
     x = fx; y = fy;
 }
 
-// 是否在场地内
-inline bool in_field(double x, double y) {
-    return in_rect(x, y, 0.0, TeamContext::FIELD_LENGTH, 0.0, TeamContext::FIELD_WIDTH);
-}
-
 // 球是否整体越过我方门线（进球判定，含门柱范围）
 inline bool is_ball_in_our_goal(const TeamContext &ctx, double x, double y) {
     double gx = ctx.our_goal_x();

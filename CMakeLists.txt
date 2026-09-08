@@ -16,6 +16,7 @@ endif()
 # ---- 共享核心源码(编译进两个 DLL) ----
 set(CORE_SOURCES
   src/geometry.cpp
+  src/route.cpp
   src/world_model.cpp
   src/role_assignment.cpp
   src/situation.cpp

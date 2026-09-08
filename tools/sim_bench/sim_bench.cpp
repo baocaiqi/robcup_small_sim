@@ -95,6 +95,12 @@ struct SimState {
     double check_x = 110, check_y = 90;   // 僵局检测：每 60 帧对比球位移
     int check_cnt = 0;
     int dbg_contacts = 0;              // 接触事件日志开关（调试用）
+    // P1 事件模拟（docs/15 §3.1）：进球后失球方开球（真实平台 PlaceKick X = X 刚失球，
+    //   见 docs/06 L347 实测）——进球置 pm_goal/pm_left，帧循环递减后置 pm；
+    //   策略经 fill_env 看到 PlayOn→PlaceKick 转换 → 自数比分判据 A 才能端到端验证。
+    int pm = PM_PlayOn;                // 当前策略可见 PlayMode
+    int pm_goal = PM_PlayOn;           // 进球后要进入的开球态
+    int pm_left = 0;                   // 开球窗口剩余帧（60 帧 ≈1.5s 后恢复 PlayOn）
 };
 
 static double deg2rad(double d) { return d * 3.14159265358979 / 180.0; }
@@ -137,7 +143,7 @@ static void fill_env(Environment &e, const SimState &s, bool blue_side) {
     e.currentBall.pos.x = s.bx; e.currentBall.pos.y = s.by; e.currentBall.pos.z = 0;
     e.lastBall.pos.x = s.p_bx; e.lastBall.pos.y = s.p_by; e.lastBall.pos.z = 0;
     e.predictedBall.pos = e.currentBall.pos;
-    e.gameState = PM_PlayOn;
+    e.gameState = s.pm;
     const SimRobot *home = blue_side ? s.blue : s.yellow;
     const SimRobot *opp  = blue_side ? s.yellow : s.blue;
     for (int i = 0; i < 5; ++i) {
@@ -298,9 +304,12 @@ static void step_physics(SimState &s) {
 }
 
 // 进球判定 + 重置（带随机摆位）；debug>0 时打印进球详情
+// 进球后：失球方开球（蓝失球→PlaceKick_Blue，黄失球→PlaceKick_Yellow），
+//   开球窗口 60 帧——让策略看到 PlayOn→PlaceKick 转换（自数比分判据 A）
 static bool check_goal(SimState &s, Rng *rng, int debug) {
     if (s.bx > 220 && s.by >= kGoalLo && s.by <= kGoalHi) {   // 蓝队失球(黄得分)
         s.score_yellow++;
+        s.pm_goal = PM_PlaceKick_Blue; s.pm_left = 60;   // 蓝刚失球 → 蓝开球
         if (debug) printf("  [失球] 帧%d 蓝失: 球(%.0f,%.0f)v(%.0f,%.0f) 门将(%.0f,%.0f) 蓝1(%.0f,%.0f) 黄近球(%.0f,%.0f)\n",
                           s.frames, s.bx, s.by, s.bvx, s.bvy, s.blue[0].x, s.blue[0].y,
                           s.blue[1].x, s.blue[1].y,
@@ -309,6 +318,7 @@ static bool check_goal(SimState &s, Rng *rng, int debug) {
     }
     if (s.bx < 0 && s.by >= kGoalLo && s.by <= kGoalHi) {     // 黄队失球(蓝得分)
         s.score_blue++;
+        s.pm_goal = PM_PlaceKick_Yellow; s.pm_left = 60;  // 黄刚失球 → 黄开球
         if (debug) printf("  [进球] 帧%d 蓝进: 球(%.0f,%.0f)\n", s.frames, s.bx, s.by);
         init_formation(s, rng); return true;
     }
@@ -471,6 +481,11 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
     Environment env_b, env_y;
 
     for (int f = 0; f < frames; ++f) {
+        // P1 事件模拟：开球窗口内策略看到 PlaceKick（失球方开球），窗口结束恢复 PlayOn
+        if (s.pm_left > 0) {
+            s.pm = s.pm_goal;
+            if (--s.pm_left == 0) s.pm = PM_PlayOn;
+        }
         // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
         if (opp_mode == 2) {
             scripted_opponent(s, true, opp_strength);
