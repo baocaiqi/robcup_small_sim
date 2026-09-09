@@ -838,6 +838,44 @@ static int test_follow_route() {
 //   C: 追球避障路径（直线被挡 → route 绕行，不穿圆盘）
 // ============================================================
 
+// 禁区变角推射计数单测（docs/17）：贴球推穿且球被推动才计次；
+//   超 3 次不再走射门分支（防禁区死磕送判罚）；球离开射程清零。
+static int test_shoot_push_limit() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    wm.ball.x = 40; wm.ball.y = 90;      // 距对方门 40cm（射程内）
+    wm.ball.vx = 10.0; wm.ball.vy = 0.0; // 球被推动中（计次前置条件）
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 160 + i * 10; wm.home[i].y = 90; }
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
+    wm.opp[0].x = 5; wm.opp[0].y = 90;   // GK 封门正中 → 开口两侧均 16cm，射门可行
+    wm.home[1].x = 20; wm.home[1].y = 90; wm.home[1].rot = 0;  // 贴球对准
+    run_active(wm, 1);
+    if (wm.shoot_push_count != 1 || wm.shoot_push_cd <= 0) {
+        printf("FAIL: 贴球推穿应计次1 got count=%d cd=%d\n", wm.shoot_push_count, wm.shoot_push_cd);
+        return 1;
+    }
+    // 超 3 次 → 射门分支被跳过（count 不再增长、机器人不再推）
+    wm.shoot_push_count = 3; wm.shoot_push_cd = 0;
+    wm.home[1].x = 20; wm.home[1].y = 90; wm.home[1].vl = 0; wm.home[1].vr = 0;
+    run_active(wm, 1);
+    if (wm.shoot_push_count != 3) {
+        printf("FAIL: 超限仍推球 count=%d\n", wm.shoot_push_count);
+        return 1;
+    }
+    // 球离开射程 → 计数清零（下一轮进攻重新计）
+    wm.ball.x = 160; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[1].x = 180; wm.home[1].y = 90;
+    run_active(wm, 1);
+    if (wm.shoot_push_count != 0) {
+        printf("FAIL: 离射程未清零 count=%d\n", wm.shoot_push_count);
+        return 1;
+    }
+    printf("shoot push limit: OK (贴球推穿计次/超3次停推/离射程清零)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
@@ -857,6 +895,7 @@ int main() {
     rc |= test_route_avoid();
     rc |= test_route_cluster();
     rc |= test_follow_route();
+    rc |= test_shoot_push_limit();
     rc |= test_shoot_plan();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();

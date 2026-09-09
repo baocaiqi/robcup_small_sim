@@ -106,6 +106,17 @@ struct WorldModel {
     //   每帧角色层算出 RoutePlan 后从 wm.route_wp_next[i]=0 起推进；
     //   跨帧保留段索引防抖（沿用旧 waypoint），路径重算后由角色层重置。
     int route_wp_next[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 清道夫站位点（罚球区前缘外侧、中路）
+// —— 禁区前沿变角推射（docs/17，模仿官方"沿变角推球"）——
+    // 直推被 GK/防守者挡回后，同一轮进攻连续推球尝试 ≤3 次（kMaxShootPushes），
+    //   超限转入传球/带离（防禁区死磕：反复推不进 → 送判罚/死锁/白送球权）；
+    // 第 2 次起若仍瞄同一侧开口 → 强制换另一侧开口（变角绕封堵）。
+    //   shoot_push_count   ：已推球次数（每次"贴球推穿且球被推动"记 1，cd 冷却防一推多计）
+    //   shoot_push_cd      ：计次冷却帧（推完 20 帧内不重复计，等球弹回/重加速再计下一次）
+    //   shoot_push_last_side：上一次推球瞄准的开口侧（+1 上柱侧 / -1 下柱侧，0=无）
+    // 清零：球离开射程（距门>75）/ 球权易主且人在球外 → count 归零（下一轮进攻重新计）。
+    int shoot_push_count = 0;
+    int shoot_push_cd = 0;
+    int shoot_push_last_side = 0;
 
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;

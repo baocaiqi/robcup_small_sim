@@ -374,6 +374,8 @@ void run_goalie(WorldModel &wm, int id) {
 //   追不到/超时由 kActiveGaLimit 撤出分支兜底，不会赖在门区送判罚。
 constexpr double kReboundRushSpeed = 8.0;   // cm/帧：反弹球可抢速度阈值（GK扑出/挡回典型 <10）
 constexpr double kReboundRushDist  = 90.0;  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
+// —— 禁区前沿变角推射次数上限（docs/17，模仿官方"沿变角推球"）——
+constexpr int kMaxShootPushes = 3;   // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
 static const int kActiveGaLimit  = 8;
 static const int kActiveGaTotal  = 18;  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
@@ -396,6 +398,15 @@ void run_active(WorldModel &wm, int id) {
     } else {
         wm.active_ga_frames = 0;
         wm.active_ga_total = 0;
+    }
+
+    // —— 禁区推射计数维护（docs/17）——
+    //   冷却递减；球离开射程(>75)或球权易主且人在球外(>25) → 清零重计下一轮。
+    if (wm.shoot_push_cd > 0) --wm.shoot_push_cd;
+    if (ctx.dist_opp_goal(wm.ball.x) > 75.0 ||
+        (!wm.we_have_ball && dist(r.x, r.y, wm.ball.x, wm.ball.y) > 25.0)) {
+        wm.shoot_push_count = 0;
+        wm.shoot_push_last_side = 0;
     }
 
     // 角区卡球计时：球在角区(距角 <30cm)且基本静止(速度<1cm/帧) → 连续帧数+1；
@@ -460,12 +471,33 @@ void run_active(WorldModel &wm, int id) {
     //   目标=球前 20cm，直线加速穿过球，推球方向=瞄准线，方向不再被带偏；
     //   还远/在侧面时先绕到球后沿瞄准线的站位点（球后 20cm）对准再推。
     ShootPlan sp = plan_shoot(wm, id);
-    if (sp.viable) {
+    if (sp.viable && wm.shoot_push_count < kMaxShootPushes) {
         double bx = wm.ball.x, by = wm.ball.y;
         double db = dist(r.x, r.y, bx, by);
         double te_ball = angle_diff(angle_to(r.x, r.y, bx, by), r.rot);
+        int this_side = (sp.aim_y > 90.0) ? 1 : -1;
+        // 变角推射（docs/17，模仿官方"沿变角推球"）：同一轮已推 >=2 次且本次仍瞄
+        //   上次同一侧开口 → 强制换另一侧开口重推（同一角度被 GK 连续挡回 = 白费，
+        //   换侧晃开封堵；第 1 推仍用 plan_shoot 的大开口选择）。
+        if (wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
+            wm.shoot_push_last_side != 0) {
+            double ogx = ctx.opp_goal_x(), ad2 = ctx.attack_dir();
+            double oy = 90.0 - (sp.aim_y - 90.0);          // 另一侧开口 y
+            double dx = (ogx + ad2 * 5.0) - bx, dy = oy - by;
+            double len = std::hypot(dx, dy);
+            if (len > 1e-6) { dx /= len; dy /= len; }
+            sp.dir_x = dx; sp.dir_y = dy;
+            this_side = -this_side;
+        }
         if (db < 22.0 && std::fabs(te_ball) < 40.0) {
             motion::position(r, bx + sp.dir_x * 20.0, by + sp.dir_y * 20.0);
+            // 计次：球已被推动(>5cm/帧)才记一次（贴球顶住没推动不算真推）；
+            //   cd=20 冷却防同一推多帧重复计，球弹回再加速时才计下一次。
+            if (wm.shoot_push_cd <= 0 && std::hypot(wm.ball.vx, wm.ball.vy) > 5.0) {
+                ++wm.shoot_push_count;
+                wm.shoot_push_cd = 20;
+                wm.shoot_push_last_side = this_side;
+            }
         } else {
             motion::position(r, bx - sp.dir_x * 20.0, by - sp.dir_y * 20.0);
         }
