@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>rlg 探针 — 进球归属 / 乌龙球 / 轨迹速查</title>
+<style>
+  body{font-family:Consolas,Menlo,monospace;font-size:13px;background:#111;color:#ddd;margin:12px}
+  h2{margin:0 0 8px} .hint{color:#8cf}
+  #out{white-space:pre;line-height:1.35;background:#000;border:1px solid #333;padding:8px;margin-top:8px}
+  input[type=file]{color:#ddd;background:#222;border:1px solid #444;padding:4px}
+  b{color:#ffd479} .og{color:#ff8a8a} .ok{color:#8affa0}
+</style>
+</head>
+<body>
+<h2>rlg 探针（离线，纯前端）</h2>
+<div class="hint">
+  选一个 <code>.rlg</code> → 自动解析（352B/帧 = 蓝5 + 黄5 + 球 + gs + whos）→ 输出每个进球的<b>最后触球者</b>，
+  据此判定<b>乌龙球</b>（丢球方自己碰进去）还是正常进球。
+</div>
+<input type="file" id="f" accept=".rlg">
+<pre id="out">等待选择文件…</pre>
+<script>
+const FRAME=352, GOAL_LO=70, GOAL_HI=110, L=220, W=180;
+let O=null;                                    // 输出元素
+
+function say(s){ O.textContent += s + "\n"; }
+
+function parse(ab){
+  const D=new DataView(ab), n=Math.floor(ab.byteLength/FRAME);
+  const rf=(i,k)=>D.getFloat64(i*FRAME + k*8, true);
+  const frame=i=>({
+    blue:Array.from({length:5},(_,k)=>({x:rf(i,4*k),y:rf(i,4*k+1),rot:rf(i,4*k+3)})),
+    yellow:Array.from({length:5},(_,k)=>({x:rf(i,20+4*k),y:rf(i,20+4*k+1),rot:rf(i,20+4*k+3)})),
+    ball:{x:rf(i,40),y:rf(i,41)},
+    gs:Math.round(rf(i,42)), whos:Math.round(rf(i,43))
+  });
+  return {n, frame};
+}
+
+// 进球检测：① 直接越线（门前 1cm 内、在门框内）② 门前门框内 → 瞬移回中圈（平台进球当帧重置）
+function findGoals(M){
+  const g=[], B=M.frame;
+  let cd=0;
+  for(let i=1;i<M.n;i++){
+    const b=B(i), p=B(i-1);
+    if(cd>0){cd--;  /* 仍要检测，避免漏掉连续事件 */ }
+    const nearYellow = p.ball.x<=12 && p.ball.y>=GOAL_LO && p.ball.y<=GOAL_HI;
+    const nearBlue   = p.ball.x>=L-12 && p.ball.y>=GOAL_LO && p.ball.y<=GOAL_HI;
+    const resetNow   = Math.abs(b.ball.x-L/2)<25 && Math.abs(b.ball.y-90)<25;
+    const crossY = b.ball.x<=1 && b.ball.y>=GOAL_LO && b.ball.y<=GOAL_HI;
+    const crossB = b.ball.x>=L-1 && b.ball.y>=GOAL_LO && b.ball.y<=GOAL_HI;
+    if(cd===0 && (crossY || (nearYellow && resetNow))){
+      g.push({i, net:"yellow", x:p.ball.x, y:p.ball.y, how: crossY?"越线":"门前重置"}); cd=60; continue;
+    }
+    if(cd===0 && (crossB || (nearBlue && resetNow))){
+      g.push({i, net:"blue", x:p.ball.x, y:p.ball.y, how: crossB?"越线":"门前重置"}); cd=60; continue;
+    }
+  }
+  return g;
+}
+
+// 最后触球者：从进球帧往前找最近的"某机器人距球 <15cm"的帧
+function lastTouch(M,g){
+  const B=M.frame;
+  for(let i=g.i;i>=Math.max(1,g.i-30);i--){
+    const b=B(i).ball;
+    for(const [team,arr] of [["blue",B(i).blue],["yellow",B(i).yellow]]){
+      for(let k=0;k<5;k++){
+        const d=Math.hypot(arr[k].x-b.x, arr[k].y-b.y);
+        if(d<15){
+          const vx=b.x-B(Math.max(0,i-3)).ball.x, vy=b.y-B(Math.max(0,i-3)).ball.y;
+          return {i,team,k,d,bx:b.x,by:b.y,rx:arr[k].x,ry:arr[k].y,rot:arr[k].rot,
+                  vx,vy,spd:Math.hypot(vx,vy)/0.075};   // 3 帧 ≈0.075s
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function angTo(x1,y1,x2,y2){ return Math.atan2(y2-y1,x2-x1)*180/Math.PI; }
+function wrap(a){ while(a>180)a-=360; while(a<=-180)a+=360; return a; }
+
+function analyze(ab,name){
+  say("文件: "+name+"   "+ab.byteLength+" B");
+  const M=parse(ab);
+  say("帧数: "+M.n+"  ≈"+(M.n/40).toFixed(1)+" s（40Hz，只含 PlayOn 帧）");
+  const B=M.frame;
+  // 坐标范围自检（应为 x∈[-15,235] 附近、y∈[0,180]）
+  let xmin=1e9,xmax=-1e9,ymin=1e9,ymax=-1e9;
+  for(let i=0;i<M.n;i++){const b=B(i).ball;
+    xmin=Math.min(xmin,b.x);xmax=Math.max(xmax,b.x);ymin=Math.min(ymin,b.y);ymax=Math.max(ymax,b.y);}
+  say("球位范围: x["+xmin.toFixed(0)+","+xmax.toFixed(0)+"] y["+ymin.toFixed(0)+","+ymax.toFixed(0)+"]"
+      +"   （若 x 不在 -15~235，说明坐标系/帧结构不对）");
+  const g=findGoals(M);
+  say("检测到进球事件: "+g.length+" 个\n");
+  let own=0, normal=0, unknown=0;
+  g.forEach((e,idx)=>{
+    const t=lastTouch(M,e);
+    const owner = e.net;                       // 该球门属于哪队（yellow 门 x=0 属黄队）
+    const scorer = owner==="yellow" ? "blue" : "yellow";
+    let verdict="无近距离触球（远射/折射/未录到）", cls="";
+    if(t){
+      if(t.team===owner){ verdict="乌龙球（丢球方自己碰进去）"; own++; cls="og"; }
+      else { verdict="正常进球（进攻方碰进去）"; normal++; cls="ok"; }
+    } else unknown++;
+    say("—— 第 "+(idx+1)+" 球  t="+(e.i/40).toFixed(1)+"s  进【"+owner+"】门（进球方="+scorer+"）  判据:"+e.how);
+    if(t){
+      const dirGoal = angTo(t.bx,t.by, owner==="yellow"?0:L, 90);      // 球→被攻门中心
+      const moveAng = Math.atan2(t.vy,t.vx)*180/Math.PI;
+      say("   最后触球: "+t.team+"["+t.k+"]  距球 "+t.d.toFixed(1)+"cm  触点("+t.bx.toFixed(0)+","+t.by.toFixed(0)+")"
+          +"  触球机位("+t.rx.toFixed(0)+","+t.ry.toFixed(0)+") rot="+t.rot.toFixed(0));
+      say("   球出射方向 "+moveAng.toFixed(0)+"°  朝门方向 "+dirGoal.toFixed(0)+"°  偏差 "
+          +Math.abs(wrap(moveAng-dirGoal)).toFixed(0)+"°   球速≈"+t.spd.toFixed(0)+" cm/s");
+      say("   → "+verdict);
+    } else say("   → "+verdict);
+    say("");
+  });
+  say("=== 汇总: 乌龙 "+own+" / 正常 "+normal+" / 不明 "+unknown+" ===");
+  if(own>0){
+    say("（乌龙判定口径：进球前 30 帧内、距球 <15cm 的最后触球者属于【丢球方】）");
+    say("提示：若多个乌龙的『最后触球者 + 触点位置 + 出射方向』高度相似 → 同一个套路，");
+    say("      对照上方每球的『触球机位/rot/出射方向』即可看出是不是同一模式。");
+  }
+}
+
+document.getElementById("f").addEventListener("change", async ev=>{
+  const f=ev.target.files[0]; O=document.getElementById("out"); O.textContent="";
+  if(!f) return;
+  try{ analyze(await f.arrayBuffer(), f.name); }
+  catch(err){ say("解析出错: "+err); }
+});
+window.__rlgAnalyze=analyze;      // 供自动化注入/调试直接调用
+O=document.getElementById("out");
+</script>
+</body>
+</html>

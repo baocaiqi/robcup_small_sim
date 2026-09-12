@@ -14,7 +14,10 @@ namespace {
 // ============================================================
 // docs/15 P0-4：避障移动 helper（追球/移动避障路径层接线，纯路径无射门依赖）
 // ============================================================
-constexpr double kRouteInflate = 10.0;   // 对方机器人避障半径（本体 6 + 净空 4）
+// 对方机器人避障半径（本体 6 + 净空 4）。
+//   ⚠️ 与 plan_route 的 margin（默认 0.5）是绑定关系：路径允许侵入本膨胀圈最多 margin，
+//   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
+constexpr double kRouteInflate = 10.0;
 
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
@@ -31,9 +34,9 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
     RoutePlan rt = plan_route(r.x, r.y, tx, ty, obs, PLAYERS_PER_SIDE);
     if (rt.found && rt.n_wp > 2) {
         wm.route_wp_next[id] = 0;      // 每帧重置：路径变了不沿用旧段（follow_route 自动跳段）
-        motion::follow_route(r, rt, wm.route_wp_next[id]);
+        motion::follow_route(r, rt, wm.route_wp_next[id], motion::TM_PASS);   // 追球=经过型
     } else {
-        motion::position(r, tx, ty);
+        motion::position(r, tx, ty, motion::TM_PASS);
     }
     if (decel) {
         double dg = dist(r.x, r.y, tx, ty);
@@ -47,6 +50,33 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
 //   · 判距用 dx*dx+dy*dy，风格对齐 pass.cpp 的 count_near_opponent
 //   · 返回微调后的 y；威胁半径内无敌人则原样返回 by
 // ============================================================
+// ============================================================
+// docs/06 第 49 轮：推球合法性守卫（治真机 "No pushing" 犯规）
+//   平台规则：① 死球/重启（摆位）期间推球 = 犯规；② 角落黄区内推球 = 犯规（每 4 次 +1 球）。
+//   真机日志：10:56 场我方被判 4 次 `FreeBall RightBot/RightTop … blue team Violated
+//   No pushing` → 4 次 = 白送 1 球；09:44 场（改前）0 次。
+//   本平台"我们所有让球动起来的动作都是推球"（没有踢球动作），所以守必须是**动作入口级**的：
+//   球在角区/平台在死球期时，一律不碰球（`hold_out_of_corner` = 停住），让平台按规则处理。
+// ============================================================
+bool push_allowed(const WorldModel &wm) {
+    if (wm.game_state != PM_PlayOn) return false;             // 死球/摆位/重启期
+    return !in_no_push_zone(wm.ball.x, wm.ball.y);            // 球未贴角
+}
+
+// "球后准备点"是否合法（docs/06 第 49 轮）：准备点也不许落在角区——
+//   否则机器人驱车过去时会穿过球、把球往角心顶 → "No pushing" 犯规。
+bool prep_point_ok(double px, double py) { return !in_no_push_zone(px, py); }
+
+// 不许推球时的动作（docs/06 第 49 轮）：**只停不动**。
+//   理由：本平台没有踢球动作，任何"朝球的移动"都是推球；而规则只罚"推球"，
+//   站在角区里不动并不犯规。所以最安全且最易验证的动作就是停住——
+//   既不碰球、也不会像"绕到场心侧"那样让路径穿过球（那等于继续推）。
+//   球若卡在角区，交给平台按规则判 FreeBall（代价 < 每 4 次犯规白送 1 球）。
+void hold_out_of_corner(WorldModel &wm, RobotState &r) {
+    (void)wm;
+    motion::stop(r);
+}
+
 // 追球目标校验（docs/13 防守修复 F2）：平台预测(ball_pred)在进球/FreeBall/定位球
 //   重置期会冻结在错误位置（真实 9/2 丢球 2：ACTIVE 追幻影 40 帧脱位、
 //   4v5 被 demo 运动战破门）——预测点离实际球 >80cm 即视为不可信，改用实际球位。
@@ -126,6 +156,14 @@ void run_goalie(WorldModel &wm, int id) {
     double vx = wm.ball.vx, vy = wm.ball.vy;
     double danger = ball_danger_speed(wm);   // 球朝己方门的速度分量（横滚≈0、背离=0，才是真威胁）
     double db = dist(r.x, r.y, bx, by);      // 守门员到球的当前距离
+    // —— docs/06 第 49 轮：死球期/球贴角区时门将也不许推球（同上，动作入口级守卫）——
+    //   门将的解围/推穿同样算"推球"：死球摆位期推 = 犯规；球在角落黄区推 = 犯规。
+    //   此时只回门前站位（不触球），等平台按规则处理。
+    if (!push_allowed(wm)) {
+        motion::position(r, ctx.our_goal_x() + ctx.attack_dir() * kGuardDist,
+                         clamp(by, kTrackYLo, kTrackYHi), motion::TM_STOP);
+        return;
+    }
     // 门球/定位球重启：球停在我方门前 → 门将主动沿中线穿过球把它推出去。
     //   否则球静止时门将只停在球后 8cm 或退到门线上，球被推/滚到门线外又触发门球，
     //   形成连续门球死循环（复盘实测一局循环 17+ 次）。
@@ -162,7 +200,10 @@ void run_goalie(WorldModel &wm, int id) {
             py = clamp(by, 78.0, 102.0);
         }
         clamp_goalie_area(ctx, px, py);
-        motion::position(r, px, py);
+        // 已贴球且 y 对准 → 目标是球前 20cm（穿球推出去）= 经过型 TM_PASS；
+        // 未对准 → 目标是球后 8cm（先对准）= 停点 TM_STOP（P1 制动包线保证不会冲过球）
+        motion::position(r, px, py,
+                         (dbg < 25.0 && aligned) ? motion::TM_PASS : motion::TM_STOP);
         return;
     }
     // 对方持球压门（球距门<45 且对方离球<25）→ 不冲球，封球-门连线：
@@ -376,6 +417,20 @@ constexpr double kReboundRushSpeed = 8.0;   // cm/帧：反弹球可抢速度阈
 constexpr double kReboundRushDist  = 90.0;  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
 // —— 禁区前沿变角推射次数上限（docs/17，模仿官方"沿变角推球"）——
 constexpr int kMaxShootPushes = 3;   // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+// —— 到点定向射门（docs/18 §8）：准备点距离/位置容差/朝向容差 ——
+//   球后 20cm：够得着球（下一帧直线推穿能碰到球心），又不至于贴太近把球顶走
+//   位置容差 3cm：制动包线停住精度 ~1.5cm，留余量
+//   朝向容差 10°：1m 处横向偏差 = 100·tan10° ≈ 17.6cm < 门半宽 20cm → 能射正；
+//     旧口径是 40°（1m 处偏 92cm = 两个门宽），真机实测机头−瞄准线 p50=51.6°、≤10° 仅 6%
+constexpr double kPrepDist   = 20.0;
+constexpr double kPrepPosTol = 3.0;
+constexpr double kPrepAngTol = 10.0;
+// 对准尝试超时（帧）：球一直在动/被抢，死等对准会把机会全耗掉 → 超时按当前朝向推
+//   ⚠️ sim A/B 反对本项（净胜 -1.63）：sim 的 carry 机制隐含"机头对着球"、
+//   且是弱脚本门将（"快推"优于"推准"）→ 由用户决定真机观查（docs/06 第 47 轮）。
+constexpr int    kShootAlignTimeout = 40;
+// 带球推进的机头对准容差（度）：比射门(10°)略松，但远紧于旧的 40°
+constexpr double kDribAngTol = 20.0;
 static const int kActiveGaLimit  = 8;
 static const int kActiveGaTotal  = 18;  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
@@ -418,6 +473,12 @@ void run_active(WorldModel &wm, int id) {
     } else {
         wm.corner_ball_frames = 0;
     }
+
+    // —— docs/06 第 49 轮：推球合法性守卫（动作入口级）——
+    //   本平台"让球动起来"的所有动作都是推球（没有踢球动作），所以这里一旦拦住，
+    //   后面的射门/带球/围困/传球/角区救球全部不会执行 → 不可能在角区或死球期推球。
+    //   代价：角上的球不去碰（让平台判 FreeBall）；收益：不再吃"每 4 次 +1 球"的犯规。
+    if (!push_allowed(wm)) { hold_out_of_corner(wm, r); return; }
 
     // 对方门球/定位球重启：球停死在对方门区(球门前 50cm) → 别冲进去抢。
     //   球是死球，冲进去射门/追球会横穿全场撞进对方门区，冲撞对方门将(门区受保护)
@@ -464,71 +525,118 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
+    // 角区救球（治"FreeBall 13 次/场"：球卡四角无人救 → 判争球）——
+    // ⚠️ docs/06 第 49 轮修订：**只在球离角足够远时才救**，且避开"绕到球后"这个动作。
+    //   旧版只判球距角 <22cm 就算"深角不救"，实测仍吃 5 次 "No pushing" 犯规
+    //   （因为"球后 8cm"的准备点会落在角区内 → 驱车过去把球顶进角里）。
+    //   现口径：球距角 < kCornerNoPushR(35cm) 一律不救；准备点也必须 ≥35cm。
+    // 仅救"角区外环"的卡球：该环在平台禁止推球区之外，推球合法；
+    //   球压到角心则**不救**——规则"禁止推球区推球 = 犯规(每4次+1球)+判争球"，
+    //   深角球等平台判僵局重置，比送犯规划算。
+    //   救球执行：贴近时直线穿过球推向场心方向，让球离开墙角继续比赛；
+    //   还远/在侧面时先绕到球后(角落侧)对准再推。
+    if (wm.corner_ball_frames > 30) {
+        double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+        if (db < 80.0) {
+            bool deep = in_no_push_zone(wm.ball.x, wm.ball.y);   // 35cm 口径（原 22cm 太松）
+            if (!deep) {
+                ++wm.corner_rescue_events;   // 统计用（sim_bench 验证救球触发）
+                double ex = 110.0 - wm.ball.x, ey = 90.0 - wm.ball.y;
+                double elen = std::hypot(ex, ey);
+                if (elen > 1e-6) { ex /= elen; ey /= elen; }
+                // 准备点（球后 8cm，角落侧）也要在角区外，否则放弃救球
+                double back_x = wm.ball.x - ex * 8.0, back_y = wm.ball.y - ey * 8.0;
+                double te_ball = angle_diff(angle_to(r.x, r.y, wm.ball.x, wm.ball.y), r.rot);
+                if (db < 22.0 && std::fabs(te_ball) < 40.0) {
+                    motion::position(r, wm.ball.x + ex * 30.0, wm.ball.y + ey * 30.0, motion::TM_PASS);   // 穿球踢出场心=经过型
+                } else if (!in_no_push_zone(back_x, back_y)) {
+                    motion::position(r, back_x, back_y);
+                } else {
+                    hold_out_of_corner(wm, r);   // 准备点在角区内 → 不冒险，退到场心侧
+                }
+                return;
+            }
+        }
+    }
+
     // —— 射门：直线推穿（治真实平台"带球射门系统性偏下"）——
     // 原单点推球：高速冲到球后 8cm 推球点时还边转边铲，推球方向 = 接近轨迹
     //   方向（被出发点带偏），球被斜推偏出（实测球 y 90→65 偏出门柱，助跑 175cm 太长）。
     // 现改为"贴球后直线推穿"：已贴在球后(≤22cm)且朝向大致对准(≤40°)时，
     //   目标=球前 20cm，直线加速穿过球，推球方向=瞄准线，方向不再被带偏；
     //   还远/在侧面时先绕到球后沿瞄准线的站位点（球后 20cm）对准再推。
+    // ⚠️ docs/18 §8 记录：本轮试过把这里升级为"必须对准到 10° 才推（含就地转正）"，
+    //   并用 motion::position_aligned 执行；sim 4 种子 A/B 净胜 -1.63（远超 0.66 噪声）
+    //   → 已回退。原因：花时间转正 = 丢推进节奏/球权；sim 又是弱门将，"快推"比"推准"划算。
+    //   真机（射正率 8% vs 对手 48%）是否值得为此付代价，**必须真机单开一轮验证**，
+    //   不能拿 sim 判。到点定向的能力（motion::position_aligned）与单测已就位，随时可接。
     ShootPlan sp = plan_shoot(wm, id);
-    if (sp.viable && wm.shoot_push_count < kMaxShootPushes) {
+    // 射门机会闸门（docs/18 §8）：≤70cm 无条件射（A/B 校准的主力区，别加闸门）；
+    //   70~110cm 远射要 quality ≥ kShootNowQ。**远射档已按用户指令开启**
+    //   （shoot.cpp `kFarShotEnabled = true`，2026-09-11；sim A/B 反对，数据见 docs/06 第 47 轮）。
+    //   点球（penalty）quality 置 1 → 直接放行。
+    const double kShootNowQ = 0.35;
+    bool shoot_now = sp.viable &&
+                     (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ);
+    if (shoot_now && wm.shoot_push_count < kMaxShootPushes) {
         double bx = wm.ball.x, by = wm.ball.y;
-        double db = dist(r.x, r.y, bx, by);
-        double te_ball = angle_diff(angle_to(r.x, r.y, bx, by), r.rot);
         int this_side = (sp.aim_y > 90.0) ? 1 : -1;
-        // 变角推射（docs/17，模仿官方"沿变角推球"）：同一轮已推 >=2 次且本次仍瞄
-        //   上次同一侧开口 → 强制换另一侧开口重推（同一角度被 GK 连续挡回 = 白费，
-        //   换侧晃开封堵；第 1 推仍用 plan_shoot 的大开口选择）。
+        // 变角推射（docs/17）：同一轮已推 >=2 次且本次仍瞄上次同一侧 → 强制换另一侧重推
         if (wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
             wm.shoot_push_last_side != 0) {
             double ogx = ctx.opp_goal_x(), ad2 = ctx.attack_dir();
-            double oy = 90.0 - (sp.aim_y - 90.0);          // 另一侧开口 y
+            double oy = 90.0 - (sp.aim_y - 90.0);
             double dx = (ogx + ad2 * 5.0) - bx, dy = oy - by;
             double len = std::hypot(dx, dy);
-            if (len > 1e-6) { dx /= len; dy /= len; }
+            if (len > 1e-6) { dx /= len; dy /= len; sp.aim_rot = angle_to(0.0, 0.0, dx, dy); }
             sp.dir_x = dx; sp.dir_y = dy;
             this_side = -this_side;
         }
-        if (db < 22.0 && std::fabs(te_ball) < 40.0) {
-            motion::position(r, bx + sp.dir_x * 20.0, by + sp.dir_y * 20.0);
-            // 计次：球已被推动(>5cm/帧)才记一次（贴球顶住没推动不算真推）；
-            //   cd=20 冷却防同一推多帧重复计，球弹回再加速时才计下一次。
+        // —— 到点定向执行（docs/18 §8）——
+        double px = bx - sp.dir_x * kPrepDist;      // 准备点 = 球后 20cm，落在瞄准线上
+        double py = by - sp.dir_y * kPrepDist;
+        // docs/06 第 49 轮：准备点也不许落在角落黄区（否则驱车过去会穿过球、
+        //   把球往角心顶 → "No pushing" 犯规）。球在对方门角附近射门时最易触发。
+        if (!prep_point_ok(px, py)) { hold_out_of_corner(wm, r); return; }
+        double db = dist(r.x, r.y, bx, by);
+        double te_head = angle_diff(sp.aim_rot, r.rot);
+        // 人在球的"门侧后方"：球−人 在瞄准方向上的投影 > 0 ⇔ 往前推把球送向球门
+        //   （旧口径只判"机头对着球"，人站在球前面时会**把球往回推**）
+        bool behind = ((bx - r.x) * sp.dir_x + (by - r.y) * sp.dir_y) > 0.0;
+        bool near = db < kPrepDist + 6.0;
+        bool ready = false;
+        if (behind && near) {
+            // ①a 已在球后方且够得着 → **就地转正**（不后退、不丢球权）
+            //   教训：先前要求"退到球后 20cm 准备点"才对准，插桩实测射门分支一场进
+            //   3600 次、推球 0 次（球一直在动，那个点不可达）→ 射门函数被门禁卡死。
+            if (std::fabs(te_head) <= kPrepAngTol) {
+                ready = true;
+            } else if (wm.shoot_align_frames >= kShootAlignTimeout) {
+                ready = true;                  // 超时兜底：不再死等
+                wm.shoot_align_frames = 0;
+            } else {
+                ++wm.shoot_align_frames;
+                motion::position_aligned(r, r.x, r.y, sp.aim_rot, kPrepPosTol, kPrepAngTol);
+                return;
+            }
+        } else {
+            // ①b 站错一侧 / 太远 → 去准备点并对准
+            wm.shoot_align_frames = 0;
+            ready = motion::position_aligned(r, px, py, sp.aim_rot, kPrepPosTol, kPrepAngTol);
+            if (ready && !near) ready = false;  // 到了准备点但仍够不着球 → 继续靠近
+        }
+        if (ready) {
+            wm.shoot_align_frames = 0;
+            // 直线推穿 = 经过型：不套制动包线，保持推球力度
+            motion::position(r, bx + sp.dir_x * 20.0, by + sp.dir_y * 20.0, motion::TM_PASS);
+            // 计次：球已被推动(>5cm/帧)才记一次；cd=20 冷却防同一推多帧重复计
             if (wm.shoot_push_cd <= 0 && std::hypot(wm.ball.vx, wm.ball.vy) > 5.0) {
                 ++wm.shoot_push_count;
                 wm.shoot_push_cd = 20;
                 wm.shoot_push_last_side = this_side;
             }
-        } else {
-            motion::position(r, bx - sp.dir_x * 20.0, by - sp.dir_y * 20.0);
         }
         return;
-    }
-
-    // —— 角区救球（治"FreeBall 13 次/场"：球卡四角无人救 → 判争球）——
-    // 仅救"角区外环"(距角 22~30cm)的卡球：该环在平台禁止推球区(四角黄区)之外，
-    // 推球合法；球压到角心(距角 <22cm)则**不救**——规则"禁止推球区推球 =
-    // 犯规(每4次+1球)+判争球"，深角球等平台判僵局重置，比送犯规划算。
-    // 救球执行：贴近时直线穿过球推向场心方向，让球离开墙角继续比赛；
-    // 还远/在侧面时先绕到球后(角落侧)对准再推。
-    if (wm.corner_ball_frames > 30) {
-        double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
-        if (db < 80.0) {
-            bool deep = (wm.ball.x < 22.0 || wm.ball.x > 198.0) &&
-                        (wm.ball.y < 22.0 || wm.ball.y > 158.0);
-            if (!deep) {
-                ++wm.corner_rescue_events;   // 统计用（sim_bench 验证救球触发）
-                double ex = 110.0 - wm.ball.x, ey = 90.0 - wm.ball.y;
-                double elen = std::hypot(ex, ey);
-                if (elen > 1e-6) { ex /= elen; ey /= elen; }
-                double te_ball = angle_diff(angle_to(r.x, r.y, wm.ball.x, wm.ball.y), r.rot);
-                if (db < 22.0 && std::fabs(te_ball) < 40.0) {
-                    motion::position(r, wm.ball.x + ex * 30.0, wm.ball.y + ey * 30.0);
-                } else {
-                    motion::position(r, wm.ball.x - ex * 8.0, wm.ball.y - ey * 8.0);
-                }
-                return;
-            }
-        }
     }
 
     PassPlan pp = plan_pass(wm, id);
@@ -564,7 +672,7 @@ void run_active(WorldModel &wm, int id) {
                 if (len > 1e-6) { dx /= len; dy /= len; }
                 double te_e = angle_diff(angle_to(r.x, r.y, wm.ball.x, wm.ball.y), r.rot);
                 if (db < 12.0 && std::fabs(te_e) < 40.0) {
-                    motion::position(r, wm.ball.x + dx * 25.0, wm.ball.y + dy * 25.0);
+                    motion::position(r, wm.ball.x + dx * 25.0, wm.ball.y + dy * 25.0, motion::TM_PASS);   // 带离围困=穿球经过型
                 } else {
                     motion::position(r, wm.ball.x - dx * 20.0, wm.ball.y - dy * 20.0);
                 }
@@ -583,9 +691,25 @@ void run_active(WorldModel &wm, int id) {
         double diry = aim_y - wm.ball.y;
         double len = std::hypot(dirx, diry);
         if (len > 1e-6) { dirx /= len; diry /= len; }
-        double te_d = angle_diff(angle_to(r.x, r.y, wm.ball.x, wm.ball.y), r.rot);
-        if (db < 12.0 && std::fabs(te_d) < 40.0) {
-            motion::position(r, wm.ball.x + dirx * 20.0, wm.ball.y + diry * 20.0);
+        double aim_rot2 = angle_to(0.0, 0.0, dirx, diry);
+        double te_head2 = angle_diff(aim_rot2, r.rot);
+        // 人在球的"推进侧后方"：球−人 在推进方向上的投影 > 0（否则往前推是把球往回推）
+        bool behind2 = ((wm.ball.x - r.x) * dirx + (wm.ball.y - r.y) * diry) > 0.0;
+        // 对准纪律同样适用于带球推进（docs/18 §8）：推球方向 = 撞球瞬间机头方向，
+        //   旧口径只判"机头对着球"(|te_d|<40°)——不管推往哪、站错侧还会往回推。
+        //   带球推进是推球次数最多的路径（sim 一场 183 次 vs 射门分支 45 次）。
+        if (db < 12.0 && behind2 && std::fabs(te_head2) <= kDribAngTol) {
+            motion::position(r, wm.ball.x + dirx * 20.0, wm.ball.y + diry * 20.0, motion::TM_PASS);   // 带球推进=穿球经过型
+        } else if (!prep_point_ok(wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0)) {
+            // docs/06 第 49 轮：球后站位点落在角落黄区 → 不绕球后（会穿过球把球顶进角里）
+            hold_out_of_corner(wm, r);
+        } else if (db < 16.0 && behind2 && wm.shoot_align_frames < kShootAlignTimeout) {
+            // 贴在球后但没对准 → 就地转正（不后退、不丢球权）；超时则退到球后站位点重来
+            if (++wm.shoot_align_frames >= kShootAlignTimeout) {
+                motion::position(r, wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0);
+            } else {
+                motion::position_aligned(r, r.x, r.y, aim_rot2, kPrepPosTol, kPrepAngTol);
+            }
         } else {
             motion::position(r, wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0);
         }
@@ -737,7 +861,7 @@ void run_assist(WorldModel &wm, int id) {
                 pxx = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * 85.0;
                 pyy = clamp(pyy, 72.5, 107.5);
             }
-            motion::position(wm.home[id], pxx, pyy);
+            motion::position(wm.home[id], pxx, pyy, motion::TM_PASS);   // E1 压上追球=经过型
             return;
         }
 

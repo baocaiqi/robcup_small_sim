@@ -39,6 +39,16 @@ constexpr int ROUTE_MAX_OBSTACLES = 5;
 //   obs      : 圆盘障碍数组（坐标需已含净空 inflate）
 //   n        : 障碍数（≤ ROUTE_MAX_OBSTACLES）
 //   margin   : 判定时的额外数值余量 cm（默认 0.5，抵消"切线相切"的浮点抖动）
+//
+// ⚠️ margin 与 inflate 的契约（docs/18 顺手优化 ⑤，改参数前必读）：
+//   判定半径用 (r − margin)，即**路径允许侵入膨胀圈最多 margin**（默认 0.5cm）。
+//   所以调用方必须保证：
+//       inflate ≥ 本体半径 + margin + 期望净空
+//   现状（roles.cpp kRouteInflate = 10 = 本体 6 + 净空 4）：实际净空 ∈ [3.5, 4.0]cm，
+//   单圆绕行实测路径离圆心 9.8cm（侵入膨胀圈 0.2cm，物理净空仍有 3.8cm）——安全。
+//   ⚠️ 若有人把 inflate 调到 7（本体 6 + 净空 1），margin 0.5 会吃掉一半余量，
+//   相切段就可能贴到 6.5cm ≈ 本体半径 → 真撞。要调小 inflate，必须同时调小 margin。
+//
 // 返回：
 //   found=true  → wp 序列安全折线；found=false → 起点/终点在障碍内部或无法绕行
 //   （调用方应回退直线移动，勿原地死等）

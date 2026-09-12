@@ -13,6 +13,17 @@
    - "修 bug：守门员站位抖，先复现再定位"
    - "review 我改的 motion.cpp，跑 offline_test 验证"
 
+## 沟通约定（用户要求，2026-09-12）
+
+**解释策略和代码，一律用"小白也能看懂"的话**（用户明确要求，所有会话遵守）：
+
+- 先用一句**生活化比喻**说清"这是在干什么"，再讲细节（例：门将＝看门大爷；区域防守＝几个人分管片区）。
+- **术语第一次出现必须翻译**：`predict_y_at_x_reflect` →「算球会不会撞墙、撞了会弹到哪」。
+- 代码只给**关键的 1~3 行**，逐行用中文说人话；不要整段贴代码、不要只丢文件名+行号。
+- 每个数字后面要跟"**所以呢**"（对比赛/对我们的实际影响）。
+- 先讲"**不这么改会怎样**"，再讲"这么改会怎样"；**结论放最前面**，细节按需展开。
+- 没验证过的事直接说"还没真机验证"，不要用术语掩盖不确定性。
+
 ## 团队铁律
 
 1. **不要改 `simuro_interface.hpp` 的接口签名**——平台按 mangled 名加载，改了就加载失败
@@ -66,6 +77,14 @@ cp -r .codex/skills/* ~/.codex/skills/
 cmake --build build --config Release
 build\Release\offline_test.exe              :: 冒烟测试（策略 300 帧 + 摆位 12 态）
 python tools\py\rlg_analyzer.py 日志.rlg    :: 复盘比赛日志
+```
+
+## UA 代码导图速查（详见 docs/14-ua代码导图工具使用说明.md）
+
+```bat
+python tools\ua_dashboard\update_ua_graph.py      :: 图谱更新到当前代码（确定性重建，0 token）
+node tools\ua_dashboard\build_ua_dashboard.mjs    :: 重新生成 docs\work\ua-code-map.html
+node tools\ua_dashboard\serve.mjs 8754            :: 本地预览 → http://127.0.0.1:8754/docs/work/ua-code-map.html
 ```
 
 ## 常用约定

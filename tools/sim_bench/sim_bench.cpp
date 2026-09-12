@@ -99,6 +99,26 @@ struct SimState {
 
 static double deg2rad(double d) { return d * 3.14159265358979 / 180.0; }
 
+// ============================================================
+// 轨迹导出（docs/18 验证用）：--traj out.csv 把第一场的逐帧位置写成 CSV，
+// 列名与真机 rlg 导出的 traj CSV 完全一致 → 可用 tools/py/motion_calib.py
+// 在同一口径下量 sim 与真机（速度/加速度/静止帧占比/低速来回蹭）。
+// ============================================================
+static FILE *g_traj = nullptr;
+
+static void traj_write_header(FILE *fp) {
+    for (int i = 0; i < 5; ++i) fprintf(fp, "b%d_x,b%d_y,", i, i);
+    for (int i = 0; i < 5; ++i) fprintf(fp, "y%d_x,y%d_y%s", i, i, i == 4 ? "" : ",");
+    fprintf(fp, ",ball_x,ball_y\n");
+}
+
+static void traj_write_row(FILE *fp, const SimState &s) {
+    for (int i = 0; i < 5; ++i) fprintf(fp, "%.2f,%.2f,", s.blue[i].x, s.blue[i].y);
+    for (int i = 0; i < 5; ++i)
+        fprintf(fp, "%.2f,%.2f%s", s.yellow[i].x, s.yellow[i].y, i == 4 ? "" : ",");
+    fprintf(fp, ",%.2f,%.2f\n", s.bx, s.by);
+}
+
 // 初始摆位（简单开局阵型）；seed 用于引入摆位微扰（模拟真实开局差异）
 static void init_formation(SimState &s, Rng *rng = nullptr) {
     // 蓝队守 x=220
@@ -514,6 +534,8 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         // 记录本帧球位作为下一帧的 lastBall（WorldModel 用差分算球速）
         s.p_bx = s.bx; s.p_by = s.by;
 
+        if (g_traj) traj_write_row(g_traj, s);   // docs/18：轨迹导出（仅第一场）
+
         // 球权统计：谁离球最近算谁控球（阈值 20cm 内；无人区不算）
         double d_b = 1e9, d_y = 1e9;
         for (int i = 0; i < 5; ++i) {
@@ -633,6 +655,7 @@ int main(int argc, char **argv) {
     int opp_mode = 0;                        // 0=脚本打黄(我们守x=220) 1=自我博弈 2=脚本打蓝(我们守x=0)
     double opp_strength = 1.0;               // 脚本对手强度倍率（1.0=demo 校准档，>1 更强，见 docs/12）
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
+    const char *traj_path = nullptr;         // --traj out.csv：导出第一场逐帧轨迹（docs/18）
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--games" && i + 1 < argc) games = std::atoi(argv[++i]);
@@ -647,10 +670,16 @@ int main(int argc, char **argv) {
         }
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed = (uint64_t)std::atoll(argv[++i]);
+        else if (a == "--traj" && i + 1 < argc) traj_path = argv[++i];
         else if (a == "--help") {
-            printf("sim_bench: --games N --frames N --opp scripted|self|yellow [--strength X] [--debug N] [--seed N]\n");
+            printf("sim_bench: --games N --frames N --opp scripted|self|yellow|wall [--strength X] [--debug N] [--seed N] [--traj out.csv]\n");
             return 0;
         }
+    }
+    if (traj_path) {
+        g_traj = fopen(traj_path, "w");
+        if (!g_traj) { printf("sim_bench: 无法写入轨迹文件 %s\n", traj_path); return 1; }
+        traj_write_header(g_traj);
     }
     const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : (opp_mode == 3 ? "门线堆人墙" : "脚本对手"));
     printf("=== sim_bench: games=%d frames/场=%d 模式=%s 对手强度=%.2f ===\n", games, frames, mode_name, opp_strength);
@@ -669,6 +698,7 @@ int main(int argc, char **argv) {
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
         long ga_frames = 0, ga_eps = 0, ga_solo = 0, ga_solo_eps = 0, fb = 0, fb_corner = 0, rescue = 0;
         play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue);
+        if (g_traj) { fclose(g_traj); g_traj = nullptr; }   // 轨迹只导第一场
         // play_match 已按 opp_mode 归一化：返回的 b=我们进球、y=对手进球
         printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次 单人>20帧 %ld帧/%ld次 争球重置 %ld次(角区%ld) 救球%ld次\n",
                g + 1, b, y, poss, shots,

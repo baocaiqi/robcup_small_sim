@@ -117,6 +117,9 @@ struct WorldModel {
     int shoot_push_count = 0;
     int shoot_push_cd = 0;
     int shoot_push_last_side = 0;
+    // 射门/推进前的"对准尝试"帧数（docs/18 §8）：球一直在动/被抢时不能死等对准，
+    //   超过 kShootAlignTimeout 就按当前朝向推（宁可射偏也不能把机会耗掉）。
+    int shoot_align_frames = 0;
 
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;

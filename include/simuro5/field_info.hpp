@@ -111,5 +111,40 @@ inline bool is_ball_in_opp_goal(const TeamContext &ctx, double x, double y) {
     return is_ball_in_our_goal(mirror, x, y);
 }
 
+// ============================================================
+// 禁止推球区（角落黄色区）—— docs/06 第 49 轮
+//
+// 规则：在角落黄区内推球 = 犯规（**每 4 次 +1 球**）+ 判争球（见 docs/00 规则速查）。
+// 平台判的是"球被推动的那一刻是否在区内"，所以**推球动作**和**绕到球后的准备点**
+// 都必须避开它——旧代码只判了球，没判机器人要走的目标点。
+//
+// 真机证据（2026-09-11 场次日志）：
+//   09:44 场（demo v1）0 次；10:47 场 1 次、10:56 场 **4 次**，全部形如
+//     "FreeBall RightBot/RightTop … blue team Violated No pushing"（我方右半场两个角）。
+//   10:56 场正好 4 次 = 白送对手 1 球。
+// 机制：角区救球/推球准备都有"先绕到球后 k cm"的动作（`球 − 方向×k`）。球距角 25cm 时
+//   "球后 8cm"已落在距角 17cm 处（区内），机器人驱车过去必穿过球、把球往角心顶 → 判犯规。
+//
+// ⚠️ 半径取值 kCornerNoPushR：规则文档未给黄区精确尺寸，团队旧注释只说"距角 22cm 内"。
+//   这里**保守取 35cm**：宁可少救一次角球（让平台判 FreeBall），也不要吃犯规——
+//   4 次犯规 = 白送 1 球，代价远大于一次争球。若日后从 rlg/录屏量出真实黄区半径，
+//   改这一个常量即可（所有调用点共用）。
+// ============================================================
+constexpr double kCornerNoPushR = 35.0;   // cm：距任一角点 < 此值 → 禁止任何推球动作
+
+// 点 (x,y) 到最近角点的距离（场地 220×180，四角）
+inline double dist_to_corner(double x, double y) {
+    double dx = std::min(x, TeamContext::FIELD_LENGTH - x);
+    double dy = std::min(y, TeamContext::FIELD_WIDTH - y);
+    if (dx < 0.0) dx = 0.0;      // 场外（门前/角外）按 0 处理 → 视为贴角
+    if (dy < 0.0) dy = 0.0;
+    return std::hypot(dx, dy);
+}
+
+// 是否处于"禁止推球"的角区（球或准备点落在这里 → 不许推、不许绕球后）
+inline bool in_no_push_zone(double x, double y) {
+    return dist_to_corner(x, y) < kCornerNoPushR;
+}
+
 }  // namespace simuro5
 #endif
