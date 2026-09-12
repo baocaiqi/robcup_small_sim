@@ -1611,11 +1611,62 @@ static int test_placement_semantics() {
     return 0;
 }
 
+// ============================================================
+// docs/06 第 55 轮：门将「门线封堵」单测（真机 15:29 场两个丢球的病因）
+//   球已在门框内轨迹上、马上到线 → 必须抢门线预测落点（贴线 3cm + 预测落点 y）。
+//   其余情形一律让位：背离门 / 会偏出 / 还太远 / 太慢 / 门将已贴球（清球优先）。
+// ============================================================
+static int test_goalie_line_cover() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220，门框 y∈[70,110]
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 180; wm.home[i].y = 90; }
+    double tx = 0.0, ty = 0.0;
+
+    // ① 球朝门飞、落点 95 在门框内、门将在 15cm 外 → 触发；目标 = 门线前 3cm + 预测落点
+    wm.ball.x = 210; wm.ball.y = 95; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 195; wm.home[0].y = 95;
+    if (!gk_cover_line_point(wm, 0, tx, ty)) {
+        printf("FAIL: 球在门框内轨迹上应触发门线封堵\n");
+        return 1;
+    }
+    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 95.0) > 0.5) {
+        printf("FAIL: 门线封堵目标应为 (217,95)，实际 (%.1f,%.1f)\n", tx, ty);
+        return 1;
+    }
+    // ② 球背离门 → 不抢
+    wm.ball.vx = -2.0;
+    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 球背离门不应触发\n"); return 1; }
+    // ③ 预测落点跑到门框外（y=125）→ 不抢
+    wm.ball.x = 210; wm.ball.y = 130; wm.ball.vx = 2.0; wm.ball.vy = -1.0;
+    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 会偏出的球不应触发\n"); return 1; }
+    // ④ 球还远（距门线 80cm）→ 不抢
+    wm.ball.x = 140; wm.ball.y = 95; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
+    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 球还远不应触发\n"); return 1; }
+    // ⑤ 球太慢（朝门 ~0.45cm/帧 = 18cm/s）→ 不抢（站线跟球即可）
+    wm.ball.x = 210; wm.ball.y = 95; wm.ball.vx = 0.5; wm.ball.vy = 0.0;
+    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 太慢的球不应触发门线封堵\n"); return 1; }
+    // ⑥ 门将已贴球（5cm）→ 让位给清球（推出去比站线好）
+    wm.ball.vx = 2.0;
+    wm.home[0].x = 205; wm.home[0].y = 95;
+    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 门将贴球时应让位给清球\n"); return 1; }
+    // ⑦ 黄队镜像（己方门线 x=0）
+    wm.ctx = TeamContext{false};
+    wm.ball.x = 10; wm.ball.y = 95; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 25; wm.home[0].y = 95;
+    if (!gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 黄队镜像应触发\n"); return 1; }
+    if (fabs(tx - 3.0) > 0.5) { printf("FAIL: 黄队镜像目标 x 应为 3，实际 %.1f\n", tx); return 1; }
+
+    printf("goalie line cover: OK (门框内轨迹抢落点/背离-偏出-太远-太慢-贴球让位/黄队镜像)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
     rc |= test_formation();
     rc |= test_placement_semantics();
+    rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

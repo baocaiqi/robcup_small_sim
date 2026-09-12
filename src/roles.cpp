@@ -116,6 +116,47 @@ double spread_y(const WorldModel &wm, double bx, double by,
 
 }  // anonymous namespace
 
+// ============================================================
+// 门将「门线封堵」（docs/06 第 55 轮）：球已在门框内的轨迹上 → 抢门线预测落点
+// ------------------------------------------------------------
+// 真机 15:29 场两个丢球的逐帧复盘（rlg 帧 4740~4764 / 7975~8001，工具 concede_diag.py）：
+//   · 丢球2：门将在"清球"分支里追的是"球侧方 15cm"的绕行点 → 球从旁边进
+//     （门将 y≈114、进门点 y=103，横偏 11cm；且它的目标方向与球的门侧点始终差 15cm）；
+//   · 丢球3：门将走"封球-门连线"分支，深度公式给它门前 40cm（x=180）→ 球从它身后进
+//     （前后 = −14cm，也就是球在门将和门之间）。
+// 两个案例的共同点：**球已经飞在门框内的轨迹上**，此时别的点都拦不到，只有门线上
+// 的预测落点拦得到。所以这条判定要**优先于**清球/封连线/默认站线分支。
+//   ⚠️ 顺带记录（未改，留给下一轮）：`run_goalie` 里"近距扑球"分支的门槛 kMinSpeed=5.0
+//   是 cm/帧（= 200cm/s），而真机实测球朝门速度只有 1.0~4.4 cm/帧（40~175cm/s）
+//   → 该分支实际从不触发（这也是本条要独立成支的原因）。
+// ============================================================
+constexpr double kCoverLineDanger = 1.0;   // cm/帧：球朝门速度下限（40cm/s）
+constexpr double kCoverLineTta    = 22.0;  // 帧：到门线时间上限（0.55s）
+constexpr double kCoverLineDist   = 70.0;  // cm：球离门线多近才抢
+constexpr double kCoverLineGiveUp = 12.0;  // cm：门将已贴球到此距离 → 让位给清球
+
+bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty) {
+    const TeamContext &ctx = wm.ctx;
+    const RobotState &r = wm.home[id];
+    double bx = wm.ball.x;
+    double y_at_goal = 0.0;
+    if (!predict_y_at_x(bx, wm.ball.y, wm.ball.vx, wm.ball.vy,
+                        ctx.our_goal_x(), y_at_goal))
+        return false;                                   // 球不到门线 / 只有 y 向运动
+    if (y_at_goal < goal_y_low() || y_at_goal > goal_y_high())
+        return false;                                   // 会偏出或打门柱，不用抢
+    if (ball_danger_speed(wm) <= kCoverLineDanger) return false;      // 太慢：站线跟球就够
+    if (ctx.dist_our_goal(bx) >= kCoverLineDist) return false;        // 还远：按常规防
+    if (std::fabs(wm.ball.vx) > 1e-9) {
+        double tta = std::fabs(ctx.our_goal_x() - bx) / std::fabs(wm.ball.vx);
+        if (tta > kCoverLineTta) return false;                        // 还没到该抢的时候
+    }
+    if (dist(r.x, r.y, bx, wm.ball.y) < kCoverLineGiveUp) return false;  // 贴球了 → 清球优先
+    tx = ctx.our_goal_x() + ctx.attack_dir() * 3.0;      // 贴门线 3cm（不给角度）
+    ty = clamp(y_at_goal, 74.0, 106.0);                  // 预测落点，夹在门框内侧
+    return true;
+}
+
 void run_goalie(WorldModel &wm, int id) {
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
@@ -226,6 +267,16 @@ void run_goalie(WorldModel &wm, int id) {
         motion::position(r, px, py,
                          (dbg < 25.0 && aligned) ? motion::TM_PASS : motion::TM_STOP);
         return;
+    }
+    // —— 门线封堵（docs/06 第 55 轮）：球已飞在门框内轨迹上 → 抢门线预测落点 ——
+    //   必须排在"封球-门连线（深度 40cm）"与"清球（追球侧方绕行点）"之前：
+    //   真机两个丢球就是被这两个分支的目标点带偏的（详见 gk_cover_line_point 注释）。
+    {
+        double cx = 0.0, cy = 0.0;
+        if (gk_cover_line_point(wm, id, cx, cy)) {
+            motion::position(r, cx, cy, motion::TM_PASS);   // 紧急不刹：抢落点
+            return;
+        }
     }
     // 对方持球压门（球距门<45 且对方离球<25）→ 不冲球，封球-门连线：
     //   真机丢球复盘（12:03 场下角两球）：demo 高速带球到门前时，门将冲球
