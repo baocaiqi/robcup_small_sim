@@ -955,6 +955,9 @@ static int test_route_global_safety() {
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(
                       std::chrono::steady_clock::now() - t0).count();
         printf("  plan_route 最坏配置(5 圆全入图) 平均 %.1f us/次\n", us / 2000.0);
+        // 耗时红线（docs/23）：40Hz 一帧 25ms，路径规划每帧最多几次调用，
+        //   平均 >400µs 说明有人在网格里做了傻事（比如每格都建可见图）。
+        if (us / 2000.0 > 400.0) { printf("FAIL: plan_route 平均耗时超标\n"); return 1; }
     }
     printf("route global safety: OK (固定场景/围死回退/200 组随机无穿盘)\n");
     return 0;
@@ -991,6 +994,89 @@ static int test_route_cluster() {
     p = plan_route(100, 90, 150, 90, &o, 1);   // S == 圆心
     if (p.found) { printf("FAIL: 起点在圆内应不可规划\n"); return 1; }
     printf("route cluster: OK (错位栅栏可通/夹道不穿盘/起点圆内回退)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/23：A* 路径规划单测 —— 与「解析最优解」对比 + 场地边界
+//   单圆盘的最短路有闭式解：贴着圆边走 = S切线段 + 圆弧 + T切线段
+//     len = √(dS²−r²) + √(dT²−r²) + r·Δθ（Δθ = 两侧切点半径夹角取小）
+//   用它当尺子：A*（4cm 网格 + 视线拉直）不该比真最优差太多。
+// ============================================================
+static double tangent_opt_len(double sx, double sy, double tx, double ty,
+                              double cx, double cy, double r) {
+    double dS = std::hypot(sx - cx, sy - cy), dT = std::hypot(tx - cx, ty - cy);
+    if (dS <= r || dT <= r) return -1.0;
+    double bS = std::acos(r / dS), bT = std::acos(r / dT);
+    double aS = std::atan2(sy - cy, sx - cx), aT = std::atan2(ty - cy, tx - cx);
+    auto wrap = [](double a) {
+        const double T2 = 2.0 * 3.14159265358979323846;
+        while (a < 0) a += T2;
+        while (a >= T2) a -= T2;
+        return a;
+    };
+    double sweep = std::min(wrap((aS - bS) - (aT + bT)), wrap((aT - bT) - (aS + bS)));
+    return std::sqrt(dS * dS - r * r) + std::sqrt(dT * dT - r * r) + r * sweep;
+}
+
+static int test_route_optimality() {
+    // ① 教科书用例：S(50,90)→T(150,90)，圆 (100,90) r=10 → 解析最优 ≈ 102.01
+    {
+        CircleObstacle o = {100, 90, 10};
+        RoutePlan p = plan_route(50, 90, 150, 90, &o, 1);
+        double opt = tangent_opt_len(50, 90, 150, 90, 100, 90, 10);
+        if (!p.found) { printf("FAIL: 单圆应可绕行\n"); return 1; }
+        printf("  单圆用例：A* %.2f / 解析最优 %.2f（超 %.1f%%）\n",
+               p.length, opt, 100.0 * (p.length / opt - 1.0));
+        if (p.length > opt * 1.10) { printf("FAIL: A* 比解析最优长 >10%%\n"); return 1; }
+        if (p.length < opt - 0.6) { printf("FAIL: A* 比解析最优还短（说明贴进圆里了）\n"); return 1; }
+    }
+    // ② 固定种子随机 200 组单圆（圆心取在 S→T 上 ⇒ 直线必被挡），全部对比解析最优
+    uint64_t s = 987654321ull;
+    auto rnd = [&s]() { s = s * 6364136223846793005ull + 1442695040888963407ull;
+                        return (double)((s >> 33) & 0x7FFFFFFF) / 2147483647.0; };
+    int n_ok = 0;
+    double worst = 0.0;
+    for (int trial = 0; trial < 200; ++trial) {
+        double r = 6.0 + rnd() * 12.0;
+        double sx = 20.0 + rnd() * 40.0, tx = 160.0 + rnd() * 40.0;
+        double sy = 40.0 + rnd() * 100.0, ty = 40.0 + rnd() * 100.0;
+        double t = 0.35 + rnd() * 0.3;
+        double cx = sx + (tx - sx) * t, cy = sy + (ty - sy) * t;
+        CircleObstacle ob = {cx, cy, r};
+        RoutePlan p = plan_route(sx, sy, tx, ty, &ob, 1);
+        if (!p.found) {
+            printf("FAIL: 随机单圆 %d 应可绕 S(%.0f,%.0f) T(%.0f,%.0f) r=%.1f\n",
+                   trial, sx, sy, tx, ty, r);
+            return 1;
+        }
+        double opt = tangent_opt_len(sx, sy, tx, ty, cx, cy, r);
+        double over = p.length / opt - 1.0;
+        if (over > worst) worst = over;
+        for (int i = 0; i < p.n_wp; ++i)
+            if (p.wp_x[i] < -1 || p.wp_x[i] > 221 || p.wp_y[i] < -1 || p.wp_y[i] > 181) {
+                printf("FAIL: waypoint 出界 (%.1f,%.1f)\n", p.wp_x[i], p.wp_y[i]);
+                return 1;
+            }
+        if (over > 0.12) { printf("FAIL: 随机单圆 %d 超解析最优 %.1f%%\n", trial, over * 100); return 1; }
+        ++n_ok;
+    }
+    printf("  随机单圆 %d 组：最坏超解析最优 %.1f%%\n", n_ok, worst * 100.0);
+
+    // ③ 场地边界：障碍贴下边线（圆心 y=12 r=10）→ 只能从上方绕，
+    //    所有 waypoint 必须留在场内（旧可见图没有边界概念，允许贴线甚至出界）
+    {
+        CircleObstacle ob = {100, 12, 10};
+        RoutePlan p = plan_route(40, 12, 160, 12, &ob, 1);
+        if (!p.found) { printf("FAIL: 贴边障碍应能从上方绕\n"); return 1; }
+        for (int i = 0; i < p.n_wp; ++i)
+            if (p.wp_x[i] < 2.0 || p.wp_x[i] > 218.0 || p.wp_y[i] < 2.0 || p.wp_y[i] > 178.0) {
+                printf("FAIL: 贴边场景 waypoint 出界/贴死边线 (%.1f,%.1f)\n", p.wp_x[i], p.wp_y[i]);
+                return 1;
+            }
+        printf("  贴边障碍：绕行 %.1fcm、%d 个 waypoint，全部在场内\n", p.length, p.n_wp);
+    }
+    printf("route optimality: OK (≤解析最优+12%% / 不短于最优 / 场边界内)\n");
     return 0;
 }
 
@@ -1543,6 +1629,7 @@ int main() {
     rc |= test_segment_circle();
     rc |= test_route_straight();
     rc |= test_route_avoid();
+    rc |= test_route_optimality();
     rc |= test_route_cluster();
     rc |= test_route_global_safety();
     rc |= test_follow_route();
