@@ -31,7 +31,10 @@ KEEP = {"RunStrategy", "SetFormerRobots", "SetLaterRobots", "SetBall",
         "SetBlueTeamName", "SetYellowTeamName", "main", "DllMain"}
 
 DEF_RE = re.compile(r"^(?:static\s+|inline\s+|constexpr\s+|virtual\s+)*"
-                    r"[A-Za-z_][\w:<>,&*\s]*?[\s*&]+([A-Za-z_]\w*)\s*\(")
+                    r"(?:[A-Za-z_][\w:<>,&*\s]*?[\s*&]+)?"
+                    r"(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)\s*\(")
+# 头文件里"缩进定义"的内联/成员函数（另一种常见写法，必须单独扫，否则会漏）
+INDENT_DEF_RE = re.compile(r"^\s+[\w:<>,&*\s]+?\b([A-Za-z_]\w*)\s*\([^;{]*\)\s*(?:const)?\s*\{")
 
 
 def strip_comments_strings(text):
@@ -90,6 +93,8 @@ def find_defs(path, clean):
     defs = []
     for idx, ln in enumerate(lines):
         m = DEF_RE.match(ln)
+        if not m:
+            m = INDENT_DEF_RE.match(ln)   # 头文件里缩进定义的成员/内联函数（2026-09-12 补扫盲区）
         if not m:
             continue
         name = m.group(1)

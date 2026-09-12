@@ -128,10 +128,6 @@ struct WorldModel {
 
     // 每周期从平台环境刷新
     void update(const Environment *env, const TeamContext &ctx_);
-
-    // 距离辅助
-    double ball_opp_goal_dist() const { return std::fabs(ball.x - ctx.opp_goal_x()); }
-    double ball_our_goal_dist() const { return std::fabs(ball.x - ctx.our_goal_x()); }
 };
 
 }  // namespace simuro5
