@@ -32,7 +32,7 @@ void defense_formation(const TeamContext &c, Robot *r) {
 // 修复：原罚球人放 id4(PASSIVE 只防守不追球) → 发球没人踢；改 id1(ACTIVE) 带球推进天然覆盖
 void kickoff_formation(const TeamContext &c, Robot *r) {
     put(r, 0, M(c, 215), 90, goalie_rot(c));
-    put(r, 1, M(c, 100), 90, field_rot(c));   // ACTIVE：球(110)后 10cm，开球即推
+    put(r, 1, M(c, 120), 90, field_rot(c));   // ACTIVE：球(110)后 10cm（球后=远离被攻球门那侧）
     put(r, 2, M(c, 150), 60, field_rot(c));
     put(r, 3, M(c, 150), 120, field_rot(c));
     put(r, 4, M(c, 185), 90, field_rot(c));
@@ -67,12 +67,16 @@ void formation_former(const TeamContext &c, PlayMode gs, Robot robots[]) {
             freeball_formation(c, robots, estimate_freeball_x(gs), estimate_freeball_y(gs));
             break;
 
-        // 点球：防守方先摆（本队被罚点球时）
-        case PM_PenaltyKick_Blue:   // 蓝队被罚 → 蓝队(防守方)先摆
-            if (c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,130), 60, field_rot(c)); put(robots, 2, M(c,130), 120, field_rot(c)); put(robots, 3, M(c,150), 90, field_rot(c)); put(robots, 4, M(c,180), 90, field_rot(c)); }
-            break;
-        case PM_PenaltyKick_Yellow:
+        // 点球：防守方先摆
+        //   ⚠️ 平台约定 PM_PenaltyKick_X = **X 队主罚**（不是"X 队被罚"）。证据：
+        //   官方 demo 的 SetBall 只在 PM_GoalKick_Yellow 时把球放黄队门区，而 demo 是黄队；
+        //   demo 的 SetLaterRobots case 7=PM_PenaltyKick_Yellow 摆的是黄队自己主罚的阵型、
+        //   case 8=PM_PenaltyKick_Blue 才是黄队防守。所以"状态名是对方"时才轮到我们先摆。
+        case PM_PenaltyKick_Blue:   // 蓝队主罚 → 只有黄队是防守方，黄队先摆
             if (!c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,130), 60, field_rot(c)); put(robots, 2, M(c,130), 120, field_rot(c)); put(robots, 3, M(c,150), 90, field_rot(c)); put(robots, 4, M(c,180), 90, field_rot(c)); }
+            break;
+        case PM_PenaltyKick_Yellow: // 黄队主罚 → 我们(蓝)是防守方，先摆
+            if (c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,130), 60, field_rot(c)); put(robots, 2, M(c,130), 120, field_rot(c)); put(robots, 3, M(c,150), 90, field_rot(c)); put(robots, 4, M(c,180), 90, field_rot(c)); }
             break;
 
         // 任意球：进攻方先摆（罚球人=ACTIVE(id1) 球后 10cm，其他人己方半场）
@@ -127,16 +131,22 @@ void formation_later(const TeamContext &c, PlayMode gs,
             freeball_formation(c, laterRobots, ball.x, ball.y);
             break;
 
-        // 点球：进攻方后摆（守门员门线 + 罚球人=ACTIVE(id1) 球后10cm + 队友散开）
+        // 点球：后摆（我们主罚时摆进攻阵；对方主罚时我们已先摆过，这里只兜底防守阵）
         case PM_PenaltyKick_Blue:
         case PM_PenaltyKick_Yellow: {
+            bool we_take = (c.is_blue && gs == PM_PenaltyKick_Blue) ||
+                           (!c.is_blue && gs == PM_PenaltyKick_Yellow);
+            if (!we_take) { defense_formation(c, laterRobots); break; }
             put(laterRobots, 0, M(c,215), 90, goalie_rot(c));
             put(laterRobots, 2, M(c,150), 60, field_rot(c));
             put(laterRobots, 3, M(c,150), 120, field_rot(c));
             put(laterRobots, 4, M(c,180), 90, field_rot(c));
-            // 罚球人：ACTIVE(id1) 球后 10cm（离球门远侧）——执行靠 run_active 带球推进
-            double dir = (ball.x > 110.0) ? 1.0 : -1.0;
-            put(laterRobots, 1, ball.x + dir * 10.0, ball.y, field_rot(c));
+            // 罚球人：ACTIVE(id1) 站在"球后"10cm —— 球后 = 远离被攻球门那一侧
+            //   （平台 HELP 原文 "The kicker shall be placed behind the ball"）。
+            //   2026-09-12 真机：原式 ball.x+dir*10（dir 按球在哪个半场定）站到了球门前侧，
+            //   结果 4 次点球一次没射门，反而把球顶回自己半场（rlg 帧 4087-4119，球从
+            //   39.4 被推到 105 且时速 130cm/s）。
+            put(laterRobots, 1, ball.x - c.attack_dir() * 10.0, ball.y, field_rot(c));
             break;
         }
 

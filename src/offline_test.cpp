@@ -1448,10 +1448,88 @@ static int test_motion_aligned() {
     return 0;
 }
 
+// 定位球摆位语义单测（2026-09-12 复盘 15:29 场：4 次点球、0 次射门）
+//   平台约定：**PM_X_Kick = X 队主罚**（证据：官方 demo 的 SetBall 只在 PM_GoalKick_Yellow
+//   时把球放黄队门区，而 demo 是黄队；demo 的 SetLaterRobots case 7=PM_PenaltyKick_Yellow
+//   摆的是"黄队自己主罚"的阵型，case 8=PM_PenaltyKick_Blue 才是黄队防守）。
+//   摆位顺序：开球/任意球/门球 = 主罚方先摆；点球 = 防守方先摆。
+//   罚球人位置：平台 HELP 原文 "The kicker shall be placed behind the ball" → 站"球后"
+//   = 远离被攻球门那一侧。站反了，机器人一推就把球顶回自己半场（实测帧 4087-4119）。
+static int test_placement_semantics() {
+    Robot r[5];
+    Robot former[5] = {};
+    TeamContext blue{true}, yellow{false};
+    Vector3D ball;
+    ball.z = 0;
+
+    // —— 1. 我方主罚点球：罚球人必须站"球后"，不是站门前 ——
+    //    实测罚球点 ≈ 门前 40cm（2026-09-12 rlg 帧 4087：球停在 (39.4, 89.8)）
+    ball.x = 39.4; ball.y = 89.8;
+    formation_later(blue, PM_PenaltyKick_Blue, former, ball, r);
+    if (!(r[1].pos.x > ball.x + 4.0)) {
+        printf("FAIL: 蓝队主罚点球，罚球人应站球后(x>%.1f)，实际 x=%.1f\n", ball.x + 4.0, r[1].pos.x);
+        return 1;
+    }
+    if (!(r[0].pos.x > 200.0)) { printf("FAIL: 主罚点球时门将仍应守门(x>200)\n"); return 1; }
+    // 黄队镜像：黄队攻右门(x=220)，罚球点在 x=180.6 → 罚球人要站在 x<180.6 一侧
+    ball.x = 180.6; ball.y = 89.8;
+    formation_later(yellow, PM_PenaltyKick_Yellow, former, ball, r);
+    if (!(r[1].pos.x < ball.x - 4.0)) {
+        printf("FAIL: 黄队主罚点球应站球后(x<%.1f)，实际 x=%.1f\n", ball.x - 4.0, r[1].pos.x);
+        return 1;
+    }
+
+    // —— 2. 对方主罚点球（状态名=黄队）→ 我们(蓝)是防守方，平台要我们先摆 ——
+    //    防守方要求：门将贴门线、其他人全在我方半场
+    //    （平台 HELP："The robots shall be placed wholly on the other side of the half line"）
+    for (int i = 0; i < 5; ++i) { r[i].pos.x = -99; r[i].pos.y = -99; }
+    formation_former(blue, PM_PenaltyKick_Yellow, r);
+    if (!(r[0].pos.x > 200.0)) {
+        printf("FAIL: 防守点球时门将必须在门线附近(x>200)，实际 x=%.1f\n", r[0].pos.x);
+        return 1;
+    }
+    for (int i = 1; i < 5; ++i)
+        if (!(r[i].pos.x > 110.0)) {
+            printf("FAIL: 防守点球时 robot[%d] 必须在我方半场(x>110)，实际 %.1f\n", i, r[i].pos.x);
+            return 1;
+        }
+    // 黄队镜像：状态名=蓝队 → 黄队是防守方
+    for (int i = 0; i < 5; ++i) { r[i].pos.x = -99; r[i].pos.y = -99; }
+    formation_former(yellow, PM_PenaltyKick_Blue, r);
+    if (!(r[0].pos.x < 20.0)) {
+        printf("FAIL: 黄队防守点球时门将应贴 x=0 门线，实际 %.1f\n", r[0].pos.x);
+        return 1;
+    }
+    for (int i = 1; i < 5; ++i)
+        if (!(r[i].pos.x < 110.0)) {
+            printf("FAIL: 黄队防守点球时 robot[%d] 应在黄队半场(x<110)，实际 %.1f\n", i, r[i].pos.x);
+            return 1;
+        }
+
+    // —— 3. 开球：主罚方先摆，开球人必须在自己半场 ——
+    //    实测帧 0 / 65.6 / 200.1：我们开球时 ACTIVE 被摆在 (95.7, 90.8) = 对方半场 + 球前面
+    for (int i = 0; i < 5; ++i) { r[i].pos.x = -99; r[i].pos.y = -99; }
+    formation_former(blue, PM_PlaceKick_Blue, r);
+    if (!(r[1].pos.x > 110.0)) {
+        printf("FAIL: 蓝队开球时开球人应在我方半场(球后 x>110)，实际 x=%.1f\n", r[1].pos.x);
+        return 1;
+    }
+    for (int i = 0; i < 5; ++i) { r[i].pos.x = -99; r[i].pos.y = -99; }
+    formation_former(yellow, PM_PlaceKick_Yellow, r);
+    if (!(r[1].pos.x < 110.0)) {
+        printf("FAIL: 黄队开球时开球人应在黄队半场(x<110)，实际 x=%.1f\n", r[1].pos.x);
+        return 1;
+    }
+
+    printf("placement semantics: OK (主罚方站球后/防守方守门线+本方半场/开球人在本方半场)\n");
+    return 0;
+}
+
 int main() {
     int rc = 0;
     rc |= test_strategy_run(300);
     rc |= test_formation();
+    rc |= test_placement_semantics();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

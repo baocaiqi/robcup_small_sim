@@ -32,9 +32,14 @@ void Strategy::run(WorldModel &wm) {
 
     // 1.5 我方主罚点球执行期标志（供 roles 区分"对方门球"vs"我方点球"：
     //   两者都是"球静止在对方门区"，但点球必须去踢，门球要等对方开出）
+    //   ⚠️ 平台约定 PM_PenaltyKick_X = **X 队主罚**（证据：官方 demo 的 SetBall 只在
+    //   PM_GoalKick_Yellow 时把球放黄队门区，而 demo 是黄队；demo 的 SetLaterRobots
+    //   case 7=PM_PenaltyKick_Yellow 摆的是黄队自己主罚的阵型）。原来写成"黄队主罚时
+    //   我们主罚"→ 真机 15:29 场 4 次点球里本标志一直为假，roles 的"死球别推"守卫
+    //   把 ACTIVE 支到 (85,90)，穿过球把球顶回自己半场（rlg 帧 4087-4119）。
     {
-        bool we_take = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow) ||
-                       (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue);
+        bool we_take = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||
+                       (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow);
         if (we_take) {
             wm.in_penalty_exec = true;
         } else if (wm.in_penalty_exec) {

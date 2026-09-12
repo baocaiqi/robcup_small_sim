@@ -25,24 +25,43 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_match as RM
 
 
+def find_field_window():
+    """球场画面是 WorldModel.exe 的窗口（标题 WorldModel），不是 SimuroSot5 对话框——
+    2026-09-12 实测：只裁对话框会得到"没有球场"的图（这是本工具第一版的坑）。"""
+    for w in RM.top_windows():
+        if "worldmodel" in w["title"].lower().replace(" ", ""):
+            return w
+    return None
+
+
 def shoot(out_dir, tag, hwnd):
-    """存一张全屏 + 一张窗口裁剪"""
+    """存三张：全屏 / SimuroSot5 对话框裁剪 / **球场窗口裁剪**（看球和人用这张）"""
     full = os.path.join(out_dir, f"{tag}_full.png")
     win = os.path.join(out_dir, f"{tag}_win.png")
     RM.grab_screen(full)
-    if hwnd:
-        try:
-            from PIL import Image
+    fld = os.path.join(out_dir, f"{tag}_field.png")
+    try:
+        from PIL import Image
+        im = Image.open(full)
+        for target, path in ((hwnd, win), (find_field_window(), fld)):
+            if not target:
+                continue
+            h = target["hwnd"] if isinstance(target, dict) else target
             r = RM.wt.RECT()
-            RM.user32.GetWindowRect(hwnd, RM.ctypes.byref(r))
-            im = Image.open(full)
-            box = (max(r.left, 0), max(r.top, 0), min(r.right, im.width), min(r.bottom, im.height))
+            RM.user32.GetWindowRect(h, RM.ctypes.byref(r))
+            # 注意 DPI：全屏图是物理像素，GetWindowRect 给逻辑像素 → 按图宽/屏宽换算
+            sx = im.width / max(RM.user32.GetSystemMetrics(0), 1)
+            sy = im.height / max(RM.user32.GetSystemMetrics(1), 1)
+            box = (max(int(r.left * sx), 0), max(int(r.top * sy), 0),
+                   min(int(r.right * sx), im.width), min(int(r.bottom * sy), im.height))
             if box[2] > box[0] and box[3] > box[1]:
-                im.crop(box).save(win)
-                return full, win
-        except Exception as e:
-            print(f"   （窗口裁剪失败：{e}）", flush=True)
-    return full, None
+                crop = im.crop(box)
+                crop = crop.resize((crop.width * 2, crop.height * 2))   # 放大 2x，方便放大后读球/人
+                crop.save(path)
+        return full, win, fld
+    except Exception as e:
+        print(f"   （裁剪失败：{e}）", flush=True)
+    return full, None, None
 
 
 def main():
