@@ -48,11 +48,6 @@ inline void clamp_goalie_area(const TeamContext &ctx, double &x, double &y) {
     y = clamp(y, 72.5, 107.5);
 }
 
-// 罚球区前缘 x：守门员可活动的最靠外一条线（球门前 80cm）
-inline double penalty_front_x(const TeamContext &ctx) {
-    return ctx.our_goal_x() + ctx.attack_dir() * 80.0;
-}
-
 // 对方罚球区（进攻方禁区内不能久留/越位参考）
 inline bool in_opp_penalty_area(const TeamContext &ctx, double x, double y) {
     TeamContext mirror = ctx; mirror.is_blue = !ctx.is_blue;
@@ -91,24 +86,6 @@ inline void clamp_out_opp_goal_area(const TeamContext &ctx, double &x, double &y
     double fx = 0.0, fy = 0.0;
     opp_goal_area_front(ctx, y, fx, fy);   // x 推出前缘外 15cm，y 夹回判定域（当前为恒等，保留语义兜底）
     x = fx; y = fy;
-}
-
-// 是否在场地内
-inline bool in_field(double x, double y) {
-    return in_rect(x, y, 0.0, TeamContext::FIELD_LENGTH, 0.0, TeamContext::FIELD_WIDTH);
-}
-
-// 球是否整体越过我方门线（进球判定，含门柱范围）
-inline bool is_ball_in_our_goal(const TeamContext &ctx, double x, double y) {
-    double gx = ctx.our_goal_x();
-    bool beyond = ctx.attack_dir() > 0 ? (x < gx) : (x > gx);
-    return beyond && y >= goal_y_low() && y <= goal_y_high();
-}
-
-// 球是否整体越过对方门线
-inline bool is_ball_in_opp_goal(const TeamContext &ctx, double x, double y) {
-    TeamContext mirror = ctx; mirror.is_blue = !ctx.is_blue;
-    return is_ball_in_our_goal(mirror, x, y);
 }
 
 // ============================================================

@@ -18,7 +18,6 @@ struct TeamContext {
     static constexpr double FIELD_LENGTH = 220.0;   // x 方向
     static constexpr double FIELD_WIDTH  = 180.0;   // y 方向
     static constexpr double GOAL_WIDTH   = 40.0;    // 球门宽(y 方向)
-    static constexpr double CENTER_RADIUS = 25.0;   // 中圈半径
 
     double our_goal_x() const { return is_blue ? FIELD_LENGTH : 0.0; }  // 己方球门线 x
     double opp_goal_x() const { return is_blue ? 0.0 : FIELD_LENGTH; }  // 对方球门线 x

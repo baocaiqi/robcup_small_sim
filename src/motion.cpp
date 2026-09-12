@@ -7,15 +7,6 @@ namespace motion {
 
 void stop(RobotState &r) { r.vl = 0.0; r.vr = 0.0; }
 
-void angle(RobotState &r, double desired_angle) {
-    double te = angle_diff(desired_angle, r.rot);   // (-180,180]
-    double w = 0.0;
-    if (te > 50.0 || te < -50.0)      w = 9.0 / 90.0 * te;
-    else if (te > 20.0 || te < -20.0) w = 11.0 / 90.0 * te;
-    r.vl = -w;
-    r.vr =  w;
-}
-
 void position(RobotState &r, double tx, double ty, TargetMode mode) {
     // —— 移植官方 demo Position()：以 sigmoid(d) 控制车速 + Ka*theta_e 修正转向 ——
     // docs/18 P1 改造：TM_STOP 目标加"制动包线"，见函数末注释。

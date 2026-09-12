@@ -34,10 +34,6 @@ constexpr double kBrakeAccel = 400.0;   // cm/s²：制动设计加速度（v �
 constexpr double kStopEps    = 1.5;     // cm：到位死区（≥ 单帧位移量级，吸收离散量化）
 constexpr double kMaxWheel   = 150.0;   // 轮速命令安全上限（自然命令上限≈139：te≈±85、Ka=28/90）
 
-// 原地转向到 desired_angle(度)。vl=-v, vr=+v 旋转，速率随角度差。
-// ⚠️ 目前无调用方（僵尸函数，docs/03 记录过删除、回退时恢复）——保留仅为接口兼容。
-void angle(RobotState &r, double desired_angle);
-
 // 走到目标点 (tx,ty)。sigmoid 速度 + 角度误差比例修正；
 // mode=TM_STOP 时速度再受制动包线约束（v ≤ sqrt(2·kBrakeAccel·(de−kStopEps))），
 // 到 de<kStopEps 停车——根治"满速冲到目标点、物理刹不住 → 过冲 → 倒车 → 极限环"（docs/18）。
