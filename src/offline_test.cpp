@@ -780,26 +780,30 @@ static int test_active_corner_rescue() {
                wm.home[1].vl, wm.home[1].vr);
         return 1;
     }
-    // —— ② 球在禁止推球区内（距角 32.8cm < 35）→ **只停不动**（新规则，第 49 轮）——
-    wm.ball.x = 26; wm.ball.y = 20;
-    wm.home[1].x = 18; wm.home[1].y = 12; wm.home[1].rot = 45;
-    wm.home[1].vl = wm.home[1].vr = 0;
-    run_active(wm, 1);
-    if (fabs(wm.home[1].vl) > 1e-9 || fabs(wm.home[1].vr) > 1e-9) {
-        printf("FAIL: 角区内应停住不碰球 got vl=%.1f vr=%.1f\n",
-               wm.home[1].vl, wm.home[1].vr);
-        return 1;
-    }
-    // —— ③ 平台处于死球/重启期（非 PlayOn）→ 同样不许推（任何球位） ——
-    wm.ball.x = 110; wm.ball.y = 90;     // 球在中圈，远离角区
-    wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
-    wm.home[1].vl = wm.home[1].vr = 0;
-    wm.game_state = PM_FreeBall_RightBot;    // 平台判了争球
-    run_active(wm, 1);
-    if (fabs(wm.home[1].vl) > 1e-9 || fabs(wm.home[1].vr) > 1e-9) {
-        printf("FAIL: 死球/重启期应停住不推 got vl=%.1f vr=%.1f\n",
-               wm.home[1].vl, wm.home[1].vr);
-        return 1;
+    // —— ②③ 球在禁止推球区内 / 平台处于死球期 → 第 49 轮守卫**开启时**才要求"只停不动" ——
+    //   守卫总开关见 roles.hpp 的 kNoPushGuardEnabled（2026-09-12 落库时按"连胜版行为"关闭，
+    //   所以这两条断言只在开关为 true 时校验）。
+    if (kNoPushGuardEnabled) {
+        wm.ball.x = 26; wm.ball.y = 20;
+        wm.home[1].x = 18; wm.home[1].y = 12; wm.home[1].rot = 45;
+        wm.home[1].vl = wm.home[1].vr = 0;
+        run_active(wm, 1);
+        if (fabs(wm.home[1].vl) > 1e-9 || fabs(wm.home[1].vr) > 1e-9) {
+            printf("FAIL: 角区内应停住不碰球 got vl=%.1f vr=%.1f\n",
+                   wm.home[1].vl, wm.home[1].vr);
+            return 1;
+        }
+        // —— ③ 平台处于死球/重启期（非 PlayOn）→ 同样不许推（任何球位） ——
+        wm.ball.x = 110; wm.ball.y = 90;     // 球在中圈，远离角区
+        wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
+        wm.home[1].vl = wm.home[1].vr = 0;
+        wm.game_state = PM_FreeBall_RightBot;    // 平台判了争球
+        run_active(wm, 1);
+        if (fabs(wm.home[1].vl) > 1e-9 || fabs(wm.home[1].vr) > 1e-9) {
+            printf("FAIL: 死球/重启期应停住不推 got vl=%.1f vr=%.1f\n",
+                   wm.home[1].vl, wm.home[1].vr);
+            return 1;
+        }
     }
     wm.game_state = PM_PlayOn;
     // —— ④ 球不在角区 → 不触发救球（走正常逻辑，不崩溃） ——

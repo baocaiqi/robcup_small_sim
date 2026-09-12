@@ -59,13 +59,17 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
 //   球在角区/平台在死球期时，一律不碰球（`hold_out_of_corner` = 停住），让平台按规则处理。
 // ============================================================
 bool push_allowed(const WorldModel &wm) {
+    if (!kNoPushGuardEnabled) { (void)wm; return true; }       // 守卫关闭：不拦（见 roles.hpp）
     if (wm.game_state != PM_PlayOn) return false;             // 死球/摆位/重启期
     return !in_no_push_zone(wm.ball.x, wm.ball.y);            // 球未贴角
 }
 
 // "球后准备点"是否合法（docs/06 第 49 轮）：准备点也不许落在角区——
 //   否则机器人驱车过去时会穿过球、把球往角心顶 → "No pushing" 犯规。
-bool prep_point_ok(double px, double py) { return !in_no_push_zone(px, py); }
+bool prep_point_ok(double px, double py) {
+    if (!kNoPushGuardEnabled) { (void)px; (void)py; return true; }
+    return !in_no_push_zone(px, py);
+}
 
 // 不许推球时的动作（docs/06 第 49 轮）：**只停不动**。
 //   理由：本平台没有踢球动作，任何"朝球的移动"都是推球；而规则只罚"推球"，
@@ -192,6 +196,23 @@ void run_goalie(WorldModel &wm, int id) {
         double dbg = dist(r.x, r.y, bx, by);
         double aligned = std::fabs(r.y - by) <= 3.0;
         double px, py;
+        // —— 贴门线时禁止"直线穿球"（防乌龙，docs/21 §8；2026-09-12 真机 09:08 场 4 个丢球全中此招）——
+        //   球距门 <15cm 且门将在球的外侧时，原逻辑会直奔"球的门侧 8cm"，
+        //   路径穿过球 → 把球顶进自家门（真机 09:08 场 4 个丢球全中此招）。
+        //   改为：横move到球侧 22cm 的场侧点，下一帧再从门侧绕过去推穿。
+        {
+            double gside = (ctx.our_goal_x() > bx) ? 1.0 : -1.0;   // 球门相对球的方位
+            bool at_line = ctx.dist_our_goal(bx) < 15.0;
+            bool outside = (r.x - bx) * gside < 0.0;               // 门将在球的外侧
+            if (at_line && outside) {
+                double side = (r.y >= by) ? 1.0 : -1.0;            // 往自己那侧绕，少掉头
+                px = bx - gside * 10.0;                            // 场侧 10cm，绝不越过球
+                py = clamp(by + side * 22.0, 74.0, 106.0);
+                clamp_goalie_area(ctx, px, py);
+                motion::position(r, px, py, motion::TM_STOP);
+                return;
+            }
+        }
         if (dbg < 25.0 && aligned) {
             px = bx + ctx.attack_dir() * 20.0;
             py = clamp(by, 78.0, 102.0);
@@ -378,6 +399,15 @@ void run_goalie(WorldModel &wm, int id) {
     // ============================================================
     if (clearing) {
         motion::position(r, clear_x, clear_y);
+    } else if ((ctx.dist_our_goal(bx) < 160.0) &&                    // 墙边来球提前封（2026-09-12 真机提速）
+               (by < 30.0 || by > 150.0) &&
+               (vx * (ctx.our_goal_x() - bx) > 0.0)) {
+        // 提前到"球进我方半场+贴边墙+朝门滚"就出发；目标 = 带墙反射的预测落点（夹在门框内）；
+        //   跑动用 TM_PASS 赶路（不刹车），最后 15cm 才 TM_STOP（防过冲打转）。
+        double ty = clamp(heading_goal ? y_at_goal : by, 74.0, 106.0);
+        double tx = ctx.our_goal_x() + ctx.attack_dir() * 3.0;
+        double dd = std::hypot(tx - r.x, ty - r.y);
+        motion::position(r, tx, ty, (dd > 15.0) ? motion::TM_PASS : motion::TM_STOP);
     } else if (has_support) {
         // 二过一威胁：不贸然前压（会被一脚直塞打穿），后退封门，
         //   站门前跟预测入球点，封住接应者可能的射门角度。
