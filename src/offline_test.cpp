@@ -1612,6 +1612,37 @@ static int test_placement_semantics() {
 }
 
 // ============================================================
+// docs/06 第 56 轮：点球"我方主罚"识别单测（真机 16:52 场 9 次点球 0 次去踢）
+//   平台执行期报的 gameState 不是点球态 → 必须靠"球静止在对方罚球点上"识别。
+// ============================================================
+static int test_penalty_spot_detect() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队：攻左门(x=0)，对方罚球点 x≈39.4
+    wm.ball.valid = true;
+    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    // ① 球静止在对方罚球点 → 我方主罚
+    wm.ball.x = 39.4; wm.ball.y = 89.8;
+    if (!we_take_penalty_spot(wm)) { printf("FAIL: 球停在对方罚球点应判我方点球\n"); return 1; }
+    // ② 球静止在**我方**罚球点(x≈180.6) → 那是对方主罚
+    wm.ball.x = 180.6; wm.ball.y = 89.8;
+    if (we_take_penalty_spot(wm)) { printf("FAIL: 我方罚球点上的球=对方主罚\n"); return 1; }
+    // ③ 球在对方罚球点但还在滚 → 摆位期已过（比赛进行中）
+    wm.ball.x = 39.4; wm.ball.y = 89.8; wm.ball.vx = 2.0;
+    if (we_take_penalty_spot(wm)) { printf("FAIL: 球在动不应判摆位期\n"); return 1; }
+    wm.ball.vx = 0.0;
+    // ④ 球静止在中圈 → 不是点球
+    wm.ball.x = 110; wm.ball.y = 90;
+    if (we_take_penalty_spot(wm)) { printf("FAIL: 中圈静止球不应判点球\n"); return 1; }
+    // ⑤ 黄队镜像：黄队攻右门(x=220)，其对方罚球点 x≈180.6
+    wm.ctx = TeamContext{false};
+    wm.ball.x = 180.6; wm.ball.y = 89.8;
+    if (!we_take_penalty_spot(wm)) { printf("FAIL: 黄队镜像应判我方(黄)点球\n"); return 1; }
+
+    printf("penalty spot detect: OK (对方罚球点=我方主罚/我方罚球点/球在动/中圈/黄队镜像)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 55 轮：门将「门线封堵」单测（真机 15:29 场两个丢球的病因）
 //   球已在门框内轨迹上、马上到线 → 必须抢门线预测落点（贴线 3cm + 预测落点 y）。
 //   其余情形一律让位：背离门 / 会偏出 / 还太远 / 太慢 / 门将已贴球（清球优先）。
@@ -1666,6 +1697,7 @@ int main() {
     rc |= test_strategy_run(300);
     rc |= test_formation();
     rc |= test_placement_semantics();
+    rc |= test_penalty_spot_detect();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();

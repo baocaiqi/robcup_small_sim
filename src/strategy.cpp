@@ -1,4 +1,4 @@
-#include "simuro5/strategy.hpp"
+﻿#include "simuro5/strategy.hpp"
 #include "simuro5/roles.hpp"
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
@@ -25,6 +25,22 @@ static const int kStateHysteresisFrames = 3;   // 滞回帧数（可调，见 do
 //   30 帧约等于 demo 就地反抢到位所需时间——窗口内把球传/带过半场即成功。
 static const int kCounterWindowFrames = 30;
 
+// 罚球点几何（真机 rlg 实测，2026-09-12 两场共 14 次摆球）
+constexpr double kPenaltySpotDist  = 39.4;   // 罚球点到门线距离 cm
+constexpr double kPenaltySpotTol   = 1.5;    // 容差 cm
+constexpr double kPenaltySpotStill = 1.0;    // cm/帧：球静止判定
+
+bool we_take_penalty_spot(const WorldModel &wm) {
+    bool state_says_ours = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||
+                           (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow);
+    if (state_says_ours) return true;                 // 摆位期平台确实报点球态
+    if (!wm.ball.valid) return false;
+    if (std::hypot(wm.ball.vx, wm.ball.vy) >= kPenaltySpotStill) return false;   // 球在动=已在比赛
+    double spot_x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * kPenaltySpotDist;
+    return std::fabs(wm.ball.x - spot_x) < kPenaltySpotTol &&
+           std::fabs(wm.ball.y - 90.0) < kPenaltySpotTol;
+}
+
 void Strategy::run(WorldModel &wm) {
     // 1. 局势分析（球权/半场/禁区）
     Situation sit = sit_.analyze(wm);
@@ -34,12 +50,11 @@ void Strategy::run(WorldModel &wm) {
     //   两者都是"球静止在对方门区"，但点球必须去踢，门球要等对方开出）
     //   ⚠️ 平台约定 PM_PenaltyKick_X = **X 队主罚**（证据：官方 demo 的 SetBall 只在
     //   PM_GoalKick_Yellow 时把球放黄队门区，而 demo 是黄队；demo 的 SetLaterRobots
-    //   case 7=PM_PenaltyKick_Yellow 摆的是黄队自己主罚的阵型）。原来写成"黄队主罚时
-    //   我们主罚"→ 真机 15:29 场 4 次点球里本标志一直为假，roles 的"死球别推"守卫
-    //   把 ACTIVE 支到 (85,90)，穿过球把球顶回自己半场（rlg 帧 4087-4119）。
+    //   case 7=PM_PenaltyKick_Yellow 摆的是黄队自己主罚的阵型）。摆位用得上这条。
+    //   但**执行期**平台报的不是点球态（见 we_take_penalty_spot 注释）→ 这里改用
+    //   "球静止在对方罚球点上"这个可观测量，真机 9 次点球里 0 次生效的老问题在此修掉。
     {
-        bool we_take = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||
-                       (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow);
+        bool we_take = we_take_penalty_spot(wm);
         if (we_take) {
             wm.in_penalty_exec = true;
         } else if (wm.in_penalty_exec) {
