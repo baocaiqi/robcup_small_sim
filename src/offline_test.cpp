@@ -1758,8 +1758,7 @@ static int test_penalty_shot_prep() {
         printf("FAIL: 常规助跑应 20 got %.1f\n", shoot_prep_dist(wm));
         return 1;
     }
-    printf("penalty shot prep: OK (罚点球助跑 35cm/常规 20cm/罚点球平移不原地磨 vl=%.0f vr=%.0f)\n",
-           wm.home[1].vl, wm.home[1].vr);
+    printf("penalty shot prep: OK (罚点球助跑 15cm<=20/常规 20cm/对手逼近时不后退只转正即推)\n");
     return 0;
 }
 
