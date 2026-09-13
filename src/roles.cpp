@@ -117,6 +117,40 @@ double spread_y(const WorldModel &wm, double bx, double by,
 }  // anonymous namespace
 
 // ============================================================
+// 门将「球外侧禁推」（docs/06 第 58 轮）：球已到门口时，绝不朝球推进
+// ------------------------------------------------------------
+// 真机 3 场（15:29 / 16:52 / 09-13 08:46）共 6 个丢球，`concede_diag.py` 读数一致：
+//   **门将在球的外侧（前后 −7 ~ −17cm）、离球只有 6~10cm、我方最后触球 15/15 帧**，
+//   进门点全在近门柱内侧 3~15cm。机制：门将贴着球从场侧往自家门追 →
+//   一边追一边把球顶向球门（清球分支给的目标就是"球的门侧 8cm"，越追球越进门）。
+// 正确姿势（两阶段）：
+//   ① 先**横move到球侧方 25cm**（保持球后 10cm，绝不越过球）——纯侧向，不产生朝门推力；
+//   ② 让开之后本规则不再触发（lat ≥ 25cm），门将才可以绕到球的门侧去推，
+//      或走"门线封堵"（第 55 轮）抢预测落点——那时路径离球 25cm，不会碰到球。
+// ============================================================
+constexpr double kGkNoPushDist = 50.0;   // 球进我方门口这个距离内才管（cm）
+constexpr double kGkSideClear  = 25.0;   // 侧向让开距离（cm）
+constexpr double kGkBackOff    = 10.0;   // 场侧回撤（cm）：目标是球后 10cm，绝不越球
+constexpr double kGkBehindMargin = 8.0;  // 球必须已"明显越过门将"这么多才让开（cm）
+//   ↑ 只拦"追在球后面推"这一种（真机 6 个丢球形态：球在门将门侧 7~17cm）；
+//     门将跟球基本齐平时照常清球——sim A/B 实测不让它清球会多丢 0.6 球/场。
+
+bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty) {
+    const TeamContext &ctx = wm.ctx;
+    const RobotState &r = wm.home[id];
+    double bx = wm.ball.x, by = wm.ball.y;
+    if (ctx.dist_our_goal(bx) >= kGkNoPushDist) return false;   // 球还远：按常规防
+    double gside = (ctx.our_goal_x() > bx) ? 1.0 : -1.0;        // 球门在球的哪一侧
+    if ((bx - r.x) * gside <= kGkBehindMargin) return false;    // 没明显越过（齐平/门侧）→ 照常清球
+    if (std::fabs(r.y - by) >= kGkSideClear) return false;      // 已让开：允许绕到球的门侧
+    double side = (r.y >= by) ? 1.0 : -1.0;
+    tx = bx - gside * kGkBackOff;                               // 球后 10cm（场侧）
+    ty = clamp(by + side * kGkSideClear, 74.0, 106.0);
+    clamp_goalie_area(ctx, tx, ty);
+    return true;
+}
+
+// ============================================================
 // 门将「门线封堵」（docs/06 第 55 轮）：球已在门框内的轨迹上 → 抢门线预测落点
 // ------------------------------------------------------------
 // 真机 15:29 场两个丢球的逐帧复盘（rlg 帧 4740~4764 / 7975~8001，工具 concede_diag.py）：
@@ -208,6 +242,16 @@ void run_goalie(WorldModel &wm, int id) {
         motion::position(r, ctx.our_goal_x() + ctx.attack_dir() * kGuardDist,
                          clamp(by, kTrackYLo, kTrackYHi), motion::TM_STOP);
         return;
+    }
+    // —— 球外侧禁推（docs/06 第 58 轮）：球已到门口且门将在球的场侧 → 先侧向让开 ——
+    //   排在最前面：真机 6 个丢球都是"门将贴球从场侧往自家门追、越追越进门"，
+    //   别的分支（清球给的门侧 8cm 目标）正是这个推力来源，必须先让开再说。
+    {
+        double sx2 = 0.0, sy2 = 0.0;
+        if (gk_side_step_point(wm, id, sx2, sy2)) {
+            motion::position(r, sx2, sy2, motion::TM_PASS);   // 侧向让开，不刹车
+            return;
+        }
     }
     // 门球/定位球重启：球停在我方门前 → 门将主动沿中线穿过球把它推出去。
     //   否则球静止时门将只停在球后 8cm 或退到门线上，球被推/滚到门线外又触发门球，

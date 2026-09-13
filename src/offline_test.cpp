@@ -1612,6 +1612,54 @@ static int test_placement_semantics() {
 }
 
 // ============================================================
+// docs/06 第 58 轮：门将「球外侧禁推」单测（真机 3 场 6 个丢球的共同机制）
+//   球已到门口 + 门将在球的场侧 → 目标必须是"球后 10cm + 侧向 25cm"，
+//   **绝不能落在球的门侧**（那等于自己把球往门里推）。
+// ============================================================
+static int test_goalie_side_step() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                  // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 180; wm.home[i].y = 90; }
+    double tx = 0.0, ty = 0.0;
+
+    // ① 球在门口 (215,95)、门将在球后 10cm 同线 → 触发；目标 = 球后 10cm + 侧向让开
+    wm.ball.x = 215; wm.ball.y = 95;
+    wm.home[0].x = 205; wm.home[0].y = 95;
+    if (!gk_side_step_point(wm, 0, tx, ty)) {
+        printf("FAIL: 门将在球外侧且球到门口应触发侧向让开\n");
+        return 1;
+    }
+    if (tx > wm.ball.x + 0.01) {     // 蓝队：门的 x 更大 → 绝不能比球更靠门
+        printf("FAIL: 目标点越过了球（会自己把球顶进门）tx=%.1f 球x=%.1f\n", tx, wm.ball.x);
+        return 1;
+    }
+    if (fabs(ty - 106.0) > 0.5 && fabs(ty - 74.0) > 0.5) {
+        printf("FAIL: 侧向让开目标 y 应贴到 106/74 边界，实际 %.1f\n", ty);
+        return 1;
+    }
+    // ② 门将已侧向让开 25cm → 不再拦（可以去绕球的门侧推）
+    wm.home[0].y = 125;
+    if (gk_side_step_point(wm, 0, tx, ty)) { printf("FAIL: 已让开就不该再拦\n"); return 1; }
+    // ③ 门将已在球的门侧（比球更靠门）→ 不拦
+    wm.home[0].y = 95; wm.home[0].x = 218;
+    if (gk_side_step_point(wm, 0, tx, ty)) { printf("FAIL: 门将已在门侧不该拦\n"); return 1; }
+    // ④ 球还远（距门 70cm）→ 不拦（走常规防守）
+    wm.ball.x = 150; wm.home[0].x = 140;
+    if (gk_side_step_point(wm, 0, tx, ty)) { printf("FAIL: 球还远不该拦\n"); return 1; }
+    // ⑤ 黄队镜像（己方门线 x=0）
+    wm.ctx = TeamContext{false};
+    wm.ball.x = 5; wm.ball.y = 95; wm.home[0].x = 15; wm.home[0].y = 95;
+    if (!gk_side_step_point(wm, 0, tx, ty)) { printf("FAIL: 黄队镜像应触发\n"); return 1; }
+    if (tx < wm.ball.x - 0.01) {
+        printf("FAIL: 黄队镜像目标越过了球 tx=%.1f 球x=%.1f\n", tx, wm.ball.x);
+        return 1;
+    }
+    printf("goalie side step: OK (禁推/不越球/让开后放行/已在门侧放行/太远不拦/黄队镜像)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 57 轮：罚点球射门执行单测（真机 09-13 rlg 帧 2292~2338 复盘）
 //   ① 罚点球助跑要比常规长（出球速度 = 撞球瞬间机头速度）
 //   ② 罚点球时 ACTIVE **必须平移**：旧实现在球后就地转正 18 帧（vl≈-vr 纯自转，
@@ -1743,6 +1791,7 @@ int main() {
     rc |= test_placement_semantics();
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
+    rc |= test_goalie_side_step();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
