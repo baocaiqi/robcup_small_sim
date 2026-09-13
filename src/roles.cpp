@@ -564,7 +564,9 @@ constexpr int kMaxShootPushes = 3;   // 同一轮进攻连续推球尝试上限�
 constexpr double kPrepDist   = 20.0;
 // 罚点球助跑距离（cm）：出球速度 = 撞球瞬间的机头速度，20cm 助跑只有 ~103cm/s，
 //   40cm 外的点球飞行 ~17 帧 → 门将横移 17cm 就够到（真机 09-13 rlg 帧 2350 球被打偏）。
-constexpr double kPenaltyPrepDist = 35.0;
+constexpr double kPenaltyPrepDist = 15.0;   // 15cm（原 35：真机实证倒车太久会被截）
+// 罚点球时对手进到这个距离内 → 不后退助跑，就地转正立刻推（cm）
+constexpr double kPenaltyNoBackOpp = 45.0;
 double shoot_prep_dist(const WorldModel &wm) {
     return wm.in_penalty_exec ? kPenaltyPrepDist : kPrepDist;
 }
@@ -757,15 +759,29 @@ void run_active(WorldModel &wm, int id) {
         //   改成：**沿瞄准线倒车到助跑点**（倒车方向就是助跑方向，机头朝向天然保持），
         //   到位且朝向够准 → 直接冲穿球（35cm 助跑，出球更快、门将来不及横移）。
         if (wm.in_penalty_exec) {
+            // 对手逼近 → **不倒车**（真机 09-13 09:48 场实证）：那场我们倒车 44cm 花 0.6 秒，
+            //   对手趁机从 34cm 逼近到 10cm 把球截走（帧 3485→3537）。助跑换来的球速
+            //   抵不上"丢球"——所以对手在 kPenaltyNoBackOpp 内时：只就地转正，立刻推。
+            double opp_min = 1e9;
+            for (int k = 0; k < PLAYERS_PER_SIDE; ++k)
+                opp_min = std::min(opp_min, dist(wm.opp[k].x, wm.opp[k].y, bx, by));
+            bool urgent = behind && near && opp_min < kPenaltyNoBackOpp;
             double dd = dist(r.x, r.y, px, py);
-            if (dd < kPrepPosTol * 2.0 && std::fabs(te_head) <= kPrepAngTol) {
+            if (urgent) {
+                if (std::fabs(te_head) <= kPrepAngTol) {
+                    ready = true;                                   // 朝向够准 → 立刻推
+                } else {
+                    motion::position_aligned(r, r.x, r.y, sp.aim_rot, 2.0, kPrepAngTol);
+                    return;                                         // 只原地转正，绝不后退
+                }
+            } else if (dd < kPrepPosTol * 2.0 && std::fabs(te_head) <= kPrepAngTol) {
                 ready = true;
             } else if (wm.shoot_align_frames >= kShootAlignTimeout) {
                 ready = true;                 // 超时兜底：宁可打偏也不站着不动
                 wm.shoot_align_frames = 0;
             } else {
                 ++wm.shoot_align_frames;
-                motion::position(r, px, py, motion::TM_PASS);   // 倒车=助跑，不原地磨
+                motion::position(r, px, py, motion::TM_PASS);   // 短助跑（15cm）
                 return;
             }
         } else if (behind && near) {

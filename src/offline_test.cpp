@@ -1720,8 +1720,8 @@ static int test_penalty_shot_prep() {
     wm.role[1] = ROLE_ACTIVE;
     wm.home[1].x = 43.5; wm.home[1].y = 91.0; wm.home[1].rot = -179.9;   // 真机摆位：球后 4cm
 
-    if (!(shoot_prep_dist(wm) >= 30.0)) {
-        printf("FAIL: 罚点球助跑应更长 got %.1f\n", shoot_prep_dist(wm));
+    if (!(shoot_prep_dist(wm) <= 20.0)) {   // 第61轮：罚点球助跑改短（倒车太久会被截）
+        printf("FAIL: 罚点球助跑应短(<=20) got %.1f\n", shoot_prep_dist(wm));
         return 1;
     }
     run_active(wm, 1);
@@ -1730,6 +1730,26 @@ static int test_penalty_shot_prep() {
         printf("FAIL: 罚点球时 ACTIVE 应平移（禁止原地磨）vl=%.1f vr=%.1f\n",
                wm.home[1].vl, wm.home[1].vr);
         return 1;
+    }
+    // ③ 对手逼近（离球 21cm）→ 罚点球**绝不后退**：模拟 5 帧，到球距离不能变大
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 60; wm.opp[i].y = 90; }
+    wm.ball.x = 39.4; wm.ball.y = 89.8; wm.ball.vx = 0; wm.ball.vy = 0;
+    wm.in_penalty_exec = true;
+    double d0 = -1.0;
+    for (int f = 0; f < 5; ++f) {
+        wm.home[1].rot = -179.9;
+        run_active(wm, 1);
+        double v = 0.5 * (wm.home[1].vl + wm.home[1].vr);
+        double w = (wm.home[1].vr - wm.home[1].vl) / 10.0;
+        wm.home[1].x += v * 0.025 * std::cos(wm.home[1].rot * SIMURO5_PI / 180.0);
+        wm.home[1].y += v * 0.025 * std::sin(wm.home[1].rot * SIMURO5_PI / 180.0);
+        wm.home[1].rot = normalize_angle(wm.home[1].rot + w * 0.025 * 180.0 / SIMURO5_PI);
+        double d = dist(wm.home[1].x, wm.home[1].y, wm.ball.x, wm.ball.y);
+        if (d0 < 0) d0 = d;
+        if (d > d0 + 1.0) {
+            printf("FAIL: 对手逼近时罚点球仍在后退（被截的根因）d=%.1f > d0=%.1f\n", d, d0);
+            return 1;
+        }
     }
     // 常规射门：助跑仍是 20cm
     wm.in_penalty_exec = false;
