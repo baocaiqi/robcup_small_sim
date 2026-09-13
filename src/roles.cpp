@@ -129,7 +129,7 @@ double spread_y(const WorldModel &wm, double bx, double by,
 //      或走"门线封堵"（第 55 轮）抢预测落点——那时路径离球 25cm，不会碰到球。
 // ============================================================
 constexpr double kGkNoPushDist = 50.0;   // 球进我方门口这个距离内才管（cm）
-constexpr double kGkSideClear  = 25.0;   // 侧向让开距离（cm）
+constexpr double kGkSideClear  = 35.0;   // 侧向让开距离（cm，25→35：用户指令「绕球角度还要增加」）
 constexpr double kGkBackOff    = 10.0;   // 场侧回撤（cm）：目标是球后 10cm，绝不越球
 constexpr double kGkBehindMargin = 8.0;  // 球必须已"明显越过门将"这么多才让开（cm）
 //   ↑ 只拦"追在球后面推"这一种（真机 6 个丢球形态：球在门将门侧 7~17cm）；
@@ -229,7 +229,7 @@ void run_goalie(WorldModel &wm, int id) {
     //   kLateral  ：球夹在门将和门之间时，绕弧线的侧向偏移距离（防乌龙）
     const double kClearDist = 20.0;
     const double kPushDist  = 8.0;
-    const double kLateral   = 15.0;
+    const double kLateral   = 30.0;   // 绕弧线侧向偏移（cm，15→30：同上，角度加大）
 
     double bx = wm.ball.x, by = wm.ball.y;
     double vx = wm.ball.vx, vy = wm.ball.vy;

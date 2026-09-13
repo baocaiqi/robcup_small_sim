@@ -1370,9 +1370,9 @@ static int test_motion_stop_convergence() {
 static int test_motion_pass_mode() {
     RobotState r;
     r.x = 0; r.y = 90; r.rot = 0;
-    motion::position(r, 5.0, 90, motion::TM_PASS);          // 旧律此处 112.5（de>=5 饱和）
-    if (std::fabs((r.vl + r.vr) * 0.5 - 112.5) > 0.5) {
-        printf("FAIL: TM_PASS de=5 应为 112.5 got %.1f\n", (r.vl + r.vr) * 0.5);
+    motion::position(r, 5.0, 90, motion::TM_PASS);          // 第59轮用户指令提速：饱和 150（原 112.5）
+    if (std::fabs((r.vl + r.vr) * 0.5 - 150.0) > 0.5) {
+        printf("FAIL: TM_PASS de=5 应为 150.0 got %.1f\n", (r.vl + r.vr) * 0.5);
         return 1;
     }
     r.x = 0; r.y = 90; r.rot = 0;
@@ -1392,7 +1392,7 @@ static int test_motion_pass_mode() {
     c.x = 0; c.y = 90; c.rot = 0;
     BallState pred; pred.x = 2.0; pred.y = 90;
     motion::chase_ball(c, pred);
-    if ((c.vl + c.vr) * 0.5 > 25.0) {                       // 2/10 缩放 → ~22.5
+    if ((c.vl + c.vr) * 0.5 > 35.0) {                       // 2/10 缩放 → ~30（第59轮提速后）
         printf("FAIL: chase_ball 贴球未减速 %.1f\n", (c.vl + c.vr) * 0.5);
         return 1;
     }
@@ -1639,7 +1639,7 @@ static int test_goalie_side_step() {
         return 1;
     }
     // ② 门将已侧向让开 25cm → 不再拦（可以去绕球的门侧推）
-    wm.home[0].y = 125;
+    wm.home[0].y = 135;   // 侧向已让开 40cm ≥ kGkSideClear(35)
     if (gk_side_step_point(wm, 0, tx, ty)) { printf("FAIL: 已让开就不该再拦\n"); return 1; }
     // ③ 门将已在球的门侧（比球更靠门）→ 不拦
     wm.home[0].y = 95; wm.home[0].x = 218;

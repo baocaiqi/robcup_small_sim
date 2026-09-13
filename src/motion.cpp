@@ -28,7 +28,8 @@ void position(RobotState &r, double tx, double ty, TargetMode mode) {
     //   drive = vc*(sigmoid-0.25) 饱和值 = 0.75*vc；vc=150 → 上限 112（与 demo 追平）
     //   ⚠️ docs/18 真机复标（2026-09-10，build/traj_before.csv）：稳态速度我们
     //   p50/p90 = 79.8/115.3，demo = 67.9/97.9 —— 我们已不慢；瓶颈是"停不住"。
-    double vc = 150.0, Ka = 10.0 / 90.0;
+    double vc = (mode == TM_PASS) ? 200.0 : 150.0;   // 冲球/经过型用满速（饱和≈150cm/s=平台上限）
+    double Ka = 10.0 / 90.0;
 
     // Ka 分段整体 +3：转向修正更积极，缩短差速轮重新瞄准的时间
     if (de > 100.0)      Ka = 20.0 / 90.0;
