@@ -1612,6 +1612,50 @@ static int test_placement_semantics() {
 }
 
 // ============================================================
+// docs/06 第 57 轮：罚点球射门执行单测（真机 09-13 rlg 帧 2292~2338 复盘）
+//   ① 罚点球助跑要比常规长（出球速度 = 撞球瞬间机头速度）
+//   ② 罚点球时 ACTIVE **必须平移**：旧实现在球后就地转正 18 帧（vl≈-vr 纯自转，
+//      观感"完全不动"）→ 断言 (vl+vr)/2 不能≈0
+// ============================================================
+static int test_penalty_shot_prep() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                   // 蓝队攻左门(x=0)
+    wm.ball.valid = true;
+    wm.ball.x = 39.4; wm.ball.y = 89.8; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.in_penalty_exec = true;
+    wm.we_have_ball = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 120; wm.home[i].y = 90; wm.home[i].rot = 180.0;
+        wm.opp[i].x = 150; wm.opp[i].y = 90;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[1] = ROLE_ACTIVE;
+    wm.home[1].x = 43.5; wm.home[1].y = 91.0; wm.home[1].rot = -179.9;   // 真机摆位：球后 4cm
+
+    if (!(shoot_prep_dist(wm) >= 30.0)) {
+        printf("FAIL: 罚点球助跑应更长 got %.1f\n", shoot_prep_dist(wm));
+        return 1;
+    }
+    run_active(wm, 1);
+    double v = 0.5 * (wm.home[1].vl + wm.home[1].vr);
+    if (std::fabs(v) < 10.0) {
+        printf("FAIL: 罚点球时 ACTIVE 应平移（禁止原地磨）vl=%.1f vr=%.1f\n",
+               wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+    // 常规射门：助跑仍是 20cm
+    wm.in_penalty_exec = false;
+    wm.ball.x = 60.0;
+    if (std::fabs(shoot_prep_dist(wm) - 20.0) > 0.01) {
+        printf("FAIL: 常规助跑应 20 got %.1f\n", shoot_prep_dist(wm));
+        return 1;
+    }
+    printf("penalty shot prep: OK (罚点球助跑 35cm/常规 20cm/罚点球平移不原地磨 vl=%.0f vr=%.0f)\n",
+           wm.home[1].vl, wm.home[1].vr);
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 56 轮：点球"我方主罚"识别单测（真机 16:52 场 9 次点球 0 次去踢）
 //   平台执行期报的 gameState 不是点球态 → 必须靠"球静止在对方罚球点上"识别。
 // ============================================================
@@ -1698,6 +1742,7 @@ int main() {
     rc |= test_formation();
     rc |= test_placement_semantics();
     rc |= test_penalty_spot_detect();
+    rc |= test_penalty_shot_prep();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();

@@ -504,6 +504,12 @@ constexpr int kMaxShootPushes = 3;   // 同一轮进攻连续推球尝试上限�
 //   朝向容差 10°：1m 处横向偏差 = 100·tan10° ≈ 17.6cm < 门半宽 20cm → 能射正；
 //     旧口径是 40°（1m 处偏 92cm = 两个门宽），真机实测机头−瞄准线 p50=51.6°、≤10° 仅 6%
 constexpr double kPrepDist   = 20.0;
+// 罚点球助跑距离（cm）：出球速度 = 撞球瞬间的机头速度，20cm 助跑只有 ~103cm/s，
+//   40cm 外的点球飞行 ~17 帧 → 门将横移 17cm 就够到（真机 09-13 rlg 帧 2350 球被打偏）。
+constexpr double kPenaltyPrepDist = 35.0;
+double shoot_prep_dist(const WorldModel &wm) {
+    return wm.in_penalty_exec ? kPenaltyPrepDist : kPrepDist;
+}
 constexpr double kPrepPosTol = 3.0;
 constexpr double kPrepAngTol = 10.0;
 // 对准尝试超时（帧）：球一直在动/被抢，死等对准会把机会全耗掉 → 超时按当前朝向推
@@ -674,8 +680,9 @@ void run_active(WorldModel &wm, int id) {
             this_side = -this_side;
         }
         // —— 到点定向执行（docs/18 §8）——
-        double px = bx - sp.dir_x * kPrepDist;      // 准备点 = 球后 20cm，落在瞄准线上
-        double py = by - sp.dir_y * kPrepDist;
+        const double prep_d = shoot_prep_dist(wm);   // 罚点球 35cm（助跑更长 → 出球更快）
+        double px = bx - sp.dir_x * prep_d;          // 准备点 = 球后 prep_d，落在瞄准线上
+        double py = by - sp.dir_y * prep_d;
         // docs/06 第 49 轮：准备点也不许落在角落黄区（否则驱车过去会穿过球、
         //   把球往角心顶 → "No pushing" 犯规）。球在对方门角附近射门时最易触发。
         if (!prep_point_ok(px, py)) { hold_out_of_corner(wm, r); return; }
@@ -684,9 +691,26 @@ void run_active(WorldModel &wm, int id) {
         // 人在球的"门侧后方"：球−人 在瞄准方向上的投影 > 0 ⇔ 往前推把球送向球门
         //   （旧口径只判"机头对着球"，人站在球前面时会**把球往回推**）
         bool behind = ((bx - r.x) * sp.dir_x + (by - r.y) * sp.dir_y) > 0.0;
-        bool near = db < kPrepDist + 6.0;
+        bool near = db < prep_d + 6.0;
         bool ready = false;
-        if (behind && near) {
+        // —— 罚点球专用执行（docs/06 第 57 轮，真机 09-13 rlg 帧 2292~2338）——
+        //   摆位后 1 号站在球后 4cm，却「就地转正」18 帧（位置一动不动，观感=「完全不动」），
+        //   再倒退 20cm 去准备点，最后才以 103cm/s 把球推出——1.15 秒全浪费，射正也被扑。
+        //   改成：**沿瞄准线倒车到助跑点**（倒车方向就是助跑方向，机头朝向天然保持），
+        //   到位且朝向够准 → 直接冲穿球（35cm 助跑，出球更快、门将来不及横移）。
+        if (wm.in_penalty_exec) {
+            double dd = dist(r.x, r.y, px, py);
+            if (dd < kPrepPosTol * 2.0 && std::fabs(te_head) <= kPrepAngTol) {
+                ready = true;
+            } else if (wm.shoot_align_frames >= kShootAlignTimeout) {
+                ready = true;                 // 超时兜底：宁可打偏也不站着不动
+                wm.shoot_align_frames = 0;
+            } else {
+                ++wm.shoot_align_frames;
+                motion::position(r, px, py, motion::TM_PASS);   // 倒车=助跑，不原地磨
+                return;
+            }
+        } else if (behind && near) {
             // ①a 已在球后方且够得着 → **就地转正**（不后退、不丢球权）
             //   教训：先前要求"退到球后 20cm 准备点"才对准，插桩实测射门分支一场进
             //   3600 次、推球 0 次（球一直在动，那个点不可达）→ 射门函数被门禁卡死。
