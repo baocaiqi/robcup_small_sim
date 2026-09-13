@@ -1612,6 +1612,46 @@ static int test_placement_semantics() {
 }
 
 // ============================================================
+// docs/06 第 60 轮：门将开球（门球/清球）"先转正再推穿"单测
+//   真机 09-13 09:59 场：门球卡 7.6 秒球不动，门将机头 -100°（该 180°）→
+//   position 落进 (85°,95°) 纯自转死区 ⇒ 只蹭不推。断言两条：
+//   ① 已对准 → 必须"直线推穿"（有速度）；② 机头偏 90° → 必须转正且 40 帧内收敛到 ±20°。
+// ============================================================
+static int test_goalie_clear_push() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    wm.ball.x = 205.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+
+    // ① 已对准（机头 180°）+ 球在门前静止 → 必须有推穿速度（不是蹭）
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = 180.0;
+    run_goalie(wm, 0);
+    double v1 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v1 < 30.0) {
+        printf("FAIL: 门将对准后应直线推穿（有速度）v=%.0f\n", v1);
+        return 1;
+    }
+    // ② 机头偏 90°（真机实测 -100°）→ 转正，40 帧内收敛到 ±20°
+    double rot = -90.0;
+    int conv = -1;
+    for (int f = 0; f < 40; ++f) {
+        wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = rot;
+        run_goalie(wm, 0);
+        double w = (wm.home[0].vr - wm.home[0].vl) / 10.0;              // rad/s（平台口径）
+        rot = normalize_angle(rot + w * 0.025 * 180.0 / SIMURO5_PI);    // dt=1/40s
+        if (std::fabs(angle_diff(180.0, rot)) <= 20.0) { conv = f; break; }
+    }
+    if (conv < 0) { printf("FAIL: 门将没能转正到面向场中央（仍在死区打转）\n"); return 1; }
+    printf("goalie clear push: OK (对准即推穿 v=%.0f / 偏 90° 时 %d 帧内转正)\n", v1, conv);
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 58 轮：门将「球外侧禁推」单测（真机 3 场 6 个丢球的共同机制）
 //   球已到门口 + 门将在球的场侧 → 目标必须是"球后 10cm + 侧向 25cm"，
 //   **绝不能落在球的门侧**（那等于自己把球往门里推）。
@@ -1792,6 +1832,7 @@ int main() {
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
     rc |= test_goalie_side_step();
+    rc |= test_goalie_clear_push();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();

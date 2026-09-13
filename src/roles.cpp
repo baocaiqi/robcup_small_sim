@@ -228,6 +228,7 @@ void run_goalie(WorldModel &wm, int id) {
     //   kPushDist ：推球点离球距离（站在球后面推，跟 shoot.cpp 一致）
     //   kLateral  ：球夹在门将和门之间时，绕弧线的侧向偏移距离（防乌龙）
     const double kClearDist = 20.0;
+    const double kClearAlignTol = 20.0;   // 推穿前允许的机头偏差(度，第60轮)
     const double kPushDist  = 8.0;
     const double kLateral   = 30.0;   // 绕弧线侧向偏移（cm，15→30：同上，角度加大）
 
@@ -280,6 +281,19 @@ void run_goalie(WorldModel &wm, int id) {
         //   必须 y 对准（门将、球、目标三点同一直线）才可能直线穿球。
         double dbg = dist(r.x, r.y, bx, by);
         double aligned = std::fabs(r.y - by) <= 3.0;
+        // —— 推穿前先转正（docs/06 第 60 轮）——
+        //   真机 09-13 09:59 场：门球卡 7.6 秒球一动不动（平台每 5 秒重发一次、共 3 次），
+        //   门将就停在球后 9.5cm，机头却是 -100°（该朝 180° 面向场中央）→
+        //   motion::position 落进 |te|∈(85°,95°) 的**纯原地自转**死区，只在原地晃 y，
+        //   永远进不到驱动分支 ⇒ 观感就是"老是蹭、不直接推球"。
+        //   对策：机头偏差 >20° 时先原地转正，转正后下一帧再直线推穿球。
+        if (dbg < 25.0 && aligned) {
+            double aim_rot = (ctx.attack_dir() > 0.0) ? 0.0 : 180.0;   // 面向场中央
+            if (std::fabs(angle_diff(aim_rot, r.rot)) > kClearAlignTol) {
+                motion::position_aligned(r, r.x, r.y, aim_rot, 2.0, kClearAlignTol);
+                return;
+            }
+        }
         double px, py;
         // —— 贴门线时禁止"直线穿球"（防乌龙，docs/21 §8；2026-09-12 真机 09:08 场 4 个丢球全中此招）——
         //   球距门 <15cm 且门将在球的外侧时，原逻辑会直奔"球的门侧 8cm"，
