@@ -206,6 +206,9 @@ def main():
     ap.add_argument("--real", default=None,
                     help="真机**界面录屏** mp4（用 tools/py/record_platform.py 或 Win+Alt+R 录），"
                          "会放进 play1 段（102~122s）；不传则该段退回数据回放")
+    ap.add_argument("--real-caption",
+                    default="真机实测录像：平台实时画面（WorldModel 球场窗口）",
+                    help="play1 段底部字幕（--real 传数据回放片段时改成相应说明）")
     a = ap.parse_args()
 
     # 真机录像 → 抽帧（用 imageio-ffmpeg 自带的 ffmpeg；抽成 jpg 后才能用 PIL 合成）
@@ -347,7 +350,7 @@ def main():
                 im2 = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))))
                 img.paste(im2, ((W - im2.width) // 2, (H - im2.height) // 2))
                 d.rectangle([0, H - 62, W, H], fill=(8, 12, 20))
-                d.text((24, H - 50), "真机实测录像：平台实时画面（WorldModel 球场窗口）",
+                d.text((24, H - 50), a.real_caption,
                        font=font(21, True), fill=TXT)
             elif frames_rlg:
                 base = hl_start + (0 if name == "play1" else int(20.0 * hl_step))
