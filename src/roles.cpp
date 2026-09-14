@@ -729,7 +729,9 @@ void run_active(WorldModel &wm, int id) {
         double bx = wm.ball.x, by = wm.ball.y;
         int this_side = (sp.aim_y > 90.0) ? 1 : -1;
         // 变角推射（docs/17）：同一轮已推 >=2 次且本次仍瞄上次同一侧 → 强制换另一侧重推
-        if (wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
+        // ⚠️ 借墙方案（docs/06 第 65 轮）**不适用**：那个覆盖逻辑是"直接瞄向门口的另一点"，
+        //    用在借墙方案上会把方向改回直线（而直线正是被封掉才走借墙的）→ 必须排除。
+        if (!sp.bank && wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
             wm.shoot_push_last_side != 0) {
             double ogx = ctx.opp_goal_x(), ad2 = ctx.attack_dir();
             double oy = 90.0 - (sp.aim_y - 90.0);

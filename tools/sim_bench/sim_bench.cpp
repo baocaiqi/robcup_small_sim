@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // sim_bench.cpp — 快速无头仿真器（训练量/回归测试/参数搜索用）
 //
 // 目标：一场完整比赛（600s×40Hz=24000 帧）压缩到 ~0.2 秒，
@@ -33,6 +33,7 @@
 #include "simuro5/team.hpp"
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
+#include "simuro5/shoot.hpp"          // 借墙射门计数（bank_plan_count/bank_frame_count）
 
 using namespace simuro5;
 
@@ -718,5 +719,9 @@ int main(int argc, char **argv) {
            (double)t_fb / games, (double)t_fb_corner / games,
            (double)t_rescue / games);
     printf("=== 耗时 %.2fs, 场均 %.2fs (%.1f 帧/秒) ===\n", sec, sec / games, games * (double)frames / sec);
+    // 借墙射门（docs/06 第 65 轮）：机会次数（连续采纳算 1 次）+ 采纳帧数
+    printf("=== 借墙射门: 机会 %.1f 次/场, 采纳 %ld 帧 (%.1f 帧/场) ===\n",
+           (double)simuro5::bank_plan_count() / games,
+           simuro5::bank_frame_count(), (double)simuro5::bank_frame_count() / games);
     return 0;
 }

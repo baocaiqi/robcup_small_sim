@@ -23,6 +23,13 @@ import subprocess
 import sys
 import time
 
+# Windows 控制台默认是 GBK，脚本里的 ✓/✗ 会抛 UnicodeEncodeError（实测 2026-09-14）
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "src", "dll_blue.cpp")
 HDR = os.path.join(ROOT, "include", "simuro5", "blackbox.hpp")
@@ -72,6 +79,25 @@ inline void setball(long gs, double x, double y) {
     std::FILE *f = fp(); if (!f) return;
     std::fprintf(f, "B,%ld,%.2f,%.2f,%ld\n", st().frame, x, y, gs); std::fflush(f);
 }
+// R 行：我方 5 台的 (x,y,rot,role) —— 供"抓屏叠加"工具把画面里的色块对回编号
+//   role 在 wm.role[] 里（固定分工：0=门将 1=主攻 2=助攻 3=中场 4=后卫，见 roles.hpp）
+inline void robots(long is_blue, const double *xs, const double *ys, const double *rots,
+                   const int *roles, int n) {
+    std::FILE *f = fp(); if (!f) return;
+    std::fprintf(f, "R,%ld,%ld", st().frame, is_blue);
+    for (int i = 0; i < n; ++i)
+        std::fprintf(f, ",%.2f,%.2f,%.1f,%d", xs[i], ys[i], rots[i], roles[i]);
+    std::fprintf(f, "\n");
+    if ((st().frame % 40) == 0) std::fflush(f);
+}
+// O 行：对手 5 台的 (x,y,rot) —— 只为了叠加时多几个参照点（提高标定精度）
+inline void opponents(const double *xs, const double *ys, const double *rots, int n) {
+    std::FILE *f = fp(); if (!f) return;
+    std::fprintf(f, "O,%ld", st().frame);
+    for (int i = 0; i < n; ++i) std::fprintf(f, ",%.2f,%.2f,%.1f", xs[i], ys[i], rots[i]);
+    std::fprintf(f, "\n");
+    if ((st().frame % 40) == 0) std::fflush(f);
+}
 }}  // namespace simuro5::bb
 #endif
 '''
@@ -94,7 +120,17 @@ INS = {
         "    bb::frame((long)pEnv->gameState, (long)pEnv->whosBall,\n"
         "              pEnv->currentBall.pos.x, pEnv->currentBall.pos.y,\n"
         "              g_wm.ball.vx, g_wm.ball.vy, g_wm.we_have_ball ? 1 : 0,\n"
-        "              g_wm.in_penalty_exec ? 1 : 0, g_wm.home[0].x, g_wm.home[1].x);",
+        "              g_wm.in_penalty_exec ? 1 : 0, g_wm.home[0].x, g_wm.home[1].x);\n"
+        "    {   // 抓屏叠加用：我方 5 台坐标+角色、对手 5 台坐标\n"
+        "        double hx[PLAYERS_PER_SIDE], hy[PLAYERS_PER_SIDE], hr[PLAYERS_PER_SIDE];\n"
+        "        double ox[PLAYERS_PER_SIDE], oy[PLAYERS_PER_SIDE], orr[PLAYERS_PER_SIDE];\n"
+        "        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {\n"
+        "            hx[i] = g_wm.home[i].x; hy[i] = g_wm.home[i].y; hr[i] = g_wm.home[i].rot;\n"
+        "            ox[i] = g_wm.opp[i].x;  oy[i] = g_wm.opp[i].y;  orr[i] = g_wm.opp[i].rot;\n"
+        "        }\n"
+        "        bb::robots(g_ctx.is_blue ? 1 : 0, hx, hy, hr, g_wm.role, PLAYERS_PER_SIDE);\n"
+        "        bb::opponents(ox, oy, orr, PLAYERS_PER_SIDE);\n"
+        "    }",
 }
 
 

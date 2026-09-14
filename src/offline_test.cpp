@@ -658,12 +658,18 @@ static int test_shoot_plan() {
         if (!p5.viable) { printf("FAIL: 开口够大应可远射\n"); return 1; }
         if (p5.open_angle < 8.0) { printf("FAIL: open=%.1f 应≥8\n", p5.open_angle); return 1; }
         if (p5.quality < 0.35) { printf("FAIL: quality=%.2f 应≥0.35\n", p5.quality); return 1; }
-        // 射门线 12cm 处横一个非门将防守者 → 路线被挡 → 拒
+        // 射门线 12cm 处横一个非门将防守者 → 直线路线被挡
         wm.opp[1].x = wm.ball.x + p5.dir_x * 12.0;
         wm.opp[1].y = wm.ball.y + p5.dir_y * 12.0;
         ShootPlan p6 = plan_shoot(wm, 1);
-        if (p6.viable) {
-            printf("FAIL: 路线被挡的远射应被拒 (lane_blocked=%d)\n", (int)p6.lane_blocked);
+        // docs/06 第 65 轮起：直线被封后**允许改走借墙**（借墙是"换个角度"，不是硬射被挡的直线）
+        //   所以判据改成：要么不射，要么必须是借墙方案（且质量过阈值）——不许沿被挡的直线硬射。
+        if (p6.viable && !p6.bank) {
+            printf("FAIL: 路线被挡的远射不该沿原直线硬射 (lane_blocked=%d)\n", (int)p6.lane_blocked);
+            return 1;
+        }
+        if (p6.bank && p6.bank_quality < 0.45) {
+            printf("FAIL: 借墙方案质量应≥0.45 got %.3f\n", p6.bank_quality);
             return 1;
         }
         wm.opp[1].x = 200; wm.opp[1].y = 30;     // 撤走 → 恢复可射
@@ -698,6 +704,115 @@ static int test_shoot_plan() {
         }
     }
     printf("shoot plan: OK (近距无条件/dir单位/连续瞄准/远射双闸门/路线阻挡/点球旁路)\n");
+    return 0;
+}
+
+// ============================================================
+// 借墙射门（bank shot，docs/06 第 65 轮）
+//   验证四件事：
+//   ① 直线被门将封死时，自动改走借墙，且机会质量过阈值（≥0.45）
+//   ② 反射点满足**实测各向异性反射**（法向×0.66、切向×0.81），且与"理想镜面"解**明显不同**
+//      （镜面解偏 3cm 以上 → 证明系数真的生效了，不是白写）
+//   ③ 直线好机会不被抢（≤70cm 无条件可射区仍然返回直线方案）
+//   ④ 球贴门线（无借墙几何可用）时不硬凑；门线另一侧（黄队 ctx）同样成立
+// ============================================================
+static int test_bank_shot() {
+    // —— ① + ②：蓝队（守 x=220、攻 x=0），球在 (100,55)，门将站在球门中心线上封死直线 ——
+    {
+        TeamContext ctx{true};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 100; wm.ball.y = 55; wm.ball.vx = 0; wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 35; }
+        wm.opp[0].x = 20; wm.opp[0].y = 83;          // 门将压在 (100,55)→(0,90) 连线上
+        ShootPlan p = plan_shoot(wm, 1);
+        if (!p.viable || !p.bank) {
+            printf("FAIL: 直线被门将封死时应改走借墙 (viable=%d bank=%d open=%.1f)\n",
+                   (int)p.viable, (int)p.bank, p.open_angle);
+            return 1;
+        }
+        if (p.bank_quality < 0.45) {
+            printf("FAIL: 借墙质量应≥0.45 got %.3f\n", p.bank_quality);
+            return 1;
+        }
+        if (p.bank_wall != 0.0) {          // 球在下半场 → 该借底墙
+            printf("FAIL: 球在 y=55 应借底墙 got wall=%.0f\n", p.bank_wall);
+            return 1;
+        }
+        // 出射方向必须指向瞄准点：用实测系数算 out，再与「反弹点→目标」做叉积（应共线）
+        double ox = p.dir_x * 0.81, oy = -p.dir_y * 0.66;
+        double tx = ctx.opp_goal_x() - p.bounce_x, ty = p.aim_y - p.bank_wall;
+        double cross = ox * ty - oy * tx;
+        double sc = std::hypot(ox, oy) * std::hypot(tx, ty);
+        if (sc < 1e-9 || fabs(cross) / sc > 1e-3) {
+            printf("FAIL: 反射解不自洽 sin=%.2e (bounce=%.2f aim=%.2f)\n",
+                   sc > 1e-9 ? fabs(cross) / sc : 9.9, p.bounce_x, p.aim_y);
+            return 1;
+        }
+        // 与"理想镜面"解对比：必须差 3cm 以上，否则说明实测系数没接进去
+        double c1m = p.aim_y - p.bank_wall, c2m = p.bank_wall - wm.ball.y;
+        double rx_mirror = (c1m * wm.ball.x - c2m * ctx.opp_goal_x()) / (c1m - c2m);
+        if (fabs(rx_mirror - p.bounce_x) < 3.0) {
+            printf("FAIL: 镜面解(%.2f)与实测解(%.2f)几乎相同 → 系数没生效\n",
+                   rx_mirror, p.bounce_x);
+            return 1;
+        }
+        // 反弹点必须落在球与对方门之间、离门线 ≥12cm
+        if (p.bounce_x >= wm.ball.x || p.bounce_x <= ctx.opp_goal_x()) {
+            printf("FAIL: 反弹点位置不对 %.2f\n", p.bounce_x);
+            return 1;
+        }
+    }
+    // —— ③：≤70cm 无条件可射区，不允许被借墙方案抢走 ——
+    {
+        TeamContext ctx{true};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 25; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 3; wm.opp[i].y = 74.0 + i * 8.0; }
+        ShootPlan p = plan_shoot(wm, 1);
+        if (!p.viable || p.bank) {
+            printf("FAIL: 门前 25cm 应走直线射门，不该借墙 (bank=%d)\n", (int)p.bank);
+            return 1;
+        }
+    }
+    // —— ④a：球几乎贴门线（x=3 < kMinShot=5）→ 无借墙几何，也不该硬凑 ——
+    {
+        TeamContext ctx{true};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 3; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 20; wm.opp[i].y = 20 + i * 30; }
+        ShootPlan p = plan_shoot(wm, 1);
+        if (p.viable || p.bank) {
+            printf("FAIL: 贴门线应无方案 got viable=%d bank=%d\n", (int)p.viable, (int)p.bank);
+            return 1;
+        }
+    }
+    // —— ④b：黄队 ctx（守 x=0、攻 x=220），球在上半场 → 应借顶墙 ——
+    {
+        TeamContext ctx{false};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 120; wm.ball.y = 120; wm.ball.vx = 0; wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 60; wm.opp[i].y = 20 + i * 35; }
+        wm.opp[0].x = 200; wm.opp[0].y = 96;         // 门将压在 (120,120)→(220,90) 连线上
+        ShootPlan p = plan_shoot(wm, 1);
+        if (!p.viable || !p.bank || fabs(p.bank_wall - 180.0) > 1e-9) {
+            printf("FAIL: 黄队上半场应借顶墙 got viable=%d bank=%d wall=%.0f q=%.3f\n",
+                   (int)p.viable, (int)p.bank, p.bank_wall, p.bank_quality);
+            return 1;
+        }
+        if (p.bank_quality < 0.45) {
+            printf("FAIL: 黄队借顶墙质量应≥0.45 got %.3f\n", p.bank_quality);
+            return 1;
+        }
+    }
+    printf("bank shot: OK (反射闭式解/与镜面解有差/不抢直线/贴门线不硬凑/黄队镜像)\n");
     return 0;
 }
 
@@ -1972,6 +2087,7 @@ int main() {
     rc |= test_follow_route();
     rc |= test_shoot_push_limit();
     rc |= test_shoot_plan();
+    rc |= test_bank_shot();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
     rc |= test_no_push_zone();
