@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>防守预测演示 · 直线外推 &amp; 朝门投影</title>
+<style>
+  :root{
+    --bg:#0e1420; --panel:#141c2b; --line:#243349; --ink:#e8eef7; --dim:#93a4bd;
+    --v:#ff9f43;      /* 球速向量 */
+    --toward:#22d3ee; /* 朝门分量 */
+    --pt:#4ade80;     /* 预测点 */
+    --no:#f87171;     /* 不通过 */
+    --static:#94a3b8; /* 静态回退点 */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;font-size:14px;line-height:1.6}
+  header{padding:14px 20px 0 20px}
+  h1{font-size:19px;margin:0 0 4px 0}
+  .sub{color:var(--dim);font-size:12.5px;margin:0 0 10px 0}
+  code{font-family:Consolas,"Courier New",monospace;background:#0a1120;color:#cfe3ff;padding:0 3px;border-radius:3px}
+  nav{display:flex;gap:8px;flex-wrap:wrap}
+  nav button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px 8px 0 0;
+             padding:8px 14px;font-size:14px;cursor:pointer;font-family:inherit}
+  nav button.on{background:#1d2b42;border-bottom-color:#1d2b42;color:#fff;font-weight:600}
+  main{padding:0 20px 28px 20px}
+  section{display:none;background:#1d2b42;border:1px solid var(--line);border-radius:0 8px 8px 8px;padding:14px}
+  section.on{display:block}
+  .wrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  canvas{background:#0b1220;border-radius:8px;flex:0 0 auto;max-width:100%}
+  .panel{flex:1 1 380px;min-width:340px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+  .card h3{margin:0 0 6px 0;font-size:14px;color:#bcd3f5}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:13px}
+  .row label{width:104px;color:var(--dim);flex:0 0 auto}
+  input[type=range]{flex:1;accent-color:#4c8dff}
+  .val{font-family:Consolas,monospace;width:78px;text-align:right;color:#ffe8c2}
+  .btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .btns button{background:#22304a;color:#dce8fb;border:1px solid #33456a;border-radius:6px;
+               padding:5px 9px;font-size:12.5px;cursor:pointer;font-family:inherit}
+  .btns button:hover{background:#2b3d5e}
+  pre{background:#0a1120;border:1px solid #1f2b3f;border-radius:6px;padding:8px 10px;overflow-x:auto;
+      font-family:Consolas,"Courier New",monospace;font-size:12.2px;line-height:1.55;margin:6px 0;color:#cbd8ea}
+  pre .hl{background:#243b2a;color:#c8f7d4;display:inline-block;width:100%}
+  pre .cm{color:#7d8ea6}
+  pre .num{color:#ffd479}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{border:1px solid var(--line);padding:4px 6px;text-align:left}
+  th{background:#1b2740;color:#bcd3f5}
+  .ok{color:#4ade80;font-weight:600}
+  .bad{color:var(--no);font-weight:600}
+  .big{font-size:15px;font-family:Consolas,monospace;color:#ffe8c2}
+  .legend{font-size:12.5px;color:var(--dim)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  .note{font-size:12.5px;color:var(--dim);border-left:3px solid #33456a;padding-left:8px;margin:6px 0}
+  .anim{display:flex;gap:8px;align-items:center;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>防守预测演示：直线外推 &amp; 朝门投影</h1>
+  <p class="sub">对应源码 <code>include/simuro5/defense.hpp</code> · <code>src/defense.cpp</code> · <code>src/roles.cpp</code>　
+     单位：位置/距离 厘米，速度 厘米/帧（平台 40 帧 = 1 秒，所以 3 厘米/帧 = 120 厘米/秒）</p>
+  <nav>
+    <button data-tab="ext" class="on">① 直线外推：球会到哪</button>
+    <button data-tab="proj">② 朝门投影：这份速度算不算威胁</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ================= ① 直线外推 ================= -->
+  <section id="ext" class="on">
+    <div class="wrap">
+      <canvas id="cv1" width="700" height="576"></canvas>
+      <div class="panel">
+        <div class="card">
+          <h3>操作：拖动滑块 = 改球的位置和速度</h3>
+          <div class="row"><label>球 x</label><input type="range" id="e_bx" min="20" max="210" step="1"><span class="val" id="e_bxv"></span></div>
+          <div class="row"><label>球 y</label><input type="range" id="e_by" min="5" max="175" step="1"><span class="val" id="e_byv"></span></div>
+          <div class="row"><label>球速 vx</label><input type="range" id="e_vx" min="-8" max="8" step="0.1"><span class="val" id="e_vxv"></span></div>
+          <div class="row"><label>球速 vy</label><input type="range" id="e_vy" min="-8" max="8" step="0.1"><span class="val" id="e_vyv"></span></div>
+          <div class="btns">
+            <button data-preset="e1">单测① 平飞球 → (170,90)</button>
+            <button data-preset="e2">单测② 斜向球 → (170,95)</button>
+            <button data-preset="e3">单测③ 背离球 → 无断球点</button>
+            <button data-preset="e4">单测④ 纯横滚 vx=0 → 无断球点</button>
+            <button data-preset="e5">撞墙球（看反射）</button>
+          </div>
+          <div class="anim">
+            <button id="e_play">▶ 让球滚起来</button>
+            <label style="color:var(--dim)"><input type="checkbox" id="e_reflect" checked> 用反射版算断球点（源码 <code>intercept_point</code> 就调这一版）</label>
+            <label style="color:var(--dim)"><input type="checkbox" id="e_reach"> 显示可达性判断（后卫赶不赶得上）</label>
+          </div>
+          <div class="row" id="e_reachbox" style="display:none">
+            <label>后卫位置</label>
+            <input type="range" id="e_dx" min="60" max="215" step="1"><span class="val" id="e_dxv"></span>
+            <input type="range" id="e_dy" min="5" max="175" step="1"><span class="val" id="e_dyv"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>四个闸门（源码 src/defense.cpp:72 起的判定顺序）</h3>
+          <table id="e_gates"></table>
+          <div class="note" id="e_verdict"></div>
+        </div>
+
+        <div class="card">
+          <h3>源码 + 代入当前数值</h3>
+<pre id="e_code"></pre>
+        </div>
+
+        <div class="card">
+          <h3>图上符号</h3>
+          <p class="legend">
+            <i style="background:#fff"></i>球　
+            <i style="background:var(--v)"></i>球速向量 (vx,vy)　
+            <i style="background:#7dd3fc"></i>拦截线 x=170（门前 50cm）<br>
+            <i style="background:#6b7f9e"></i>直线外推（教学第一步）　
+            <i style="background:#ffd479"></i>撞墙反射（★ 源码实际用这版）　
+            <i style="background:#f87171"></i>直线外推会算到场外的部分　
+            <i style="background:var(--pt)"></i>断球点　
+            <i style="background:var(--static)"></i>静态回退点（球-门连线 50cm）
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ② 朝门投影 ================= -->
+  <section id="proj">
+    <div class="wrap">
+      <canvas id="cv2" width="700" height="576"></canvas>
+      <div class="panel">
+        <div class="card">
+          <h3>操作：改球的位置和速度，看门将出不出来</h3>
+          <div class="row"><label>球 x</label><input type="range" id="p_bx" min="115" max="215" step="1"><span class="val" id="p_bxv"></span></div>
+          <div class="row"><label>球 y</label><input type="range" id="p_by" min="5" max="175" step="1"><span class="val" id="p_byv"></span></div>
+          <div class="row"><label>球速 vx</label><input type="range" id="p_vx" min="-8" max="25" step="0.1"><span class="val" id="p_vxv"></span></div>
+          <div class="row"><label>球速 vy</label><input type="range" id="p_vy" min="-25" max="25" step="0.1"><span class="val" id="p_vyv"></span></div>
+          <div class="row"><label>罚球区内</label><input type="range" id="p_opp" min="0" max="3" step="1"><span class="val" id="p_oppv"></span></div>
+          <div class="btns">
+            <button data-preset="p1">慢滚朝门（2cm/帧）</button>
+            <button data-preset="p2">快速朝门（12cm/帧）</button>
+            <button data-preset="p3">贴边墙横滚：快但没威胁</button>
+            <button data-preset="p4">对手埋伏 2 人 → 门将回缩</button>
+            <button data-preset="p5">背离球门（负分量截成 0）</button>
+          </div>
+          <div class="anim"><button id="p_play">▶ 让球滚起来</button></div>
+        </div>
+
+        <div class="card">
+          <h3>投影 = 球速里"朝门"的那一份</h3>
+          <table id="p_tab"></table>
+          <div class="note" id="p_verdict"></div>
+        </div>
+
+        <div class="card">
+          <h3>源码 + 代入当前数值</h3>
+<pre id="p_code"></pre>
+        </div>
+
+        <div class="card">
+          <h3>图上符号</h3>
+          <p class="legend">
+            <i style="background:#fff"></i>球　
+            <i style="background:var(--v)"></i>球速 (vx,vy)　
+            <i style="background:#a78bfa"></i>球→门心 方向　
+            <i style="background:var(--toward)"></i>投影长度 = danger（朝门分量）　
+            <i style="background:#f472b6"></i>门将（按 danger 决定出击深度）
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+   场地与画布
+   ============================================================ */
+const FW=220, FH=180, GOAL_X=220, GOAL_Y=90, GOAL_HALF=20;
+const M={l:40,r:28,t:34,b:40}, CVW=700, CVH=576;
+const SC=Math.min((CVW-M.l-M.r)/FW, (CVH-M.t-M.b)/FH);   // 像素/厘米 ≈ 3.1
+const PX=x=>M.l+x*SC, PY=y=>CVH-M.b-y*SC;
+
+function drawField(g){
+  g.clearRect(0,0,CVW,CVH);
+  g.fillStyle='#0b1220'; g.fillRect(0,0,CVW,CVH);
+  // 场地
+  g.strokeStyle='#31456a'; g.lineWidth=2;
+  g.strokeRect(PX(0),PY(FH),FW*SC,FH*SC);
+  g.beginPath(); g.moveTo(PX(110),PY(0)); g.lineTo(PX(110),PY(FH)); g.stroke();   // 中线
+  g.beginPath(); g.arc(PX(110),PY(90),25*SC,0,Math.PI*2); g.stroke();             // 中圈
+  g.beginPath(); g.arc(PX(110),PY(90),2.5,0,Math.PI*2); g.fillStyle='#31456a'; g.fill();
+  // 门区 50x15 、罚球区 80x35（两侧）
+  g.strokeStyle='#26374f';
+  g.strokeRect(PX(220-50),PY(105),50*SC,30*SC);
+  g.strokeRect(PX(0),PY(105),50*SC,30*SC);
+  g.strokeRect(PX(220-80),PY(107.5),80*SC,35*SC);
+  g.strokeRect(PX(0),PY(107.5),80*SC,35*SC);
+  // 球门（加粗）
+  g.strokeStyle='#8ab4ff'; g.lineWidth=6;
+  g.beginPath(); g.moveTo(PX(220),PY(70)); g.lineTo(PX(220),PY(110)); g.stroke();
+  g.beginPath(); g.moveTo(PX(0),PY(70));   g.lineTo(PX(0),PY(110));   g.stroke();
+  g.lineWidth=2;
+  g.fillStyle='#8ab4ff'; g.font='12px Consolas';
+  g.fillText('蓝队门 x=220', PX(220)-96, PY(0)+18);
+  g.fillText('黄队门 x=0', PX(0)+8, PY(0)+18);
+  g.fillStyle='#41597e'; g.font='11px Consolas';
+  g.fillText('y=180', 4, PY(180)+4); g.fillText('y=0', 4, PY(0)+12);
+  g.fillText('x=110 中线', PX(110)+4, PY(0)+18);
+}
+function arrow(g,x1,y1,x2,y2,color,w=2.5,dash=null){
+  const dx=x2-x1, dy=y2-y1, L=Math.hypot(dx,dy);
+  if(L<1) return;
+  g.save(); g.strokeStyle=color; g.fillStyle=color; g.lineWidth=w;
+  if(dash) g.setLineDash(dash);
+  g.beginPath(); g.moveTo(x1,y1); g.lineTo(x2,y2); g.stroke();
+  g.setLineDash([]);
+  const a=Math.atan2(dy,dx), h=9;
+  g.beginPath(); g.moveTo(x2,y2);
+  g.lineTo(x2-h*Math.cos(a-0.42), y2-h*Math.sin(a-0.42));
+  g.lineTo(x2-h*Math.cos(a+0.42), y2-h*Math.sin(a+0.42));
+  g.closePath(); g.fill(); g.restore();
+}
+function dot(g,x,y,color,r=7,label=null){
+  g.save(); g.beginPath(); g.arc(x,y,r,0,Math.PI*2);
+  g.fillStyle=color; g.fill(); g.strokeStyle='#0b1220'; g.lineWidth=2; g.stroke();
+  if(label){ g.fillStyle=color; g.font='12px Consolas'; g.fillText(label,x+10,y-8); }
+  g.restore();
+}
+function label(g,text,x,y,color='#9fb3d1',font='12px Consolas'){
+  g.save(); g.fillStyle=color; g.font=font; g.fillText(text,x,y); g.restore();
+}
+const f=(n,p=2)=>Number(n).toFixed(p);
+
+/* ============================================================
+   ① 直线外推：与源码一一对应
+   ============================================================ */
+// include/simuro5/defense.hpp:73
+function predictYAtX(x,y,vx,vy,target_x){
+  if(Math.abs(vx)<1e-9) return null;          // 到不了这条竖线
+  const t=(target_x-x)/vx;
+  if(t<0) return null;                        // 时间倒流 = 球在背离
+  return {t, y:y+vy*t};
+}
+// 给 predictYAtX 的结果补上 x（方便画点）
+function predictYAtX2(x,y,vx,vy,target_x){ const r=predictYAtX(x,y,vx,vy,target_x); return r?{...r,x:target_x}:null; }
+// include/simuro5/defense.hpp:88（带一次边墙反射）
+function reflectYAtX(x,y,vx,vy,target_x){
+  if(Math.abs(vx)<1e-9) return null;
+  const tTotal=(target_x-x)/vx;
+  if(tTotal<0) return null;
+  const yEnd=y+vy*tTotal;
+  if(yEnd>=0&&yEnd<=FH) return {t:tTotal,y:yEnd,bounced:false};
+  const wall=(yEnd<0)?0:FH;
+  const tWall=(wall-y)/vy, tRem=tTotal-tWall;
+  return {t:tTotal,y:wall+(-vy)*tRem,bounced:true,wall,tWall,tRem,yEnd};
+}
+// src/situation.cpp:62 静态回退点（球-门连线、距门 50cm）
+function staticPoint(bx,by){
+  const d=Math.hypot(GOAL_X-bx, GOAL_Y-by);
+  if(d<=30) return {x:170,y:90};
+  const t=50/d;
+  return {x:bx+t*(GOAL_X-bx), y:by+t*(GOAL_Y-by)};
+}
+const LINE_X=GOAL_X-50;   // 蓝队：220 + (-1)*50 = 170
+
+const E={bx:100,by:90,vx:3,vy:1.5,reflect:true,reach:false,dx:140,dy:120,play:false,ox:100,oy:90};
+const P={bx:170,by:60,vx:0,vy:4,opp:0,play:false,ox:170,oy:60};
+
+function extEval2(){
+  const speed=Math.hypot(E.vx,E.vy);
+  const toward=E.vx*(GOAL_X-E.bx)>0;
+  const sp=predictYAtX2(E.bx,E.by,E.vx,E.vy,LINE_X);
+  const rf=reflectYAtX(E.bx,E.by,E.vx,E.vy,LINE_X);
+  const st=staticPoint(E.bx,E.by);
+  const gates=[];
+  gates.push(['① 朝门（球朝我家门滚？）', toward,
+    `toward_goal = vx × (220 − 球x) = ${f(E.vx,1)} × ${f(GOAL_X-E.bx,1)} = ${f(E.vx*(GOAL_X-E.bx),2)}${toward?' > 0 → 是':' ≤ 0 → 否'}`
+  ]);
+  gates.push(['② 球速够快（≥3 厘米/帧）', speed>=3,
+    `√(vx²+vy²) = √(${f(E.vx,1)}²+${f(E.vy,1)}²) = ${f(speed)} 厘米/帧 = ${f(speed*40,0)} 厘米/秒`
+  ]);
+  let t3='';
+  let ok3=false;
+  const straight=sp;                                  // 直线版（教学第一步）
+  const refl=rf;                                      // 反射版（源码 intercept_point 实际调用）
+  const bounced=!!(refl&&refl.bounced);
+  const pt=(E.reflect&&refl)?{x:LINE_X,y:refl.y}:(straight?{x:LINE_X,y:straight.y}:null);
+  if(Math.abs(E.vx)<1e-9){ t3='vx≈0 → 球只沿 y 向滚，永远到不了竖线 x=170'; }
+  else{
+    const t=(LINE_X-E.bx)/E.vx;
+    if(t<0){ t3=`t = (170 − ${f(E.bx)}) / ${f(E.vx,1)} = ${f(t)} 帧 < 0 → 球在背离`; }
+    else{
+      ok3=!!pt;
+      const yStraight=E.by+E.vy*t;
+      t3=`t = (170 − ${f(E.bx)}) / ${f(E.vx,1)} = ${f(t)} 帧；`;
+      if(!bounced) t3+=`y = ${f(E.by)} + ${f(E.vy,1)} × ${f(t)} = ${f(yStraight)}（没撞边墙，两版一致）`;
+      else t3+=`直线会算到 y = ${f(yStraight)}（出界）→ 撞 y=${f(refl.wall,0)} 墙（第 ${f(refl.tWall)} 帧）→ 反射后 y = ${f(refl.y)}`
+             +`　【当前用${E.reflect?'反射版（= 源码）':'直线版'}】`;
+    }
+  }
+  gates.push(['③ 能算出交点（源码用反射版）', ok3, t3]);
+  // 可达性
+  let reachInfo=null;
+  if(E.reach){
+    let ok4=false,t4='球没有有效交点 → 无从判断';
+    if(ok3){
+      const ptY=pt.y;
+      const tBall=Math.hypot(LINE_X-E.bx, ptY-E.by)/speed;
+      const tMe=Math.hypot(LINE_X-E.dx, ptY-E.dy)/2.5;
+      ok4=(tMe<=tBall*1.2);
+      t4=`t_ball = ${f(tBall)} 帧；t_me = ${f(tMe)} 帧；判据 t_me ≤ t_ball×1.2 = ${f(tBall*1.2)} → ${ok4?'赶得上，去截':'赶不上，退回静态点'}`;
+      reachInfo={tBall,tMe,ok:ok4};
+    }
+    gates.push(['④ 赶得上（kMySpeed=2.5，余量 1.2）', ok4, t4]);
+  }
+  const finalOk = toward && speed>=3 && ok3 && (reachInfo? reachInfo.ok : true);
+  const finalPt = (reachInfo&&!reachInfo.ok) ? st : (ok3?pt:st);
+  return {speed,toward,sp,rf,st,gates,finalOk,finalPt,reachInfo,ok3,pt,bounced};
+}
+
+function drawExt(){
+  const g=document.getElementById('cv1').getContext('2d');
+  drawField(g);
+  const r=extEval2();
+  // 拦截线
+  g.save(); g.setLineDash([7,6]); g.strokeStyle='#7dd3fc'; g.lineWidth=2;
+  g.beginPath(); g.moveTo(PX(LINE_X),PY(0)); g.lineTo(PX(LINE_X),PY(FH)); g.stroke(); g.restore();
+  label(g,'拦截线 x=170 = 门前 50cm',PX(LINE_X)-150,PY(180)-8,'#7dd3fc');
+  // 静态回退点
+  dot(g,PX(r.st.x),PY(r.st.y),'#94a3b8',6);
+  label(g,`静态点 (${f(r.st.x,1)}, ${f(r.st.y,1)})`,PX(r.st.x)+8,PY(r.st.y)+18,'#94a3b8','11px Consolas');
+  // 直线外推（教学第一步：灰色虚线，永远画出来做对比）
+  if(r.sp){
+    g.save(); g.setLineDash([3,5]); g.strokeStyle='#6b7f9e'; g.lineWidth=2;
+    g.beginPath(); g.moveTo(PX(E.bx),PY(E.by)); g.lineTo(PX(LINE_X),PY(r.sp.y)); g.stroke(); g.restore();
+    if(!r.bounced){
+      dot(g,PX(LINE_X),PY(r.sp.y),'#4ade80',8);
+      label(g,`断球点 (170, ${f(r.sp.y,1)})`,PX(LINE_X)+10,PY(r.sp.y)-10,'#4ade80');
+    }
+  }
+  // 反射版（源码 intercept_point 实际用的）
+  if(r.rf){
+    const wallY=r.rf.wall, wy=r.rf.y, yEnd=r.rf.yEnd;
+    g.save(); g.setLineDash(r.bounced?[6,4]:[3,5]); g.strokeStyle=r.bounced?'#ffd479':'#6b7f9e'; g.lineWidth=2.5;
+    g.beginPath(); g.moveTo(PX(E.bx),PY(E.by));
+    if(!r.rf.bounced){ g.lineTo(PX(LINE_X),PY(wy)); }
+    else{
+      const wxp=E.bx+E.vx*r.rf.tWall;
+      g.lineTo(PX(wxp),PY(wallY)); g.lineTo(PX(LINE_X),PY(wy));
+    }
+    g.stroke(); g.restore();
+    if(r.bounced){
+      dot(g,PX(E.bx+E.vx*r.rf.tWall),PY(wallY),'#ffd479',6);
+      // 不反射会算到场外的那一段（画到画布边缘为止）
+      const yOut=Math.max(8,Math.min(172,yEnd));   // 夹进画布内，免得标签压到坐标轴
+      g.save(); g.setLineDash([2,4]); g.strokeStyle='#f87171'; g.lineWidth=1.6;
+      g.beginPath(); g.moveTo(PX(LINE_X),PY(wy)); g.lineTo(PX(LINE_X),PY(yOut)); g.stroke(); g.restore();
+      label(g,`若只做直线外推：y=${f(yEnd,1)}（场外）`,PX(LINE_X)+10,PY(yOut),'#f87171','11px Consolas');
+      dot(g,PX(LINE_X),PY(wy),'#ffd479',8);
+      label(g,`断球点 (170, ${f(wy,1)})　反射后`,PX(LINE_X)+10,PY(wy)+18,'#ffd479');
+    }
+  }
+  // 球与球速
+  dot(g,PX(E.bx),PY(E.by),'#ffffff',8);
+  arrow(g,PX(E.bx),PY(E.by),PX(E.bx)+E.vx*14,PY(E.by)-E.vy*14,'#ff9f43');
+  label(g,`v=(${f(E.vx,1)}, ${f(E.vy,1)})`,PX(E.bx)+E.vx*14+6,PY(E.by)-E.vy*14,'#ff9f43');
+  // 后卫与可达性
+  if(E.reach){
+    dot(g,PX(E.dx),PY(E.dy),'#f472b6',7);
+    label(g,'后卫',PX(E.dx)+9,PY(E.dy)-9,'#f472b6');
+    if(r.ok3){
+      g.save(); g.setLineDash([4,4]); g.strokeStyle='#f472b6'; g.lineWidth=2;
+      g.beginPath(); g.moveTo(PX(E.dx),PY(E.dy)); g.lineTo(PX(LINE_X),PY(r.pt.y)); g.stroke(); g.restore();
+    }
+  }
+  // 面板
+  document.getElementById('e_gates').innerHTML=
+    `<tr><th>闸门</th><th>结果</th><th>当前数值代入</th></tr>`+
+    r.gates.map(([n,ok,ex])=>`<tr><td>${n}</td><td class="${ok?'ok':'bad'}">${ok?'通过':'不通过'}</td><td>${ex}</td></tr>`).join('');
+  document.getElementById('e_verdict').innerHTML = r.finalOk
+    ? `✅ 最终站位 = 断球点 <b>(${f(r.finalPt.x,1)}, ${f(r.finalPt.y,1)})</b>`
+      + (r.bounced ? `（${E.reflect?'反射版 = 源码实际用的那一版':'⚠️ 你取消了反射版，这只是"直线外推"的结果；源码会得到 (170, '+f(r.rf.y,1)+')'}）` : '')
+    : `⚠️ 有闸门不通过 → 站位退回<b>静态点（球-门连线 50cm）= (${f(r.st.x,1)}, ${f(r.st.y,1)})</b>（图上灰色点）`;
+  // 源码 + 代入
+  const t3=(Math.abs(E.vx)<1e-9)?'—':f((LINE_X-E.bx)/E.vx);
+  const yv=(r.ok3)?f(r.sp.y):'—';
+  const tTotal=(Math.abs(E.vx)<1e-9)?'—':f((LINE_X-E.bx)/E.vx);
+  document.getElementById('e_code').innerHTML =
+`<span class="cm">// include/simuro5/defense.hpp:73  直线外推</span>
+double t = (target_x - x) / vx;   <span class="cm">// ① 走到竖线要几帧</span>
+    <span class="num">→ t = (170 − ${f(E.bx)}) / ${f(E.vx,1)} = ${t3} 帧</span>
+if (t &lt; 0.0) return false;        <span class="cm">// ② 负 = 球在背离这条线</span>
+    <span class="num">→ ${E.vx<0?'触发（球在背离）':'不触发'}</span>
+out_y = y + vy * t;               <span class="cm">// ③ 那时球的 y</span>
+    <span class="num">→ out_y = ${f(E.by)} + ${f(E.vy,1)} × ${t3} = ${yv}${(r.bounced&&r.rf.yEnd<0||r.bounced&&r.rf.yEnd>FH)?'　← 出界了，所以源码改用下面的反射版':''}</span>
+
+<span class="cm">// src/defense.cpp:56  拦截线位置（蓝队 attack_dir = −1）</span>
+double line_x = ctx.our_goal_x() + ctx.attack_dir() * line_dist;
+    <span class="num">→ line_x = 220 + (−1) × 50 = ${LINE_X}</span>
+
+<span class="cm">// src/defense.cpp:82  是否朝门</span>
+double toward_goal = wm.ball.vx * (ctx.our_goal_x() - wm.ball.x);
+    <span class="num">→ ${f(E.vx,1)} × ${f(GOAL_X-E.bx,1)} = ${f(E.vx*(GOAL_X-E.bx),2)} → ${r.toward?'朝门':'背离/横滚'}</span>
+
+<span class="cm">// src/situation.cpp:62  静态回退点（球-门连线、距门 50cm）</span>
+double t = 50.0 / d;   wm.passive_x = bx + t*(gx-bx);   wm.passive_y = by + t*(gy-by);
+    <span class="num">→ d = ${f(Math.hypot(GOAL_X-E.bx,GOAL_Y-E.by))}；t = ${f(50/Math.hypot(GOAL_X-E.bx,GOAL_Y-E.by),3)} → (${f(r.st.x,1)}, ${f(r.st.y,1)})</span>
+
+<span class="cm">// include/simuro5/defense.hpp:88  带一次边墙反射（★ 源码 src/defense.cpp:60 调的就是这一版）</span>
+${r.rf&&r.rf.bounced? `double t_total = (target_x - x) / vx;      <span class="num">→ t_total = ${f(r.rf.t)} 帧（到竖线）</span>
+double y_end = y + vy * t_total;         <span class="num">→ y_end = ${f(r.rf.yEnd,1)} → 出界 ⇒ 走反射分支</span>
+double wall_y = (y_end &lt; 0.0) ? 0.0 : 180.0;   <span class="num">→ wall_y = ${f(r.rf.wall,0)}</span>
+double t_wall = (wall_y - y) / vy;       <span class="num">→ t_wall = ${f(r.rf.tWall)} 帧；t_rem = ${f(r.rf.tRem)} 帧</span>
+out_y = wall_y + (-vy) * t_rem;          <span class="num">→ out_y = ${f(r.rf.wall,0)} + ${f(-E.vy,1)} × ${f(r.rf.tRem)} = ${f(r.rf.y)}　← 断球点 (170, ${f(r.rf.y,1)})</span>
+<span class="cm">// 一句话记忆：撞墙后的落点 = 把直线落点对墙做镜像（${f(r.rf.yEnd,1)} ⇒ ${f(r.rf.y)}）</span>`
+ : `<span class="cm">（球没撞边墙时，两版结果相同，走上面那几行就够了）</span>`}`;
+}
+
+/* ============================================================
+   ② 朝门投影
+   ============================================================ */
+function projEval(){
+  const gx=GOAL_X, gy=GOAL_Y;
+  const dx=gx-P.bx, dy=gy-P.by, d=Math.hypot(dx,dy);
+  const raw=(P.vx*dx + P.vy*dy)/d;
+  const danger=Math.max(0,raw);
+  const speed=Math.hypot(P.vx,P.vy);
+  const theta=(speed>1e-9&&d>1e-9)? Math.acos(Math.max(-1,Math.min(1,raw/speed)))*180/Math.PI : NaN;
+  // 门将深度（src/roles.cpp:419）
+  const kMinSpeed=5, kFast=12, kGuard=10, kPull=20;
+  const frac=Math.max(0,Math.min(1,(danger-kMinSpeed)/(kFast-kMinSpeed)));
+  let depth=kGuard+frac*(80-kGuard);
+  const before=depth;
+  depth=Math.max(kGuard, depth-P.opp*kPull);
+  const gkX=gx-depth;
+  // 投影落足（门心到速度所在直线的垂足）
+  const vv=P.vx*P.vx+P.vy*P.vy;
+  let foot=null;
+  if(vv>1e-9){
+    const t=((gx-P.bx)*P.vx+(gy-P.by)*P.vy)/vv;
+    foot={x:P.bx+t*P.vx, y:P.by+t*P.vy};
+  }
+  return {dx,dy,d,raw,danger,speed,theta,frac,depth,before,gkX,foot};
+}
+function drawProj(){
+  const g=document.getElementById('cv2').getContext('2d');
+  drawField(g);
+  const r=projEval();
+  // 球→门心方向
+  g.save(); g.setLineDash([6,5]); g.strokeStyle='#a78bfa'; g.lineWidth=2;
+  g.beginPath(); g.moveTo(PX(P.bx),PY(P.by)); g.lineTo(PX(GOAL_X),PY(GOAL_Y)); g.stroke(); g.restore();
+  // 门心到速度直线的垂足
+  if(r.foot){
+    g.save(); g.setLineDash([3,4]); g.strokeStyle='#5b6b86'; g.lineWidth=1.6;
+    g.beginPath(); g.moveTo(PX(GOAL_X),PY(GOAL_Y)); g.lineTo(PX(r.foot.x),PY(r.foot.y)); g.stroke();
+    g.restore();
+    // 速度所在的直线（延伸一点）
+    const L=Math.hypot(P.vx,P.vy)||1, ex=P.bx+P.vx/L*120, ey=P.by+P.vy/L*120;
+    g.save(); g.setLineDash([2,5]); g.strokeStyle='#3d4f6b'; g.lineWidth=1.4;
+    g.beginPath(); g.moveTo(PX(P.bx),PY(P.by)); g.lineTo(PX(ex),PY(ey)); g.stroke(); g.restore();
+  }
+  // 球速向量
+  arrow(g,PX(P.bx),PY(P.by),PX(P.bx)+P.vx*13,PY(P.by)-P.vy*13,'#ff9f43',3);
+  label(g,`v = (${f(P.vx,1)}, ${f(P.vy,1)}) = ${f(r.speed)} 厘米/帧`,PX(P.bx)+P.vx*13+8,PY(P.by)-P.vy*13-6,'#ff9f43');
+  // 投影长度：把球速向量投影到「球→门心」方向上，剩下的长度就是 danger。
+  //   画图用的比例尺和球速箭头一致（13 像素 / (厘米/帧)），所以两条长度可直接比。
+  const ux=r.dx/r.d, uy=r.dy/r.d, K=13;
+  const vpx=PX(P.bx)+ux*r.danger*K, vpy=PY(P.by)-uy*r.danger*K;
+  if(r.danger>0.02){
+    g.save(); g.strokeStyle='#22d3ee'; g.lineWidth=7; g.globalAlpha=0.95; g.lineCap='round';
+    g.beginPath(); g.moveTo(PX(P.bx),PY(P.by)); g.lineTo(vpx,vpy); g.stroke(); g.restore();
+    label(g,`danger = ${f(r.danger)} 厘米/帧`,vpx+10,vpy+16,'#22d3ee');
+  } else {
+    label(g,'danger = 0（没有朝门分量）',PX(P.bx)+14,PY(P.by)+22,'#22d3ee');
+  }
+  // 门将
+  const gkx=r.gkX, gky=GOAL_Y;
+  g.save(); g.beginPath(); g.arc(PX(gkx),PY(gky),9,0,Math.PI*2);
+  g.fillStyle='#f472b6'; g.fill(); g.strokeStyle='#0b1220'; g.lineWidth=2; g.stroke(); g.restore();
+  g.save(); g.setLineDash([5,5]); g.strokeStyle='#f472b6'; g.lineWidth=2;
+  g.beginPath(); g.moveTo(PX(GOAL_X),PY(gky)); g.lineTo(PX(gkx),PY(gky)); g.stroke(); g.restore();
+  label(g,`门将出击深度 ${f(r.depth,0)}cm（站位 x=${f(gkx,0)}）`,PX(gkx)-40,PY(gky)+30,'#f472b6');
+  dot(g,PX(P.bx),PY(P.by),'#ffffff',8);
+
+  document.getElementById('p_tab').innerHTML=`
+  <tr><th>量</th><th>算式（源码 include/simuro5/defense.hpp:41）</th><th>当前值</th></tr>
+  <tr><td>球→门心 向量</td><td>(gx−球x, 90−球y)</td><td class="big">(${f(r.dx,1)}, ${f(r.dy,1)})</td></tr>
+  <tr><td>距离 d</td><td>hypot(dx, dy)</td><td class="big">${f(r.d)} cm</td></tr>
+  <tr><td>点积</td><td>vx·dx + vy·dy</td><td class="big">${f(P.vx,1)}×${f(r.dx,1)} + ${f(P.vy,1)}×${f(r.dy,1)} = ${f(P.vx*r.dx+P.vy*r.dy)}</td></tr>
+  <tr><td><b>danger（朝门分量）</b></td><td>max(0, 点积 / d)</td><td class="big">${f(r.raw)} → <b>${f(r.danger)}</b> 厘米/帧 = ${f(r.danger*40,0)} 厘米/秒</td></tr>
+  <tr><td>球速总量 / 夹角 θ</td><td>|v| ；θ = acos(danger/|v|)</td><td class="big">${f(r.speed)} 厘米/帧 ；θ = ${isNaN(r.theta)?'—':f(r.theta,1)+'°'}</td></tr>
+  <tr><td>frac</td><td>(danger−5)/(12−5) 夹到 [0,1]</td><td class="big">${f(r.frac,3)}</td></tr>
+  <tr><td>depth（出击深度）</td><td>10 + frac×(80−10)，再 −埋伏×20，下限 10</td><td class="big">10+${f(r.frac,3)}×70 = ${f(r.before,1)} → ${P.opp>0?`−${P.opp}×20 → `:''}${f(r.depth,1)} cm</td></tr>
+  <tr><td>门将站位 x</td><td>220 − depth</td><td class="big">${f(r.gkX,1)}</td></tr>`;
+
+  let verdict;
+  if(r.danger<=0) verdict='球<b>不朝我方门</b>滚（背离或横滚）→ danger=0 → 门将不出击，贴门线站（depth=10）。';
+  else if(r.danger<5) verdict=`danger=${f(r.danger)} &lt; 5 → frac=0 → 门将<b>贴门线</b>（depth=10）。球的朝向威胁不大，出击反而丢位置。`;
+  else if(r.danger<12) verdict=`danger=${f(r.danger)} 在 5~12 之间 → 门将按比例前压到 <b>${f(r.depth,1)}cm</b>，提前封射门角度。`;
+  else verdict=`danger=${f(r.danger)} ≥ 12 → frac=1 → 门将<b>压到罚球区前缘</b>（80cm${P.opp>0?`，但被 ${P.opp} 名埋伏者拉回 ${f(r.depth,1)}cm`:''}）。`;
+  if(P.opp>0) verdict+=`　⚠️ 罚球区内有 ${P.opp} 人埋伏 → 每人对 depth 扣 20cm（防回敲打空门）。`;
+  document.getElementById('p_verdict').innerHTML=verdict;
+
+  document.getElementById('p_code').innerHTML=
+`<span class="cm">// include/simuro5/defense.hpp:41  朝门投影</span>
+double dx = gx - wm.ball.x, dy = 90.0 - wm.ball.y;   <span class="cm">// 球 → 门心</span>
+    <span class="num">→ (${f(r.dx,1)}, ${f(r.dy,1)})；d = ${f(r.d)}</span>
+double d  = std::hypot(dx, dy);
+if (d &lt; 1e-6) return 0.0;
+return std::max(0.0, (wm.ball.vx*dx + wm.ball.vy*dy) / d);
+    <span class="num">→ (${f(P.vx,1)}×${f(r.dx,1)} + ${f(P.vy,1)}×${f(r.dy,1)}) / ${f(r.d)} = ${f(r.raw)}  → max(0, ·) = ${f(r.danger)}</span>
+<span class="cm">// 直观理解：把球速向量"投影"到 球→门心 这条方向上，剩下的长度就是 danger。</span>
+
+<span class="cm">// src/roles.cpp:419  门将出击深度</span>
+double frac  = clamp((danger - 5) / (12 - 5), 0, 1);              <span class="cm">// kMinSpeed=5, kFastShotSpeed=12</span>
+    <span class="num">→ (${f(r.danger)} − 5) / 7 = ${f((r.danger-5)/7,3)} → clamp → ${f(r.frac,3)}</span>
+double depth = 10 + frac * (80 - 10);                            <span class="cm">// kGuardDist=10，罚球区前缘 80cm</span>
+    <span class="num">→ 10 + ${f(r.frac,3)} × 70 = ${f(r.before,1)} cm</span>
+depth = std::max(10.0, depth - opp_in_box * 20.0);               <span class="cm">// kOppPullback=20</span>
+    <span class="num">→ max(10, ${f(r.before,1)} − ${P.opp}×20) = ${f(r.depth,1)} cm → 站位 x = 220 − ${f(r.depth,1)} = ${f(r.gkX,1)}</span>`;
+}
+
+/* ============================================================
+   UI 绑定
+   ============================================================ */
+function bindRange(id,get,set,fmt,after){
+  const el=document.getElementById(id), out=document.getElementById(id+'v');
+  el.value=get(); out.textContent=fmt(get());
+  el.oninput=()=>{ set(parseFloat(el.value)); out.textContent=fmt(get()); after&&after(); };
+  return {el,out,fmt};
+}
+const fmt1=n=>f(n,1);
+const ctrls=[];
+function syncAll(){
+  ['e_bx','e_by','e_vx','e_vy','e_dx','e_dy'].forEach(id=>{
+    const key=id.slice(2), el=document.getElementById(id);
+    el.value=E[key]; document.getElementById(id+'v').textContent=(id==='e_bx'||id==='e_by'||id==='e_dx'||id==='e_dy')?f(E[key],0):f(E[key],1);
+  });
+  ['p_bx','p_by','p_vx','p_vy','p_opp'].forEach(id=>{
+    const key=id.slice(2), el=document.getElementById(id);
+    el.value=P[key]; document.getElementById(id+'v').textContent=(id==='p_bx'||id==='p_by'||id==='p_opp')?f(P[key],0):f(P[key],1);
+  });
+  document.getElementById('e_reflect').checked=E.reflect;
+  document.getElementById('e_reach').checked=E.reach;
+  document.getElementById('e_reachbox').style.display=E.reach?'flex':'none';
+  document.getElementById('e_play').textContent=E.play?'⏸ 暂停':'▶ 让球滚起来';
+  document.getElementById('p_play').textContent=P.play?'⏸ 暂停':'▶ 让球滚起来';
+}
+bindRange('e_bx',()=>E.bx,v=>{E.bx=v},n=>f(n,0),syncAll);
+bindRange('e_by',()=>E.by,v=>{E.by=v},n=>f(n,0),syncAll);
+bindRange('e_vx',()=>E.vx,v=>{E.vx=v},n=>f(n,1),syncAll);
+bindRange('e_vy',()=>E.vy,v=>{E.vy=v},n=>f(n,1),syncAll);
+bindRange('e_dx',()=>E.dx,v=>{E.dx=v},n=>f(n,0),syncAll);
+bindRange('e_dy',()=>E.dy,v=>{E.dy=v},n=>f(n,0),syncAll);
+bindRange('p_bx',()=>P.bx,v=>{P.bx=v},n=>f(n,0),syncAll);
+bindRange('p_by',()=>P.by,v=>{P.by=v},n=>f(n,0),syncAll);
+bindRange('p_vx',()=>P.vx,v=>{P.vx=v},n=>f(n,1),syncAll);
+bindRange('p_vy',()=>P.vy,v=>{P.vy=v},n=>f(n,1),syncAll);
+bindRange('p_opp',()=>P.opp,v=>{P.opp=v},n=>f(n,0),syncAll);
+document.getElementById('e_reflect').onchange=e=>{E.reflect=e.target.checked;syncAll();};
+document.getElementById('e_reach').onchange=e=>{E.reach=e.target.checked;syncAll();};
+document.getElementById('e_play').onclick=()=>{E.play=!E.play;syncAll();};
+document.getElementById('p_play').onclick=()=>{P.play=!P.play;syncAll();};
+
+const presets={
+  e1:{bx:100,by:90,vx:3,vy:0},                 // 单测① 期望 (170,90)
+  e2:{bx:100,by:60,vx:3,vy:1.5},               // 单测② 期望 (170,95)
+  e3:{bx:100,by:90,vx:-3,vy:0},                // 单测③ 背离
+  e4:{bx:100,by:90,vx:0,vy:3},                 // 单测④ 纯 y 向
+  e5:{bx:100,by:20,vx:2.5,vy:-2.5},             // 撞墙：直线算到 y=-50，反射后 y=50
+  p1:{bx:120,by:90,vx:2,vy:0,opp:0},
+  p2:{bx:120,by:90,vx:12,vy:0,opp:0},
+  p3:{bx:170,by:60,vx:0,vy:4,opp:0},           // dangger 应为 2.06
+  p4:{bx:120,by:90,vx:12,vy:0,opp:2},
+  p5:{bx:120,by:90,vx:-6,vy:0,opp:0}
+};
+document.querySelectorAll('[data-preset]').forEach(b=>b.onclick=()=>{
+  const p=presets[b.dataset.preset];
+  if(b.dataset.preset[0]==='e'){ Object.assign(E,p); E.ox=E.bx; E.oy=E.by; if(b.dataset.preset==='e5') {E.reflect=true;} }
+  else { Object.assign(P,p); P.ox=P.bx; P.oy=P.by; }
+  syncAll();
+});
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
+  document.querySelectorAll('section').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); document.getElementById(b.dataset.tab).classList.add('on');
+});
+
+/* ============================================================
+   动画：平台 40 帧/秒 → 每 25ms 走一帧
+   ============================================================ */
+let last=0, acc=0;
+function step(){
+  if(E.play){
+    E.bx+=E.vx; E.by+=E.vy;
+    if(E.by<0){E.by=0;E.vy=-E.vy;} if(E.by>FH){E.by=FH;E.vy=-E.vy;}
+    if(E.bx<0||E.bx>FW||E.by<=0&&E.vy<=0){ E.bx=E.ox; E.by=E.oy; }
+    if(E.bx>=LINE_X-1){ E.bx=E.ox; E.by=E.oy; }
+  }
+  if(P.play){
+    P.bx+=P.vx; P.by+=P.vy;
+    if(P.by<0){P.by=0;P.vy=-P.vy;} if(P.by>FH){P.by=FH;P.vy=-P.vy;}
+    if(P.bx<20||P.bx>218){ P.bx=P.ox; P.by=P.oy; }
+  }
+}
+function loop(ts){
+  if(!last) last=ts;
+  const dt=Math.min(200, ts-last); last=ts;
+  if(E.play||P.play){ acc+=dt; while(acc>=25){ acc-=25; step(); } syncAll(); }
+  const active=document.querySelector('section.on').id;
+  if(active==='ext') drawExt(); else drawProj();
+  requestAnimationFrame(loop);
+}
+
+/* URL 参数：?tab=proj&bx=170&by=60&vx=0&vy=4&opp=0&reflect=1&reach=1 */
+(function init(){
+  const q=new URLSearchParams(location.search);
+  const isProj=(q.get('tab')==='proj');
+  if(isProj) document.querySelectorAll('nav button')[1].click();
+  ['bx','by','vx','vy'].forEach(k=>{
+    if(!q.has(k)) return;
+    if(isProj) P[k]=parseFloat(q.get(k)); else E[k]=parseFloat(q.get(k));
+  });
+  if(isProj&&q.has('opp')) P.opp=parseInt(q.get('opp'));
+  if(q.get('reflect')==='1') E.reflect=true;
+  if(q.get('reach')==='1') E.reach=true;
+  if(q.has('dx')) E.dx=parseFloat(q.get('dx'));
+  if(q.has('dy')) E.dy=parseFloat(q.get('dy'));
+  E.ox=E.bx; E.oy=E.by; P.ox=P.bx; P.oy=P.by;
+  syncAll();
+  drawExt(); drawProj();          // 首帧同步画一次，避免开场空白
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
