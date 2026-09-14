@@ -121,6 +121,15 @@ struct WorldModel {
     // 射门/推进前的"对准尝试"帧数（docs/18 §8）：球一直在动/被抢时不能死等对准，
     //   超过 kShootAlignTimeout 就按当前朝向推（宁可射偏也不能把机会耗掉）。
     int shoot_align_frames = 0;
+    // —— 点球执行期**锁定**的瞄准方向（docs/06 第 66 轮，用户真机实测"太慢+推偏"）——
+    //   实测（16:01 场帧 3596~3628）：瞄准方向每帧重算 → 准备点漂移 → 机器人先退到球后
+    //   23cm、再折返时偏离瞄准线 15~24cm，最后从球的侧上方掠过 → 出球 0.7cm/帧且几乎
+    //   垂直于射门方向，平台判"没开出"把点球重发 3 次。
+    //   锁存规则：点球执行期第一帧算一次，之后方向不再变；in_penalty_exec 转 false 解锁。
+    bool   pen_aim_locked = false;
+    double pen_aim_rot = 0.0;          // 锁定的机头朝向（度）
+    double pen_dir_x = 1.0, pen_dir_y = 0.0;   // 锁定的推球方向（单位向量）
+    double pen_aim_y = 90.0;           // 锁定的瞄准点 y（分侧/诊断用）
 
     // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;

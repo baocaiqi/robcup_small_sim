@@ -565,8 +565,9 @@ constexpr double kPrepDist   = 20.0;
 // 罚点球助跑距离（cm）：出球速度 = 撞球瞬间的机头速度，20cm 助跑只有 ~103cm/s，
 //   40cm 外的点球飞行 ~17 帧 → 门将横移 17cm 就够到（真机 09-13 rlg 帧 2350 球被打偏）。
 constexpr double kPenaltyPrepDist = 15.0;   // 15cm（原 35：真机实证倒车太久会被截）
-// 罚点球时对手进到这个距离内 → 不后退助跑，就地转正立刻推（cm）
-constexpr double kPenaltyNoBackOpp = 45.0;
+// ⚠️ 第 66 轮已删除 kPenaltyNoBackOpp（45cm）：
+//   真机 16:01 场实测对手在 34cm 时**仍然倒了车**（说明这条阈值规则没起作用），
+//   现在改成"点球一律不倒车"（见 run_active 的点球分支），不再依赖对手距离。
 double shoot_prep_dist(const WorldModel &wm) {
     return wm.in_penalty_exec ? kPenaltyPrepDist : kPrepDist;
 }
@@ -585,6 +586,10 @@ static const int kActiveGaTotal  = 18;  // 在门区总时长兜底：平台 20 
 void run_active(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
     const TeamContext &ctx = wm.ctx;
+
+    // 点球瞄准锁（docs/06 第 66 轮）：执行期结束就在下一帧解锁，下次点球重新算方向。
+    //   放在函数最前面 → 任何早退分支都绕不过（放在射门段里会被早退跳过，实测踩过）。
+    if (!wm.in_penalty_exec) wm.pen_aim_locked = false;
 
     // 对方门区停留计数（docs/13 方案 C）：每帧更新，离开门区清零。
     //   口径：人在门区，若 球不在门区 或 球不在脚下(>25cm) → 计"纯停留"。
@@ -718,6 +723,25 @@ void run_active(WorldModel &wm, int id) {
     //   真机（射正率 8% vs 对手 48%）是否值得为此付代价，**必须真机单开一轮验证**，
     //   不能拿 sim 判。到点定向的能力（motion::position_aligned）与单测已就位，随时可接。
     ShootPlan sp = plan_shoot(wm, id);
+    // —— 点球执行期：瞄准方向**锁一次**（docs/06 第 66 轮）——
+    //   为什么：实测真机点球里瞄准方向每帧重算 → 准备点跟着漂移 → 机器人退到球后又折返，
+    //   折返时偏离瞄准线 15~24cm，从球的侧上方掠过把球推偏（出球 0.7cm/帧、方向几乎垂直
+    //   射门方向），平台判定"没开出"连发 3 次点球。
+    //   锁定后执行期内方向恒定，机器人只需要"转正 → 推穿"两件事。
+    if (wm.in_penalty_exec && sp.viable) {
+        if (!wm.pen_aim_locked) {
+            wm.pen_aim_locked = true;
+            wm.pen_aim_rot = sp.aim_rot;
+            wm.pen_dir_x = sp.dir_x;
+            wm.pen_dir_y = sp.dir_y;
+            wm.pen_aim_y = sp.aim_y;
+        } else {
+            sp.aim_rot = wm.pen_aim_rot;
+            sp.dir_x = wm.pen_dir_x;
+            sp.dir_y = wm.pen_dir_y;
+            sp.aim_y = wm.pen_aim_y;
+        }
+    }
     // 射门机会闸门（docs/18 §8）：≤70cm 无条件射（A/B 校准的主力区，别加闸门）；
     //   70~110cm 远射要 quality ≥ kShootNowQ。**远射档已按用户指令开启**
     //   （shoot.cpp `kFarShotEnabled = true`，2026-09-11；sim A/B 反对，数据见 docs/06 第 47 轮）。
@@ -761,29 +785,32 @@ void run_active(WorldModel &wm, int id) {
         //   改成：**沿瞄准线倒车到助跑点**（倒车方向就是助跑方向，机头朝向天然保持），
         //   到位且朝向够准 → 直接冲穿球（35cm 助跑，出球更快、门将来不及横移）。
         if (wm.in_penalty_exec) {
-            // 对手逼近 → **不倒车**（真机 09-13 09:48 场实证）：那场我们倒车 44cm 花 0.6 秒，
-            //   对手趁机从 34cm 逼近到 10cm 把球截走（帧 3485→3537）。助跑换来的球速
-            //   抵不上"丢球"——所以对手在 kPenaltyNoBackOpp 内时：只就地转正，立刻推。
-            double opp_min = 1e9;
-            for (int k = 0; k < PLAYERS_PER_SIDE; ++k)
-                opp_min = std::min(opp_min, dist(wm.opp[k].x, wm.opp[k].y, bx, by));
-            bool urgent = behind && near && opp_min < kPenaltyNoBackOpp;
-            double dd = dist(r.x, r.y, px, py);
-            if (urgent) {
+            // —— docs/06 第 66 轮（用户真机实测"罚球还是太慢"）：**点球一律不倒车** ——
+            //   实测证据（16:01 场帧 3596~3628）：旧逻辑先退到球后 23cm（32 帧 = 0.8 秒），
+            //   折返时机器人一直在 y≈93→113（球在 y=89.8，即偏上 3~24cm），最后从球侧上方
+            //   掠过 → 球被推向底角、出球只有 0.7cm/帧 → 平台判"没开出"，点球重发 3 次。
+            //   旧代码本来有"对手 <kPenaltyNoBackOpp 就不倒车"的规则，但那次对手在 34cm
+            //   却仍然倒了车 ⇒ 不再依赖对手距离：**只要在球后就绝不后退**，只就地转正。
+            if (behind && near) {
                 if (std::fabs(te_head) <= kPrepAngTol) {
-                    ready = true;                                   // 朝向够准 → 立刻推
+                    ready = true;                          // 朝向够准 → 立刻推穿
+                } else if (wm.shoot_align_frames >= kShootAlignTimeout) {
+                    ready = true;                          // 兜底：不再死等（宁可打偏也别重发）
+                    wm.shoot_align_frames = 0;
                 } else {
-                    motion::position_aligned(r, r.x, r.y, sp.aim_rot, 2.0, kPrepAngTol);
-                    return;                                         // 只原地转正，绝不后退
+                    ++wm.shoot_align_frames;
+                    motion::position_aligned(r, r.x, r.y, sp.aim_rot, kPrepPosTol, kPrepAngTol);
+                    return;                                // 只原地转正
                 }
-            } else if (dd < kPrepPosTol * 2.0 && std::fabs(te_head) <= kPrepAngTol) {
-                ready = true;
-            } else if (wm.shoot_align_frames >= kShootAlignTimeout) {
-                ready = true;                 // 超时兜底：宁可打偏也不站着不动
+            } else if (behind) {
+                // 在球后但太远 → 沿瞄准线靠近（这是"走过去"，不是"倒车助跑"）
                 wm.shoot_align_frames = 0;
+                motion::position(r, px, py, motion::TM_PASS);
+                return;
             } else {
-                ++wm.shoot_align_frames;
-                motion::position(r, px, py, motion::TM_PASS);   // 短助跑（15cm）
+                // 站错一侧 → 必须先绕到球后（这个绕行是必要的，不算助跑）
+                wm.shoot_align_frames = 0;
+                motion::position_aligned(r, px, py, sp.aim_rot, kPrepPosTol, kPrepAngTol);
                 return;
             }
         } else if (behind && near) {

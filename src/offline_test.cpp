@@ -1945,8 +1945,11 @@ static int test_penalty_shot_prep() {
     }
     run_active(wm, 1);
     double v = 0.5 * (wm.home[1].vl + wm.home[1].vr);
-    if (std::fabs(v) < 10.0) {
-        printf("FAIL: 罚点球时 ACTIVE 应平移（禁止原地磨）vl=%.1f vr=%.1f\n",
+    double spin = std::fabs(wm.home[1].vl) + std::fabs(wm.home[1].vr);
+    // docs/06 第 66 轮：点球执行期改成"**先就地转正 → 立刻推穿**"（不再倒车助跑），
+    //   所以"平移速度"可以为 0（正在原地转正），但**轮子必须有指令**（禁止原地磨蹭没动作）。
+    if (std::fabs(v) < 10.0 && std::max(std::fabs(wm.home[1].vl), std::fabs(wm.home[1].vr)) < 2.0) {
+        printf("FAIL: 罚点球时 ACTIVE 不做任何动作 vl=%.1f vr=%.1f\n",
                wm.home[1].vl, wm.home[1].vr);
         return 1;
     }
@@ -1977,7 +1980,63 @@ static int test_penalty_shot_prep() {
         printf("FAIL: 常规助跑应 20 got %.1f\n", shoot_prep_dist(wm));
         return 1;
     }
-    printf("penalty shot prep: OK (罚点球助跑 15cm<=20/常规 20cm/对手逼近时不后退只转正即推)\n");
+
+    // ============================================================
+    // docs/06 第 66 轮（用户真机实测"罚球还是太慢"）：
+    //   ① 对手在 **34cm**（真机那次的真实距离）时也必须不后退 —— 旧规则只在 <45 才不倒车，
+    //      但真机那次对手 34cm 却仍然倒了车 ⇒ 现在"点球一律不倒车"，这里锁住这个行为。
+    //   ② 瞄准方向必须**锁存**：第一帧定下后，即使门将移动导致 plan_shoot 的新方案不同，
+    //      执行期用的方向/瞄准点也不能变（否则准备点漂移 → 机器人从球侧上方掠过把球推偏）。
+    // ============================================================
+    {
+        WorldModel w2;
+        w2.ctx = TeamContext{true};                 // 蓝队攻左门(x=0)
+        w2.ball.valid = true;
+        w2.ball.x = 39.4; w2.ball.y = 89.8; w2.ball.vx = 0; w2.ball.vy = 0;
+        w2.in_penalty_exec = true;
+        w2.we_have_ball = true;
+        for (int i = 0; i < 5; ++i) {
+            w2.home[i].x = 120; w2.home[i].y = 90; w2.home[i].rot = 180.0;
+            w2.opp[i].x = 150; w2.opp[i].y = 90;
+            w2.role[i] = ROLE_PASSIVE;
+        }
+        w2.role[1] = ROLE_ACTIVE;
+        // 真机摆位：踢球人在球后 4cm、机头朝左门（-179.9° ≈ 已对准）
+        w2.home[1].x = 43.5; w2.home[1].y = 91.0; w2.home[1].rot = -179.9;
+        // 门将（demo）站 (5.2, 90)：距球 34.2cm —— 真机那次的真实距离
+        w2.opp[0].x = 5.2; w2.opp[0].y = 90.0;
+        double d0 = dist(w2.home[1].x, w2.home[1].y, w2.ball.x, w2.ball.y);
+        for (int f = 0; f < 12; ++f) {
+            run_active(w2, 1);
+            double v = 0.5 * (w2.home[1].vl + w2.home[1].vr);
+            double w = (w2.home[1].vr - w2.home[1].vl) / 10.0;
+            w2.home[1].x += v * 0.025 * std::cos(w2.home[1].rot * SIMURO5_PI / 180.0);
+            w2.home[1].y += v * 0.025 * std::sin(w2.home[1].rot * SIMURO5_PI / 180.0);
+            w2.home[1].rot = normalize_angle(w2.home[1].rot + w * 0.025 * 180.0 / SIMURO5_PI);
+            double d = dist(w2.home[1].x, w2.home[1].y, w2.ball.x, w2.ball.y);
+            if (d > d0 + 1.0) {
+                printf("FAIL: 对手 34cm 时罚点球仍在后退（真机重发 3 次的根因）"
+                       "d=%.1f > d0=%.1f 帧=%d\n", d, d0, f);
+                return 1;
+            }
+        }
+        // ② 瞄准锁存：首帧锁定后，把门将挪走（plan_shoot 会给出不同方案），方向不得变
+        double lx = w2.pen_dir_x, ly = w2.pen_dir_y, lr = w2.pen_aim_rot, lyy = w2.pen_aim_y;
+        w2.opp[0].x = 5.2; w2.opp[0].y = 70.0;      // 门将跑到下角
+        w2.ball.x = 39.4; w2.ball.y = 89.8;
+        run_active(w2, 1);
+        if (std::fabs(w2.pen_dir_x - lx) > 1e-9 || std::fabs(w2.pen_dir_y - ly) > 1e-9 ||
+            std::fabs(w2.pen_aim_rot - lr) > 1e-9 || std::fabs(w2.pen_aim_y - lyy) > 1e-9) {
+            printf("FAIL: 点球执行期瞄准方向漂移了 (dir %.3f,%.3f→%.3f,%.3f)\n",
+                   lx, ly, w2.pen_dir_x, w2.pen_dir_y);
+            return 1;
+        }
+        // 执行结束 → 解锁（下一次点球重新算方向）
+        w2.in_penalty_exec = false;
+        run_active(w2, 1);
+        if (w2.pen_aim_locked) { printf("FAIL: 点球结束后应解锁\n"); return 1; }
+    }
+    printf("penalty shot prep: OK (不倒车/对手34cm也不退/瞄准锁存/解锁/常规助跑20cm)\n");
     return 0;
 }
 
