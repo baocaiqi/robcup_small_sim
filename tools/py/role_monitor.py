@@ -89,6 +89,14 @@ def draw(d, s):
         d.rectangle([6, 6, FIELD_W - 6, H - 6], outline=(255, 60, 60), width=6)
         d.text((20, 20), "⚠️ 我方门区里非门将 2 人以上 → 会被判点球！",
                font=MV.font(22, True), fill=(255, 90, 90))
+    # 我方两人挤在一起（<12cm）预警：挤在一起会互相挡路、也更容易连带犯规
+    near = [(i, j) for i in range(5) for j in range(i + 1, 5)
+            if MV.dist(s["ours"][i][0], s["ours"][i][1],
+                       s["ours"][j][0], s["ours"][j][1]) < 12.0]
+    if near:
+        d.text((20, H - 52), "⚠️ 我方 " + "、".join(
+            f"{MV.ROLE_NAME[i]}+{MV.ROLE_NAME[j]}" for i, j in near) + " 挤在一起（<12cm）",
+            font=MV.font(20, True), fill=(255, 190, 90))
     # 右侧信息栏
     x0 = FIELD_W + 20
     d.text((x0, 30), "Hnnu 实时监视", font=MV.font(28, True), fill=MV.TXT)
