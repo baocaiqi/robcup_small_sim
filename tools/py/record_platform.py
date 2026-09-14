@@ -69,6 +69,18 @@ def top_windows():
     return out
 
 
+def usable(hwnd):
+    """能不能用来录：可见 + 非最小化 + 在屏幕内 + 尺寸合理（幽灵/最小化窗口一律拒绝）"""
+    if not user32.IsWindowVisible(hwnd):
+        return False
+    if user32.IsIconic(hwnd):
+        return False
+    l, t, r, b = rect_of(hwnd)
+    if l < -10000 or t < -10000:
+        return False
+    return (r - l) >= 200 and (b - t) >= 150
+
+
 def rect_of(hwnd):
     r = wt.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -83,6 +95,10 @@ def main():
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "real_match.mp4"))
     ap.add_argument("--scale", type=int, default=1280, help="输出宽度（高度按比例）")
+    ap.add_argument("--wait", type=float, default=0.0,
+                    help="等窗口出现的秒数（0=立刻；平台还没开时给个大值，如 900）")
+    ap.add_argument("--shots", default=None, help="定时存全屏截图的目录（留证据/标定用）")
+    ap.add_argument("--shot-every", type=float, default=15.0, help="全屏截图间隔秒")
     a = ap.parse_args()
 
     if a.list:
@@ -90,13 +106,27 @@ def main():
             print(f"  {w['hwnd']:>10}  {w['title']}")
         return 0
 
-    tgt = None
-    for w in top_windows():
-        if a.window.lower() in w["title"].lower().replace(" ", ""):
-            tgt = w
+    tgt, t_wait = None, time.time() + max(a.wait, 0.0)
+    told = False
+    while True:
+        for w in top_windows():
+            if a.window.lower() not in w["title"].lower().replace(" ", ""):
+                continue
+            if usable(w["hwnd"]):
+                tgt = w
+                break
+            if user32.IsIconic(w["hwnd"]):          # 平台被最小化 → 还原它，否则录不到画面
+                user32.ShowWindow(w["hwnd"], 9)     # SW_RESTORE
+                if not told:
+                    print("  （平台窗口是最小化的，已自动还原以便录制）")
+                    told = True
+        if tgt or time.time() >= t_wait:
             break
+        if int(time.time()) % 10 == 0:
+            print(f"  等窗口“{a.window}”出现…（已等 {int(a.wait - (t_wait - time.time()))}s）", flush=True)
+        time.sleep(1.0)
     if not tgt:
-        print(f"✗ 找不到标题含“{a.window}”的窗口。先启动平台，或用 --list 看标题。")
+        print(f"✗ 等不到标题含“{a.window}”的窗口。先启动平台，或用 --list 看标题。")
         return 2
     l, t, r, b = rect_of(tgt["hwnd"])
     w_px, h_px = r - l, b - t
@@ -116,14 +146,28 @@ def main():
                             stderr=subprocess.DEVNULL)
     print(f"录制 {a.seconds:.0f} 秒 @ {a.fps}fps → {a.out}（Ctrl+C 可提前结束）")
     n = 0
+    next_shot = time.time() + 1.0
+    next_rect = 0.0
     t_end = time.time() + a.seconds
     try:
         while time.time() < t_end:
             t0 = time.time()
+            if time.time() >= next_rect:            # 窗口被拖动/改大小也能跟上
+                r2 = rect_of(tgt["hwnd"])
+                if not usable(tgt["hwnd"]):
+                    print("  窗口消失了，停止录制")
+                    break
+                l, t, r, b = r2
+                next_rect = time.time() + 2.0
             try:
                 im = ImageGrab.grab(bbox=(l, t, r, b))
                 im.convert("RGB").save(proc.stdin, format="JPEG", quality=88)
                 n += 1
+                if a.shots and time.time() >= next_shot:
+                    os.makedirs(a.shots, exist_ok=True)
+                    ImageGrab.grab().save(os.path.join(
+                        a.shots, "t%05.1f.png" % (a.seconds - (t_end - time.time()))))
+                    next_shot = time.time() + max(a.shot_every, 2.0)
             except Exception as e:                      # 窗口被移动/关闭
                 print("  抓帧失败：", e)
                 break

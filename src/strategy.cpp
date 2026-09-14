@@ -132,6 +132,29 @@ void Strategy::run(WorldModel &wm) {
             wm.ga_overstay[i] = 0;
         }
     }
+
+    // 5.6 我方门区"只能有门将"硬闸（见函数注释）：除门将外任何人进小禁区当场顶出去
+    enforce_own_goal_area(wm);
+}
+
+// ============================================================
+// 我方门区"只能有门将"硬闸（docs/06 第 68 轮，用户真机诊断）
+//   实测（09-14 20:46 场，7444 帧逐帧统计）：我方门区里 ≥2 人共 **674 帧 ≈ 全场 9%**，
+//   同一场被判 **9 次点球**（全部"黄方主罚"= 我们违规所致）；而"对方门区 2+ 人"只有 17 帧、
+//   且 9 次点球前 200 帧内一次都没出现 ⇒ 病根是**挤自己的小禁区**，不是进攻时挤对方门区。
+//   规则：门区（球门前 50×30）里非门将的第二个人即违规 → 判对方点球。
+//   与角色无关：无论谁（后卫锚点压线、主攻追球回家…）只要在里面，当场顶到门区前缘外 8cm。
+//   ⚠️ 门将豁免（只有它可以在门区内）；球在门区里也照样顶出（门将负责处理门区内的球）。
+// ============================================================
+void enforce_own_goal_area(WorldModel &wm) {
+    if (!wm.ball.valid) return;
+    const double hold_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 58.0;  // 50 + 8 余量
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {          // 0 号门将豁免
+        RobotState &r = wm.home[i];
+        if (in_goal_area(wm.ctx, r.x, r.y)) {
+            motion::position(r, hold_x, clamp(r.y, 72.5, 107.5), motion::TM_PASS);
+        }
+    }
 }
 
 void Strategy::update_team_state(WorldModel &wm) {

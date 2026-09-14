@@ -40,5 +40,9 @@ private:
     void update_sweeper(WorldModel &wm);
 };
 
+// 我方门区"只能有门将"硬闸（docs/06 第 68 轮）：除 0 号门将外，任何人进我方门区
+//   都被顶到门区前缘外 8cm。独立成函数是为了能单测（不依赖角色决策）。
+void enforce_own_goal_area(WorldModel &wm);
+
 }  // namespace simuro5
 #endif

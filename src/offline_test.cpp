@@ -2127,6 +2127,65 @@ static int test_penalty_spot_detect() {
 }
 
 // ============================================================
+// docs/06 第 68 轮：我方门区"只能有门将"硬闸
+//   真机 09-14 20:46 场：我方门区 ≥2 人 674 帧（≈9%），同场被判 9 次点球 ⇒ 病根在此。
+// ============================================================
+static int test_own_goalarea_guard() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220，门区 x∈[170,220], y∈[75,105]
+    wm.ball.valid = true;
+    wm.ball.x = 190; wm.ball.y = 90;            // 球就在门区里（也要照样把人顶出去）
+    for (int i = 0; i < 5; ++i) { wm.home[i].vl = 0; wm.home[i].vr = 0; wm.home[i].rot = 180.0; }
+    wm.home[0].x = 215; wm.home[0].y = 90;      // 门将在门区里（豁免）
+    wm.home[1].x = 150; wm.home[1].y = 90;      // 主攻在外面（不该被动）
+    wm.home[4].x = 180; wm.home[4].y = 90;      // 后卫挤在门区里（必须被顶出去）
+
+    enforce_own_goal_area(wm);
+
+    // ① 门将豁免：不该被这个硬闸指挥（速度保持 0）
+    if (std::fabs(wm.home[0].vl) > 0.01 || std::fabs(wm.home[0].vr) > 0.01) {
+        printf("FAIL: 门将不应被门区硬闸驱动 (vl=%.1f vr=%.1f)\n", wm.home[0].vl, wm.home[0].vr);
+        return 1;
+    }
+    // ② 门区里的后卫必须被驱动（朝 −x 走，即朝门区外/场内方向）
+    if (std::fabs(wm.home[4].vl) < 1.0 && std::fabs(wm.home[4].vr) < 1.0) {
+        printf("FAIL: 门区里的后卫应被顶出去，实际没动作\n");
+        return 1;
+    }
+    if (wm.home[4].vl + wm.home[4].vr <= 0.0) {
+        printf("FAIL: 顶出方向应朝场内(−x)，实际 vl=%.1f vr=%.1f\n",
+               wm.home[4].vl, wm.home[4].vr);
+        return 1;
+    }
+    // ③ 门区外的人不动
+    if (std::fabs(wm.home[1].vl) > 0.01 || std::fabs(wm.home[1].vr) > 0.01) {
+        printf("FAIL: 门区外的主攻不应被动 (vl=%.1f)\n", wm.home[1].vl);
+        return 1;
+    }
+    // ④ 黄队镜像：己方门区变成 x∈[0,50]
+    {
+        WorldModel w2;
+        w2.ctx = TeamContext{false};
+        w2.ball.valid = true;
+        w2.ball.x = 30; w2.ball.y = 90;
+        for (int i = 0; i < 5; ++i) { w2.home[i].rot = 0.0; }
+        w2.home[0].x = 5; w2.home[0].y = 90;
+        w2.home[2].x = 40; w2.home[2].y = 90;        // 助攻挤在我方门区（黄队门区 x∈[0,50]）
+        enforce_own_goal_area(w2);
+        if (std::fabs(w2.home[2].vl) < 1.0 && std::fabs(w2.home[2].vr) < 1.0) {
+            printf("FAIL: 黄队镜像下门区内的人也应被顶出去\n");
+            return 1;
+        }
+        if (std::fabs(w2.home[0].vl) > 0.01) {
+            printf("FAIL: 黄队门将不应被驱动\n");
+            return 1;
+        }
+    }
+    printf("own goalarea guard: OK (门将豁免/区内被顶出/区外不动/黄队镜像)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 55 轮：门将「门线封堵」单测（真机 15:29 场两个丢球的病因）
 //   球已在门框内轨迹上、马上到线 → 必须抢门线预测落点（贴线 3cm + 预测落点 y）。
 //   其余情形一律让位：背离门 / 会偏出 / 还太远 / 太慢 / 门将已贴球（清球优先）。
@@ -2184,6 +2243,7 @@ int main() {
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
     rc |= test_penalty_aim_offcenter();
+    rc |= test_own_goalarea_guard();
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
