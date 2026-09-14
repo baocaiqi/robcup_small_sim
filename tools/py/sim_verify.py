@@ -90,7 +90,7 @@ def main():
         print("未找到完整场次（SimuroSot5.log 缺失或无 >100s 场次）")
 
     # rlg 侧
-    rlgs = sorted(glob.glob(os.path.join(LOGDIR, '*MyTeam*.rlg')))
+    rlgs = sorted(glob.glob(os.path.join(LOGDIR, '*Hnnu*.rlg')))
     print("\n" + "="*70)
     print("真实平台（完整 rlg 统计，n<5000帧=不完整跳过）")
     print("="*70)

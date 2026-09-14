@@ -17,7 +17,7 @@ from rlg_analyzer import parse_rlg
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 LOGDIR = sys.argv[1] if len(sys.argv) > 1 else r'C:\Strategy'
-LOGS = sorted(glob.glob(os.path.join(LOGDIR, '*MyTeam*.rlg')))
+LOGS = sorted(glob.glob(os.path.join(LOGDIR, '*Hnnu*.rlg')))
 print(f"日志 {len(LOGS)} 场")
 
 CONTACT = 15.0      # 机器人-球接触判定距离 cm

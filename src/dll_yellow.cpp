@@ -25,7 +25,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 
 // ⚠️ 改成你们自己的队名
 STRATEGY4YELLOW_API void SetYellowTeamName(char* teamName) {
-    strcpy(teamName, "MyTeam-Yellow");
+    strcpy(teamName, "Hnnu");   // 用户指令：队伍名称统一为 Hnnu
 }
 
 STRATEGY4YELLOW_API void SetFormerRobots(PlayMode gameState, Robot robots[]) {
