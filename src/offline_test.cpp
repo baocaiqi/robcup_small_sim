@@ -2041,9 +2041,64 @@ static int test_penalty_shot_prep() {
 }
 
 // ============================================================
-// docs/06 第 56 轮：点球"我方主罚"识别单测（真机 16:52 场 9 次点球 0 次去踢）
-//   平台执行期报的 gameState 不是点球态 → 必须靠"球静止在对方罚球点上"识别。
+// docs/06 第 67 轮：罚点球"贴柱兜底"瞄准单测
+//   真机报障"没有偏离、对着门将推球"：点球时门将站 (5.2,90)、距球 34.2cm，
+//   遮挡 ±13.2° > 门张角 ±12.3° ⇒ 净开口 = 0 ⇒ 原逻辑回落成"瞄门中心" = 正对门将。
+//   现在：净开口 <3° 时改瞄门柱内侧 4cm，门将居中则逐次交替选边。
 // ============================================================
+// docs/06 第 67 轮（含一处**更正**）：点球瞄准**本来就偏离门将**
+//   起因：用户真机报障"没有偏离、对着门将推球"，我最初把门张角算成 ±12.3°
+//   （那是球距门 92cm 时的值），据此以为"净开口=0 ⇒ 瞄门中心"。
+//   正确数字：点球处球距门只有 39.4cm ⇒ 门张角 **±26.9°**，门将遮挡 ±13.2°
+//   ⇒ 两侧各留 13.7° 空隙 ⇒ 原"取空隙中心"的瞄准落在 y≈75 或 104（**离门将约 14cm**）。
+//   而且门将遮挡角恒小于门张角的一半（atan2(8,d) < atan2(20,d)）⇒ 净开口**不可能为 0**
+//   ⇒ 曾经设想的"贴柱兜底"是死代码，已撤掉。
+//   本用例把"正常点球瞄准偏离门将"这个事实锁住，防止以后再被误判成瞄准 bug。
+// ============================================================
+static int test_penalty_aim_offcenter() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队攻左门(x=0)，门 y∈[70,110]
+    wm.ball.valid = true;
+    wm.ball.x = 39.4; wm.ball.y = 89.8; wm.ball.vx = 0; wm.ball.vy = 0;
+    wm.in_penalty_exec = true;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 20 + i * 30; }
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 30; }
+
+    // ① 门将站真机实测位置 (5.2,90)（距球 34.2cm）→ 瞄准必须**偏离**门将（约 14cm）
+    wm.opp[0].x = 5.2; wm.opp[0].y = 90.0;
+    ShootPlan p1 = plan_shoot(wm, 1);
+    if (!p1.viable || !p1.penalty) { printf("FAIL: 点球应可射\n"); return 1; }
+    if (std::fabs(p1.aim_y - 90.0) < 10.0) {
+        printf("FAIL: 居中门将时点球瞄准也须偏离门将，实际 aim_y=%.1f\n", p1.aim_y);
+        return 1;
+    }
+    if (p1.aim_y < goal_y_low() || p1.aim_y > goal_y_high()) {
+        printf("FAIL: 点球瞄准出框 aim_y=%.1f\n", p1.aim_y); return 1;
+    }
+    // ② 门将偏下(y=74) → 该瞄上侧；偏上(y=106) → 该瞄下侧（打离门将远的那侧）
+    wm.opp[0].y = 74.0;
+    ShootPlan p2 = plan_shoot(wm, 1);
+    wm.opp[0].y = 106.0;
+    ShootPlan p3 = plan_shoot(wm, 1);
+    if (!(p2.aim_y > 90.0 && p3.aim_y < 90.0)) {
+        printf("FAIL: 应打离门将远的一侧，实际 门将下 aim=%.1f / 门将上 aim=%.1f\n",
+               p2.aim_y, p3.aim_y);
+        return 1;
+    }
+    // ③ 非点球（同一几何）行为不变：可射、penalty=false、瞄准在门框内
+    wm.in_penalty_exec = false;
+    wm.ball.x = 60.0; wm.ball.y = 90.0;         // 距门 60cm（≤70 无条件可射区）
+    wm.opp[0].x = 5.2; wm.opp[0].y = 90.0;
+    ShootPlan p4 = plan_shoot(wm, 1);
+    if (!p4.viable || p4.penalty) { printf("FAIL: 非点球应可射且 penalty=false\n"); return 1; }
+    if (p4.aim_y < goal_y_low() - 0.1 || p4.aim_y > goal_y_high() + 0.1) {
+        printf("FAIL: 非点球瞄准出框 aim_y=%.1f\n", p4.aim_y); return 1;
+    }
+    printf("penalty aim: OK (点球瞄准本就偏离门将/打远侧/非点球不变)\n");
+    return 0;
+}
+
+
 static int test_penalty_spot_detect() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                 // 蓝队：攻左门(x=0)，对方罚球点 x≈39.4
@@ -2128,6 +2183,7 @@ int main() {
     rc |= test_placement_semantics();
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
+    rc |= test_penalty_aim_offcenter();
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();

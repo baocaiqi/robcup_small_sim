@@ -64,6 +64,7 @@ constexpr double kLaneLen    = 30.0;    // 射门路线拦截检查长度 cm
 constexpr double kLaneBlockR = 8.0;     // 拦截者判挡半径（本体 6 + 余量 2）
 constexpr double kWOpen = 0.5, kWDist = 0.3, kWSpeed = 0.2;   // quality 权重
 
+
 // —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
 // 撞墙系数不在这里写死：唯一真值来源是 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()
 constexpr double kBankMaxDist= 260.0;   // 借墙总路程上限 cm（超过则距离项 0）
