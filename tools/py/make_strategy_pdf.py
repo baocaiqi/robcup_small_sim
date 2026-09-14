@@ -5,7 +5,7 @@
 再用 Edge/Chrome 无头打印成 PDF。不依赖任何第三方 Python 库。
 
 用法：python tools/py/make_strategy_pdf.py
-产物：docs/work/Hnnu策略说明书.pdf
+产物：<工作区根目录>/Hnnu策略说明书.pdf
 """
 import base64
 import os
@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_DIR = os.path.join(ROOT, "docs", "work")
+OUT_DIR = ROOT          # 用户要求：产物直接放工作区根目录
 HTML = os.path.join(OUT_DIR, "Hnnu策略说明书.html")
 PDF = os.path.join(OUT_DIR, "Hnnu策略说明书.pdf")
 
