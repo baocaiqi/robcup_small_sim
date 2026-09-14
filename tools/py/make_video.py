@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """make_video.py — 用真机 .rlg 数据 + 卡片动画，生成提交用视频的帧（并尽量直接编码成 mp4）。
 
 为什么这样做：工作区里没有现成的比赛录像文件，但 `.rlg` 里记录着**每一帧 10 台机器人 + 球的真实坐标**
@@ -179,6 +179,23 @@ def pick_highlights(frames, seconds, fps, our_goal=220.0):
     return best, step
 
 
+def _find_ffmpeg():
+    """找可用的 ffmpeg：PATH → C:\\ffmpeg → imageio-ffmpeg 自带的静态版（本机就靠它）"""
+    cands = ["ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe"]
+    try:
+        import imageio_ffmpeg
+        cands.insert(0, imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        pass
+    for c in cands:
+        try:
+            subprocess.run([c, "-version"], capture_output=True, check=True)
+            return c
+        except Exception:
+            pass
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rlg", default=None, help="真机录像（用于实战回放段）")
@@ -186,7 +203,27 @@ def main():
     ap.add_argument("--fps", type=int, default=FPS_DEF)
     ap.add_argument("--limit", type=int, default=0, help="只渲前 N 帧（调试用）")
     ap.add_argument("--formation", default=os.path.join(ROOT, "docs", "work", "formation12.png"))
+    ap.add_argument("--real", default=None,
+                    help="真机**界面录屏** mp4（用 tools/py/record_platform.py 或 Win+Alt+R 录），"
+                         "会放进 play1 段（102~122s）；不传则该段退回数据回放")
     a = ap.parse_args()
+
+    # 真机录像 → 抽帧（用 imageio-ffmpeg 自带的 ffmpeg；抽成 jpg 后才能用 PIL 合成）
+    real_dir = os.path.join(a.out, "realframes")
+    real_frames = []
+    if a.real and os.path.exists(a.real):
+        import shutil as _sh
+        _sh.rmtree(real_dir, ignore_errors=True)
+        os.makedirs(real_dir, exist_ok=True)
+        ff = _find_ffmpeg()
+        if ff:
+            subprocess.run([ff, "-y", "-i", a.real, "-vf", f"fps={a.fps},scale=1280:-2",
+                            "-q:v", "3", os.path.join(real_dir, "%05d.jpg")],
+                           capture_output=True, check=False)
+            real_frames = sorted(glob.glob(os.path.join(real_dir, "*.jpg")))
+            print(f"真机录像抽帧：{len(real_frames)} 帧 ← {os.path.basename(a.real)}")
+        if not real_frames:
+            print("⚠️ 真机录像抽帧失败（没有 ffmpeg？），play1 退回数据回放")
 
     fr_dir = os.path.join(a.out, "frames")
     os.makedirs(fr_dir, exist_ok=True)
@@ -200,12 +237,14 @@ def main():
     form_img = Image.open(a.formation).convert("RGB").resize((FIELD_W, H)) \
         if os.path.exists(a.formation) else None
 
-    total_sec = 170.0
+    total_sec = 158.0      # 去掉片尾"谢谢评委"段后 2:38（仍在 2~3 分钟内）
     total = int(total_sec * a.fps)
     if a.limit:
         total = min(total, a.limit)
 
     # —— 各段（秒）：与 docs/work/视频讲解稿.md 的时间轴一致 ——
+    #   play1 = **真机实测录像**（用 --real 传入你录的 mp4；没传则退回数据回放）
+    #   play2 = 真机 .rlg 数据回放（带角色标注）
     SEG = [
         ("title",   0.0,  12.0),
         ("frame",  12.0,  38.0),
@@ -215,7 +254,6 @@ def main():
         ("play1", 102.0,  20.0),
         ("play2", 122.0,  20.0),
         ("disc",  142.0,  16.0),
-        ("end",   158.0,  12.0),
     ]
 
     def seg_at(t):
@@ -301,7 +339,17 @@ def main():
             else:
                 panel(d, ["（未找到 docs/work/formation12.png）"], title="12 态摆位")
         elif name in ("play1", "play2"):
-            if frames_rlg:
+            if name == "play1" and real_frames:
+                # 真机界面录屏：等比缩放到 1280 宽后居中贴入（上下留底色，不变形）
+                im = Image.open(real_frames[min(int(u * len(real_frames)), len(real_frames) - 1)])
+                im = im.convert("RGB")
+                k = min(W / im.width, H / im.height)
+                im2 = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))))
+                img.paste(im2, ((W - im2.width) // 2, (H - im2.height) // 2))
+                d.rectangle([0, H - 62, W, H], fill=(8, 12, 20))
+                d.text((24, H - 50), "真机实测录像：平台实时画面（WorldModel 球场窗口）",
+                       font=font(21, True), fill=TXT)
+            elif frames_rlg:
                 base = hl_start + (0 if name == "play1" else int(20.0 * hl_step))
                 fi = int(base + u * 20.0 * hl_step)
                 blue, yel, ball, gs = frames_rlg[min(fi, len(frames_rlg) - 1)]
@@ -344,20 +392,7 @@ def main():
     print(f"帧已写入 {fr_dir}")
 
     # —— 编码 ——
-    ff = None
-    cands = ["ffmpeg", r"C:\ffmpeg\bin\ffmpeg.exe"]
-    try:                       # imageio-ffmpeg 自带的静态 ffmpeg（本机就靠它，pip 装的）
-        import imageio_ffmpeg
-        cands.insert(0, imageio_ffmpeg.get_ffmpeg_exe())
-    except Exception:
-        pass
-    for c in cands:
-        try:
-            subprocess.run([c, "-version"], capture_output=True, check=True)
-            ff = c
-            break
-        except Exception:
-            pass
+    ff = _find_ffmpeg()
     mp4 = os.path.join(ROOT, "Hnnu策略视频.mp4")   # 成片放工作区根目录（与策略说明书一致）
     gif = os.path.join(a.out, "preview.gif")
     if ff:
