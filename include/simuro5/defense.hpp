@@ -117,13 +117,33 @@ inline bool shot_on_target(const WorldModel &wm) {
 // 门前抢反弹位：对方射门在门框内时，站位到罚球区前缘、预测入球点 y 上下两侧，
 //   准备抢门将扑出/挡出的二次球（防补射）。
 //   y_side：+30 上侧 / -30 下侧（与 assist/midfield 的 ±30 分散一致）。
+// 2026-09-14 升级（用户指令"全部优化"）：
+//   ① 预测换**带边墙反射**版：球贴边墙滚时直线外推会把落点算到场外/错侧 ✗
+//   ② 反弹方向不再盲目 ±30 平分：本平台门将挡球是**径向反弹**（球被弹出方向 ≈
+//      「门将→球」方向）⇒ 球从门将站位的哪一侧来，就往哪一侧弹 ⇒ 落点加一个偏向
+//   ③ 落点若已被对手（补射者）占住 ⇒ 往空档侧让开 20cm
 inline void rebound_point(const WorldModel &wm, double y_side, double &x, double &y) {
     const TeamContext &ctx = wm.ctx;
     double y_at_goal = 90.0;
-    predict_y_at_x(wm.ball.x, wm.ball.y, wm.ball.vx, wm.ball.vy,
-                   ctx.our_goal_x(), y_at_goal);
-    x = ctx.our_goal_x() + ctx.attack_dir() * 80.0;   // 罚球区前缘
-    y = clamp(y_at_goal + y_side, 72.5, 107.5);
+    if (!predict_y_at_x_reflect(wm.ball.x, wm.ball.y, wm.ball.vx, wm.ball.vy,
+                                ctx.our_goal_x(), y_at_goal))
+        y_at_goal = wm.ball.y;                        // 球不朝门：退化成按当前 y
+    // 门将 = 离己方门线最近的对手
+    double gk_y = 90.0, gk_best = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = std::fabs(wm.opp[i].x - ctx.our_goal_x());
+        if (d < gk_best) { gk_best = d; gk_y = wm.opp[i].y; }
+    }
+    double miss = y_at_goal - gk_y;                    // >0 = 球从门将上侧擦过
+    double bias = (std::fabs(miss) < 5.0) ? 0.0 : ((miss > 0.0) ? 1.0 : -1.0);
+    x = ctx.our_goal_x() + ctx.attack_dir() * 80.0;    // 罚球区前缘
+    y = clamp(y_at_goal + y_side + bias * 8.0, 72.5, 107.5);
+    // 对手补射者已在落点附近 → 往空档侧让开
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (dist(wm.opp[i].x, wm.opp[i].y, x, y) < 25.0) {
+            y = clamp((wm.opp[i].y >= y) ? y - 20.0 : y + 20.0, 72.5, 107.5);
+        }
+    }
 }
 
 // 抢反弹位的最小朝门速度(cm/帧)：低于此视为慢球/带球，不抢反弹——

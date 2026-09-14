@@ -1686,6 +1686,70 @@ static int test_possession_source() {
 }
 
 // ============================================================
+// 2026-09-14：抢反弹位三合一升级 + 二抢一封推进方向 单测
+// ============================================================
+static int test_rebound_and_doubleteam() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                  // 蓝队，己方门 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 100 + i; wm.opp[i].y = 30 + i * 20;   // 先都放远处（不是门将）
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.role[i] = ROLE_ASSIST;
+    }
+    // ① 反射版预测：球朝下边墙滚（直线会算到场外 → 反射后应仍在场内）
+    wm.ball.x = 150; wm.ball.y = 20; wm.ball.vx = 2.0; wm.ball.vy = -2.0;
+    wm.opp[0].x = 218; wm.opp[0].y = 90;         // 门将
+    double rx = 0, ry = 0;
+    rebound_point(wm, 30.0, rx, ry);
+    if (ry < 70.0 || ry > 110.0) { printf("FAIL: 反弹位 y 应在门框内 got %.1f\n", ry); return 1; }
+    if (std::fabs(rx - 140.0) > 0.5) { printf("FAIL: 反弹位 x 应为罚球区前缘 140 got %.1f\n", rx); return 1; }
+    // ② 偏向：球落点(反射后)在门将上侧 → 落点应比"无偏向"更高
+    wm.ball.x = 150; wm.ball.y = 100; wm.ball.vx = 5.0; wm.ball.vy = 0.0;
+    double rx2 = 0, ry2 = 0;
+    rebound_point(wm, 0.0, rx2, ry2);
+    wm.opp[0].y = 90;
+    double rx3 = 0, ry3 = 0;
+    wm.ball.y = 104;                             // 落点在门将上侧
+    rebound_point(wm, 0.0, rx3, ry3);
+    wm.ball.y = 76;                              // 落点在门将下侧 → 偏向相反
+    double rx4 = 0, ry4 = 0;
+    rebound_point(wm, 0.0, rx4, ry4);
+    if (!(ry3 > ry4)) { printf("FAIL: 上侧来球反弹位应更高 ry3=%.1f ry4=%.1f\n", ry3, ry4); return 1; }
+    (void)ry2; (void)rx2;
+    // ③ 对手补射者占住落点 → 让开 20cm
+    wm.ball.x = 150; wm.ball.y = 100; wm.ball.vx = 5.0; wm.ball.vy = 0.0;
+    double a_x = 0, a_y = 0;
+    rebound_point(wm, 0.0, a_x, a_y);
+    wm.opp[1].x = a_x; wm.opp[1].y = a_y;        // 对手正站我们落点
+    double b_x = 0, b_y = 0;
+    rebound_point(wm, 0.0, b_x, b_y);
+    if (std::fabs(b_y - a_y) < 15.0) { printf("FAIL: 落点被占应让开(差 %.1f)\n", std::fabs(b_y - a_y)); return 1; }
+
+    // ④ 二抢一：持球者推进方向决定夹抢点（动 → 站他前面；静 → 站门侧）
+    wm.threat_level = 0.9;
+    wm.sweeper_id = -1;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) { wm.opp[i].x = 60; wm.opp[i].y = 90; wm.opp_vx[i] = 0; wm.opp_vy[i] = 0; }
+    wm.ball.x = 60; wm.ball.y = 90;              // 持球者=opp[0]，离球 0cm（<15 判定）
+    wm.opp[0].x = 60; wm.opp[0].y = 60;          // 离门 160cm ✗ >100 → 不夹抢
+    double dx2 = 0, dy2 = 0;
+    if (double_team_point(wm, 1, dx2, dy2)) { printf("FAIL: 离门太远不该夹抢\n"); return 1; }
+    wm.opp[0].x = 180; wm.opp[0].y = 90;         // 离门 40cm（<45 才允许第二人进禁区协防）
+    wm.ball.x = 180; wm.ball.y = 90;
+    wm.home[1].x = 150; wm.home[1].y = 90;       // 我去夹（最近）
+    wm.home[2].x = 60;  wm.home[2].y = 90;       // 队友更远 → 不抢我的活
+    wm.role[2] = ROLE_MIDFIELD;
+    wm.opp_vx[0] = 0.0; wm.opp_vy[0] = 3.0;      // 持球者向上推进
+    if (!double_team_point(wm, 1, dx2, dy2)) { printf("FAIL: 门前持球应夹抢\n"); return 1; }
+    if (!(dy2 > 90.0)) { printf("FAIL: 持球者向上推进时夹抢点应在其前方 y>90 got %.1f\n", dy2); return 1; }
+    wm.opp_vx[0] = 0.0; wm.opp_vy[0] = 0.0;      // 静止 → 退回门侧站位
+    double ex = 0, ey = 0;
+    if (!double_team_point(wm, 1, ex, ey)) { printf("FAIL: 静止持球也应夹抢（门侧）\n"); return 1; }
+    if (!(ex > dx2)) { printf("FAIL: 静止时应站门侧（x 更大）got %.1f vs %.1f\n", ex, dx2); return 1; }
+    printf("rebound+doubleteam: OK (反射预测/反弹偏向/补射者让位/二抢一封推进方向)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 58 轮：门将「球外侧禁推」单测（真机 3 场 6 个丢球的共同机制）
 //   球已到门口 + 门将在球的场侧 → 目标必须是"球后 10cm + 侧向 25cm"，
 //   **绝不能落在球的门侧**（那等于自己把球往门里推）。
@@ -1885,6 +1949,7 @@ int main() {
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
     rc |= test_goalie_side_step();
+    rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
     rc |= test_goalie_line_cover();

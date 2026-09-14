@@ -336,8 +336,18 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     dx /= len; dy /= len;                       // 持球者→门心 单位向量
     double nx = -dy, ny = dx;                   // 垂直向量（横向）
     double side = (oy >= 90.0) ? 1.0 : -1.0;    // 偏到持球者所在一侧
-    out_x = ox + dx * mark_dist() + nx * side * kDoubleTeamLateral;
-    out_y = oy + dy * mark_dist() + ny * side * kDoubleTeamLateral;
+    // 2026-09-14 升级：持球者在动 → 封他**当前推进方向**（而不是只站门侧）。
+    //   本平台没有踢球/抢断动作，"抢"只能靠身体顶掉或封角度 ⇒ 夹抢的价值在于
+    //   **逼他变向**；站在他正在前进的路线上最直接（注释口径一致）。
+    double vx = wm.opp_vx[dribbler], vy = wm.opp_vy[dribbler];
+    double vlen = std::hypot(vx, vy);
+    if (vlen > 0.5) {                                  // 有明确推进方向（cm/帧）
+        out_x = ox + (vx / vlen) * mark_dist() + nx * side * kDoubleTeamLateral;
+        out_y = oy + (vy / vlen) * mark_dist() + ny * side * kDoubleTeamLateral;
+    } else {
+        out_x = ox + dx * mark_dist() + nx * side * kDoubleTeamLateral;
+        out_y = oy + dy * mark_dist() + ny * side * kDoubleTeamLateral;
+    }
 
     // 禁区纪律：夹抢点若落入己方门区（小禁区），退到门区前缘外——门区是门将
     //   专属活动区，区域防守者不挤进去；罚球区（大禁区）允许进入（协防合法）。
