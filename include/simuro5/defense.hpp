@@ -20,6 +20,7 @@
 
 #include "simuro5/world_model.hpp"
 #include "simuro5/geometry.hpp"
+#include "simuro5/field_info.hpp"   // ball_wall_rest()/ball_wall_fric()：撞墙实测系数
 
 namespace simuro5 {
 
@@ -79,9 +80,12 @@ inline bool predict_y_at_x(double x, double y, double vx, double vy,
     return true;
 }
 
-// 带边墙反弹的轨迹预测：同 predict_y_at_x，但球中途撞 y=0 / y=180 边墙时
-//   按弹性反射（法向分量反号、切向不变）折返，预测反射后到达 target_x 时的 y。
-//   .rlg 实测：撞墙后法向分量反号（近似弹性、略有衰减），切向基本不变。
+// 带边墙反弹的轨迹预测：同 predict_y_at_x，但球中途撞 y=0 / y=180 边墙时折返，
+//   预测反射后到达 target_x 时的 y。
+//   ⚠️ 2026-09-14 修正（docs/06 第 65 轮）：**不是理想镜面**！118 场真机 rlg 实测
+//     法向恢复 0.66、切向保持 0.81 ⇒ 反射后法向速度砍掉 1/3、切向也降 19%
+//     ⇒ 出射线比镜面预测更"贴墙"。原来按 -vy 折返（法向 ×1.0）会把落点算得离墙偏远，
+//     后卫/门将按它站位就会站偏。系数统一取自 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()。
 //   只处理一次 y 墙反射；多次反射概率低、且断球点本就该保守回退，不做。
 //   供区域防守断球点 intercept_point 用——球朝边线滚时直线外推会算出界，
 //   实际球会弹回来，按反射后轨迹站位才断得到。
@@ -95,11 +99,16 @@ inline bool predict_y_at_x_reflect(double x, double y, double vx, double vy,
         out_y = y_end;
         return true;
     }
-    // 撞 y 墙：反射折返。y_end 出界 ⇒ vy 必非 0（否则 y_end≈y 在界内）
+    // 撞 y 墙：法向反号并乘恢复系数、切向乘保持系数。y_end 出界 ⇒ vy 必非 0。
+    const double kRest = ball_wall_rest(), kFric = ball_wall_fric();
     double wall_y = (y_end < 0.0) ? 0.0 : 180.0;
     double t_wall = (wall_y - y) / vy;            // 到达墙的时间
-    double t_rem  = t_total - t_wall;             // 反射后剩余时间（vx 不变）
-    out_y = wall_y + (-vy) * t_rem;               // 反射后 vy' = -vy
+    double x_wall = x + vx * t_wall;              // 撞墙点
+    double vx2 = vx * kFric, vy2 = -vy * kRest;   // 反射后的速度分量
+    if (std::fabs(vx2) < 1e-9) return false;
+    double t_rem = (target_x - x_wall) / vx2;     // 反射后还要走多久（vx2 与 vx 同号）
+    if (t_rem < 0.0) return false;
+    out_y = wall_y + vy2 * t_rem;
     return true;
 }
 

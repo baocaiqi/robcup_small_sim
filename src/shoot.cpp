@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // shoot.cpp — 射门决策（docs/18 §8：机会质量驱动的动态射程）
 //              + 借墙射门（bank shot，docs/06 第 65 轮，用户 2026-09-14 指令）
 //
@@ -65,8 +65,7 @@ constexpr double kLaneBlockR = 8.0;     // 拦截者判挡半径（本体 6 + �
 constexpr double kWOpen = 0.5, kWDist = 0.3, kWSpeed = 0.2;   // quality 权重
 
 // —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
-constexpr double kBankRest   = 0.66;    // 法向恢复系数（实测中位 0.66/0.69/0.67/0.56）
-constexpr double kBankFric   = 0.81;    // 切向保持（实测中位 0.78~0.81）
+// 撞墙系数不在这里写死：唯一真值来源是 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()
 constexpr double kBankMaxDist= 260.0;   // 借墙总路程上限 cm（超过则距离项 0）
 constexpr double kBankCornerFull = 40.0;// 反弹点离对方门线多远算满分（否则像"蹭门柱"）
 constexpr double kBankCornerMin  = 12.0;// 反弹点离门线近于此 → 直接否决
@@ -228,6 +227,8 @@ ShootPlan build_bank(const WorldModel &wm) {
 
     const double tys[3]   = {goal_y_low() + 4.0, 90.0, goal_y_high() - 4.0};
     const double walls[2] = {0.0, TeamContext::FIELD_WIDTH};
+    // 撞墙实测系数（field_info.hpp，唯一真值来源）：切向保持 kFric、法向恢复 kRest
+    const double kFric = ball_wall_fric(), kRest = ball_wall_rest();
 
     ShootPlan best;
     double best_q = 0.0;
@@ -239,8 +240,8 @@ ShootPlan build_bank(const WorldModel &wm) {
             const double ty = tys[ti];
 
             // ① 反射点闭式解
-            const double c1 = kBankFric * (ty - wall);
-            const double c2 = kBankRest * (wall - by);
+            const double c1 = kFric * (ty - wall);
+            const double c2 = kRest * (wall - by);
             const double den = c1 - c2;
             if (std::fabs(den) < 1e-9) continue;
             const double rx = (c1 * bx - c2 * ogx) / den;
@@ -299,7 +300,7 @@ ShootPlan build_bank(const WorldModel &wm) {
             const double q_corner = clamp(corner_d / kBankCornerFull, 0.0, 1.0);
             const double q_bounce = q_inc * q_corner;
             // 撞墙保持率按实际入射方向算：|o| / |i|
-            const double retain = std::hypot(ix * kBankFric, iy * kBankRest) / len_in;
+            const double retain = std::hypot(ix * kFric, iy * kRest) / len_in;
             const double v_along = std::max(0.0, wm.ball.vx * ux + wm.ball.vy * uy);
             const double q_spd = clamp(v_along * retain / kSpeedFull, 0.0, 1.0);
             const double q = kBankWOpen * q_open + kBankWDist * q_dist +

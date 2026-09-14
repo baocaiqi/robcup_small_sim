@@ -214,6 +214,29 @@ def cmd_revert():
     return 0
 
 
+def cmd_redeploy():
+    """已打补丁时：按**当前源码**重建变体 DLL 并重新部署（源码可能又改了别的东西）。
+
+    为什么需要它：黑匣子是常驻仪器，改完策略（如借墙射门）后要让它带上新代码；
+      原来只能 `--revert` 再 `--apply --deploy`（两次全量构建），现在一条命令。
+    """
+    if not applied():
+        print("还没打补丁 → 走 --apply --deploy")
+        return cmd_apply(True)
+    if not build():
+        print("✗ 构建失败")
+        return 1
+    os.makedirs(VAR_DIR, exist_ok=True)
+    var = os.path.join(VAR_DIR, "Strategy4Blue_blackbox.dll")
+    shutil.copy2(dll_src(), var)
+    os.makedirs(r"C:\Strategy\backup_20260912", exist_ok=True)
+    bak = rf"C:\Strategy\backup_20260912\Strategy4Blue_before_redeploy_{time.strftime('%Y%m%d_%H%M')}.dll"
+    shutil.copy2(DEPLOY, bak)
+    shutil.copy2(var, DEPLOY)
+    print(f"✓ 已按当前源码重建并部署（{os.path.getsize(var)}B，备份 {os.path.basename(bak)}）")
+    return 0
+
+
 def cmd_check():
     print("已打补丁" if applied() else "未打补丁")
     print(f"  备份: {len(os.listdir(BAK_DIR)) if os.path.isdir(BAK_DIR) else 0} 个")
@@ -227,11 +250,14 @@ def main():
     ap.add_argument("--revert", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--deploy", action="store_true")
+    ap.add_argument("--redeploy", action="store_true", help="已打补丁时按当前源码重建并重新部署")
     a = ap.parse_args()
     if a.apply:
         return cmd_apply(a.deploy)
     if a.revert:
         return cmd_revert()
+    if a.redeploy:
+        return cmd_redeploy()
     return cmd_check()
 
 

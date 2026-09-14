@@ -136,14 +136,20 @@ static int test_defense_intercept() {
     wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 3.0;
     if (intercept_point(wm, 50.0, ix, iy)) { printf("FAIL: 纯 y 向球不应有断球点\n"); return 1; }
 
-    // 边界反弹（新增）：球朝底/顶边线滚，直线会出界，反射后应折返到界内
+    // 边界反弹：球朝底/顶边线滚，直线会出界，反射后应折返到界内。
+    // ⚠️ 2026-09-14 修正（docs/06 第 65 轮）：反射**不是理想镜面**——实测法向 0.66、切向 0.81，
+    //    出射线比镜面更贴墙：同样的输入镜面会给 40 / 140，实测系数给 32.6 / 147.4。
     double ry = 0.0;
-    predict_y_at_x_reflect(100.0, 20.0, 2.0, -2.0, 160.0, ry);   // 撞底墙 -> y=40
-    if (fabs(ry - 40.0) > 0.5) { printf("FAIL: 撞底墙反射 y=%.1f (应 40)\n", ry); return 1; }
-    predict_y_at_x_reflect(100.0, 160.0, 2.0, 2.0, 160.0, ry);   // 撞顶墙 -> y=140
-    if (fabs(ry - 140.0) > 0.5) { printf("FAIL: 撞顶墙反射 y=%.1f (应 140)\n", ry); return 1; }
+    predict_y_at_x_reflect(100.0, 20.0, 2.0, -2.0, 160.0, ry);   // 撞底墙
+    if (fabs(ry - 32.6) > 0.3) {
+        printf("FAIL: 撞底墙反射(实测系数) y=%.1f 应 32.6（镜面才会给 40）\n", ry); return 1;
+    }
+    predict_y_at_x_reflect(100.0, 160.0, 2.0, 2.0, 160.0, ry);   // 撞顶墙
+    if (fabs(ry - 147.4) > 0.3) {
+        printf("FAIL: 撞顶墙反射(实测系数) y=%.1f 应 147.4（镜面才会给 140）\n", ry); return 1;
+    }
 
-    printf("defense intercept: OK (平飞/斜向/背离/纯y向)\n");
+    printf("defense intercept: OK (平飞/斜向/背离/纯y向/实测系数反弹)\n");
     return 0;
 }
 
@@ -741,7 +747,7 @@ static int test_bank_shot() {
             return 1;
         }
         // 出射方向必须指向瞄准点：用实测系数算 out，再与「反弹点→目标」做叉积（应共线）
-        double ox = p.dir_x * 0.81, oy = -p.dir_y * 0.66;
+        double ox = p.dir_x * ball_wall_fric(), oy = -p.dir_y * ball_wall_rest();
         double tx = ctx.opp_goal_x() - p.bounce_x, ty = p.aim_y - p.bank_wall;
         double cross = ox * ty - oy * tx;
         double sc = std::hypot(ox, oy) * std::hypot(tx, ty);

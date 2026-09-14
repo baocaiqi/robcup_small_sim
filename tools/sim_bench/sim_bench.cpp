@@ -59,8 +59,8 @@ static constexpr double kAccel     = 300.0;        // 轮速最大加速度 cm/s
                                                    //   真实平台有惯性：机器人不能瞬间 0→112，
                                                    //   否则追球过冲把球铲向错误方向（本 sim 主要失真源）
 static constexpr double kBallDecay = 0.985;        // 球每帧摩擦衰减（校准: 真实rlg高速段 0.986-0.994/帧，一致）
-static constexpr double kWallRest  = 0.45;         // 撞墙反弹恢复系数（校准: 真实rlg x=0.458 y=0.449）
-static constexpr double kWallFric  = 0.90;         // 撞墙时平行分量衰减（墙摩擦）：球贴墙滑动会减速
+static constexpr double kWallRest  = 0.66;         // 法向恢复：实测 118 场 rlg 中位（docs/06 第65轮）
+static constexpr double kWallFric  = 0.81;         // 切向保持：实测中位（旧值 0.90 与实测不符）
                                                    //   ——否则球沿墙滑 vy 不降，一路滑进角落/门角（2007论文怪癖: 球卡四角）
 static constexpr double kContact   = 5.5;          // 球-机器人最小分离 cm（防球嵌进机器人身体）
 static constexpr double kCarryR    = 9.0;          // 携带区半径 cm：略大于策略"球后 8cm 推球点"，
