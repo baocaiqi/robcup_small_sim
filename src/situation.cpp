@@ -16,7 +16,26 @@ Situation SituationModule::analyze(const WorldModel &wm) {
         our_min = std::min(our_min, dist(bx, by, wm.home[i].x, wm.home[i].y));
         opp_min = std::min(opp_min, dist(bx, by, wm.opp[i].x, wm.opp[i].y));
     }
-    sit.we_have_ball = (our_min < opp_min) && (our_min < 20.0);
+    bool by_distance = (our_min < opp_min) && (our_min < 20.0);
+    // —— 球权来源（2026-09-13 用户指令：先用平台给的字段）——
+    //   平台 Environment.whosBall：文档只写"球权"（docs/02:47），sim_bench 不填、rlg 里恒为 0，
+    //   所以**语义未标定** ⇒ 采用"平台有效(≠0)时以它为准、未知(0)时退回自算"的分层策略。
+    //   现在的映射假设 A：1=我方、2=对方（按 DLL 视角，这种设计对双 DLL 平台最自然）；
+    //   若真机标定发现其实是假设 B（1=蓝、2=黄，绝对值），改这一行即可。
+    //   不一致次数计入 wm.whos_disagree，用于标定与回归观察。
+    bool near_ours   = (our_min < 12.0) && (our_min + 5.0 < opp_min);   // 明确我方控球
+    bool near_theirs = (opp_min < 12.0) && (opp_min + 5.0 < our_min);   // 明确对方控球
+    if (near_ours) {
+        sit.we_have_ball = true;          // 明确：以距离为准（平台字段语义未标定，不敢硬覆盖）
+    } else if (near_theirs) {
+        sit.we_have_ball = false;
+    } else if (wm.whos_ball != 0) {
+        sit.we_have_ball = (wm.whos_ball == 1);   // 不明确（散球/贴身混战）→ 听平台的
+    } else {
+        sit.we_have_ball = by_distance;           // 平台未知(0) → 自算兜底
+    }
+    // 标定用：只要平台给了值，就记录它与自算判据是否一致（真机跑一场看多数是否一致）
+    if (wm.whos_ball != 0) sit.whos_mismatch = ((wm.whos_ball == 1) != by_distance);
 
     // 半场/禁区判断（参数化）
     sit.ball_in_our_half = ctx.attack_dir() > 0 ? (bx < 110.0) : (bx > 110.0);

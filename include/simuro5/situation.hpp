@@ -11,6 +11,7 @@ namespace simuro5 {
 
 struct Situation {
     bool we_have_ball = false;   // 球权是否在我方（简版：最近的人持球）
+    bool whos_mismatch = false;  // 平台球权字段与自算判据不一致（标定/回归用）
     bool ball_in_our_half = true;
     bool ball_in_our_penalty = false;
     bool ball_in_opp_penalty = false;

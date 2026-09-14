@@ -49,6 +49,7 @@ struct WorldModel {
     int game_state = 0;      // PlayMode
     int game_state_last = 0; // 上一帧 PlayMode（点球/定位球执行期识别：PenaltyKick→PlayOn 过渡）
     long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
+    int whos_disagree = 0;   // 平台球权与自算不一致的累计帧数（标定/回归用）
     // 我方主罚点球执行中（strategy.cpp 每帧维护）：球静止在罚球点、我方必须去踢。
     // roles 用它区分"对方门球"（不抢）vs"我方点球"（必须射门）——两者都是球静止在对方门区。
     bool in_penalty_exec = false;

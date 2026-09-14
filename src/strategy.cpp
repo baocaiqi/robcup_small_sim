@@ -45,6 +45,7 @@ void Strategy::run(WorldModel &wm) {
     // 1. 局势分析（球权/半场/禁区）
     Situation sit = sit_.analyze(wm);
     wm.we_have_ball = sit.we_have_ball;
+    if (sit.whos_mismatch) ++wm.whos_disagree;   // 平台球权 vs 自算的不一致帧数（标定用）
 
     // 1.5 我方主罚点球执行期标志（供 roles 区分"对方门球"vs"我方点球"：
     //   两者都是"球静止在对方门区"，但点球必须去踢，门球要等对方开出）

@@ -1652,6 +1652,40 @@ static int test_goalie_clear_push() {
 }
 
 // ============================================================
+// 球权来源单测（2026-09-13 用户指令：先用平台给的 whosBall 字段）
+//   平台字段有效(≠0) → 以它为准；未知(0) → 退回"最近的人且 <20cm"自算。
+// ============================================================
+static int test_possession_source() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    wm.ball.x = 110; wm.ball.y = 90;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 200; wm.home[i].y = 90;
+        wm.opp[i].x  = 200; wm.opp[i].y  = 90;
+    }
+    SituationModule sitm;
+    // ① 平台未知(0) + 我方最近且 <20cm → 自算"我方球权"
+    wm.whos_ball = 0; wm.home[1].x = 115;
+    if (!sitm.analyze(wm).we_have_ball) { printf("FAIL: whos=0 应按距离判我方\n"); return 1; }
+    // ② 平台未知(0) + 对方更近 → 对方球权
+    wm.home[1].x = 200; wm.opp[1].x = 115;
+    if (sitm.analyze(wm).we_have_ball) { printf("FAIL: whos=0 对方更近应为对方\n"); return 1; }
+    // ③ 明确我方控球（5cm）时，平台字段即使矛盾也不覆盖（防语义标定错误导致全队误判）
+    wm.home[1].x = 115; wm.opp[1].x = 200; wm.whos_ball = 2;
+    Situation s3 = sitm.analyze(wm);
+    if (!s3.we_have_ball) { printf("FAIL: 明确控球时不该被平台字段覆盖\n"); return 1; }
+    if (!s3.whos_mismatch) { printf("FAIL: 应记录 平台 vs 自算 不一致\n"); return 1; }
+    // ④ 不明确（双方都 30cm 外）→ 听平台的
+    wm.home[1].x = 140; wm.opp[1].x = 140; wm.whos_ball = 1;
+    if (!sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时 whos=1 应判我方\n"); return 1; }
+    wm.whos_ball = 2;
+    if (sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时 whos=2 应判对方\n"); return 1; }
+    printf("possession source: OK (平台优先/未知退回自算/whos=1我方/whos=2对方)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 58 轮：门将「球外侧禁推」单测（真机 3 场 6 个丢球的共同机制）
 //   球已到门口 + 门将在球的场侧 → 目标必须是"球后 10cm + 侧向 25cm"，
 //   **绝不能落在球的门侧**（那等于自己把球往门里推）。
@@ -1851,6 +1885,7 @@ int main() {
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
     rc |= test_goalie_side_step();
+    rc |= test_possession_source();
     rc |= test_goalie_clear_push();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
