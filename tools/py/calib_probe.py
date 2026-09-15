@@ -16,6 +16,7 @@
 import sys, os, math, glob, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rlg_analyzer import parse_rlg
+import sim_stats          # 撞墙系数用同一份"反弹帧前后拟合"的测法（老变号法在仿真上是假象）
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 LOGDIR = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('--') else r'C:\Strategy'
@@ -58,6 +59,10 @@ def probe(logs, tag):
             fracs_ball.append(frac(f['ball']['x']))
             fracs_rob.append(frac(f['blue'][1]['x']))
             fracs_rob.append(frac(f['yellow'][1]['y']))
+        # ③ 撞墙系数：用 sim_stats 里那份"反弹帧前后各 2 帧拟合"测法（与仿真完全同口径）
+        w = sim_stats.wall_bounce_fit(frames)
+        rest_x += w['_raw']['rest_x']; rest_y += w['_raw']['rest_y']
+        fric_x += w['_raw']['fric_x']; fric_y += w['_raw']['fric_y']
         for i in range(2, n):
             b0, b1, b2 = frames[i-2]['ball'], frames[i-1]['ball'], frames[i]['ball']
             dx1, dy1 = b1['x']-b0['x'], b1['y']-b0['y']
@@ -71,15 +76,6 @@ def probe(logs, tag):
             # ② 高速段衰减（球离开所有机器人 20cm 以上）
             if free and v1 >= 2.0 and v2 >= 1.0:
                 decay_pairs.append((v1, v2 / v1))
-            # ③ 严格撞墙
-            if free and (b1['x'] < 2.5 or b1['x'] > 217.5) and dx1 * dx2 < 0 and abs(dx1) >= 1.5:
-                rest_x.append(abs(dx2) / abs(dx1))
-                if abs(dx1) > 1e-6:
-                    fric_x.append(abs(dy2) / max(abs(dy1), 1e-9))
-            if free and (b1['y'] < 2.5 or b1['y'] > 177.5) and dy1 * dy2 < 0 and abs(dy1) >= 1.5:
-                rest_y.append(abs(dy2) / abs(dy1))
-                if abs(dy1) > 1e-6:
-                    fric_y.append(abs(dx2) / max(abs(dx1), 1e-9))
         # ④ 速度/加速度（3 帧差分）
         for i in range(2, n):
             for side in ('blue', 'yellow'):

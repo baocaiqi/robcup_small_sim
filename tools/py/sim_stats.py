@@ -57,10 +57,63 @@ def pct(a, p):
     return s[min(len(s) - 1, int(len(s) * p))] if a else float("nan")
 
 
+def wall_bounce_fit(frames, near=4.0, robot_free=15.0, goal_margin=6.0,
+                    wall_x=220.0, wall_y=180.0):
+    """用"反弹帧前后各 2 帧"估撞墙恢复系数（比老的"位移变号法"可靠）。
+
+    为什么必须换方法（实测教训）：
+      仿真里球是**同一帧内**被弹回的（`s.bx = -s.bx`），位置序列**不变号**，
+      所以"位移变号"探测器几乎测不到仿真样本，量出 0.294 而参数其实是 0.66 ——
+      这是**测量假象**，不是物理差异。若拿假象去定标，优化器会把 kWallRest 越调越低。
+
+    做法：找球在法向坐标上的**局部极小/极大**（= 贴墙那一帧 j），
+      入射 = (p[j-1] - p[j-3]) / 2     出射 = (p[j+3] - p[j+1]) / 2
+      恢复系数 = |出射法向| / |入射法向|（切向同理）
+    自检：对当前仿真（kWallRest=0.66）应能还原出 ≈0.66，否则说明测法还有问题。
+    """
+    rest_x, rest_y, fric_x, fric_y = [], [], [], []
+    n = len(frames)
+    for j in range(3, n - 3):
+        b = frames[j]["ball"]
+        robots = frames[j]["blue"] + frames[j]["yellow"]
+        if min(math.hypot(r["x"] - b["x"], r["y"] - b["y"]) for r in robots) < robot_free:
+            continue
+        x, y = b["x"], b["y"]
+        # —— x 墙（左/右）：避开球门开口（y∈门宽±余量），否则会把"进球"当成反弹
+        if not (65.0 <= y <= 115.0) and (x < near or x > wall_x - near):
+            xm1, xm3 = frames[j - 1]["ball"]["x"], frames[j - 3]["ball"]["x"]
+            xp1, xp3 = frames[j + 1]["ball"]["x"], frames[j + 3]["ball"]["x"]
+            if (x - xm1) * (xp1 - x) <= 0:      # x 在相邻两帧间是局部极值（贴墙那一帧）
+                vin = (xm1 - xm3) / 2.0
+                vout = (xp3 - xp1) / 2.0
+                yin = (frames[j - 1]["ball"]["y"] - frames[j - 3]["ball"]["y"]) / 2.0
+                yout = (frames[j + 3]["ball"]["y"] - frames[j + 1]["ball"]["y"]) / 2.0
+                if abs(vin) > 0.8 and vin * vout < 0:
+                    rest_x.append(abs(vout) / abs(vin))
+                    if abs(yin) > 0.5:
+                        fric_x.append(abs(yout) / abs(yin))
+        # —— y 墙（下/上）
+        if y < near or y > wall_y - near:
+            ym1, ym3 = frames[j - 1]["ball"]["y"], frames[j - 3]["ball"]["y"]
+            yp1, yp3 = frames[j + 1]["ball"]["y"], frames[j + 3]["ball"]["y"]
+            if (y - ym1) * (yp1 - y) <= 0:
+                vin = (ym1 - ym3) / 2.0
+                vout = (yp3 - yp1) / 2.0
+                xin = (frames[j - 1]["ball"]["x"] - frames[j - 3]["ball"]["x"]) / 2.0
+                xout = (frames[j + 3]["ball"]["x"] - frames[j + 1]["ball"]["x"]) / 2.0
+                if abs(vin) > 0.8 and vin * vout < 0:
+                    rest_y.append(abs(vout) / abs(vin))
+                    if abs(xin) > 0.5:
+                        fric_y.append(abs(xout) / abs(xin))
+    return dict(rest_x=med(rest_x), rest_y=med(rest_y),
+                fric_x=med(fric_x), fric_y=med(fric_y),
+                n_rest_x=len(rest_x), n_rest_y=len(rest_y),
+                _raw=dict(rest_x=rest_x, rest_y=rest_y, fric_x=fric_x, fric_y=fric_y))
+
+
 def compute(frames):
     decay = []
     ball_spd = []
-    rest_x, rest_y, fric_x, fric_y = [], [], [], []
     spd = {"blue": [], "yellow": []}
     acc = {"blue": [], "yellow": []}
     n = len(frames)
@@ -73,15 +126,8 @@ def compute(frames):
         ball_spd.append(v1)
         robots = frames[i - 1]["blue"] + frames[i - 1]["yellow"]
         near = min(math.hypot(r["x"] - b1["x"], r["y"] - b1["y"]) for r in robots)
-        free = near >= 20.0
-        if free and v1 >= 2.0 and v2 >= 1.0:
+        if near >= 20.0 and v1 >= 2.0 and v2 >= 1.0:
             decay.append((v1, v2 / v1))
-        if free and (b1["x"] < 2.5 or b1["x"] > 217.5) and dx1 * dx2 < 0 and abs(dx1) >= 1.5:
-            rest_x.append(abs(dx2) / abs(dx1))
-            fric_x.append(abs(dy2) / max(abs(dy1), 1e-9))
-        if free and (b1["y"] < 2.5 or b1["y"] > 177.5) and dy1 * dy2 < 0 and abs(dy1) >= 1.5:
-            rest_y.append(abs(dy2) / abs(dy1))
-            fric_y.append(abs(dx2) / max(abs(dx1), 1e-9))
     for i in range(2, n):
         for side in ("blue", "yellow"):
             for j in range(5):
@@ -91,14 +137,15 @@ def compute(frames):
                 spd[side].append(d1)
                 if d1 > 0.2 or d2 > 0.2:
                     acc[side].append(d1 - d2)
+    wall = wall_bounce_fit(frames)      # 用"反弹帧前后拟合"测撞墙（老方法在仿真上测不到）
     out = {
         "decay_all": med([r for _, r in decay]),
         "decay_2_3": med([r for v, r in decay if 2 <= v < 3]),
         "decay_3_5": med([r for v, r in decay if 3 <= v < 5]),
         "decay_5p": med([r for v, r in decay if v >= 5]),
-        "rest_x": med(rest_x), "rest_y": med(rest_y),
-        "fric_x": med(fric_x), "fric_y": med(fric_y),
-        "n_rest_x": len(rest_x), "n_rest_y": len(rest_y), "n_decay": len(decay),
+        "rest_x": wall["rest_x"], "rest_y": wall["rest_y"],
+        "fric_x": wall["fric_x"], "fric_y": wall["fric_y"],
+        "n_rest_x": wall["n_rest_x"], "n_rest_y": wall["n_rest_y"], "n_decay": len(decay),
         "frames": n,
     }
     for side in ("blue", "yellow"):
