@@ -38,3 +38,8 @@ notes/
 sim_eval_*.json
 # Understand-Anything 知识图谱产物
 .ua/
+
+# 赛后回放产物（只在用户要求时渲染，不入库）
+回放_*.mp4
+build/replay/
+
