@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""demo_half_speed.py — 【测试仪器】把官方 demo（黄队陪练）的速度整体减半。
+"""demo_half_speed.py — 【测试仪器】把官方 demo（黄队陪练）的速度整体乘以倍率。
 
 用户指令（2026-09-14）：「把官方的速度改慢一半，主要是为了测试借墙射门和进攻板块的效果」。
 
@@ -27,12 +27,12 @@ SRC = os.path.join(SRC_DIR, "Strategy4Yellow.cpp")
 SLN = os.path.join(SRC_DIR, "Strategy4Yellow.sln")
 DEPLOY = r"C:\Strategy\Strategy4Yellow.dll"
 BAK_DIR = r"C:\Strategy\backup_20260912"
-MARK = "【测试仪器】官方速度减半"
+MARK = "【测试仪器】官方速度倍率"
 
 OLD = "robot->velocityLeft = vl;\n\trobot->velocityRight = vr;"
-NEW = ("robot->velocityLeft = vl * 0.5;    // " + MARK +
+NEW = ("robot->velocityLeft = vl * 1.5;    // " + MARK +
        "（用户 2026-09-14 指令，测试借墙射门/进攻用；--revert 可还原）\n"
-       "\trobot->velocityRight = vr * 0.5;")
+       "\trobot->velocityRight = vr * 1.5;")
 
 
 def sha(p, n=12):
@@ -125,7 +125,7 @@ def main():
             print("✗ 源码里找不到锚点（可能已打过别的补丁改动了这两行）")
             return 3
         write(s.replace(OLD, NEW, 1))
-        print("✓ 源码已打补丁（velocityLeft/Right 乘 0.5）")
+        print("✓ 源码已打补丁（velocityLeft/Right 乘 1.5 = ±150）")
     else:
         print("（源码已经是减半版）")
     dll = build()
