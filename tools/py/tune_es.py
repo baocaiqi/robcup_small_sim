@@ -103,23 +103,33 @@ PEN_GAF = 0.25      # 门区纪律恶化 1 帧/场 → 扣 0.25 球
 #   0.25 + 宽松硬限(3×) → 既不让纪律崩到 10 倍，也不误杀"用一点纪律换更多进球"的解。
 GAF_HARD_MULT = 3.0
 
+# 只能取整数的参数（计数/帧数类）；其余一律允许小数
+INT_PARAMS = {
+    "roles.kMaxShootPushes",        # 一次进攻最多推射几次
+    "roles.kActiveGaLimit",         # 主攻在自己门区最多待几帧
+    "roles.kActiveGaTotal",         # 主攻累计门区帧数上限
+    "strategy.kStateHysteresisFrames",   # 状态切换迟滞帧数
+    "strategy.kCounterWindowFrames",     # 反击窗口帧数
+}
+
 
 def load_baseline_params():
-    """读 params_基线.txt → {名字: 默认值}，并标出哪些是整数参数。"""
-    vals, ints = {}, set()
+    """读 params_基线.txt → {名字: 默认值}，并标出哪些是整数参数。
+
+    整数参数只认"计数类"（次数/帧数上限），用**显式白名单**：
+    早先按"默认值里没有小数点"来判断，把 `kMinOpen=8.0 度`、`kCoverLineDanger=1.0 cm/帧`
+    这类本该取小数的参数也强制取整了，白白损失搜索精度（用户 2026-09-16 发现）。
+    """
+    vals = {}
     with open(PARAM_DUMP, encoding="utf-8") as f:
         for line in f:
             line = line.split("#")[0].strip()
             if not line:
                 continue
             parts = line.split()
-            if len(parts) != 2:
-                continue
-            name, v = parts
-            vals[name] = float(v)
-            if "." not in v and "e" not in v.lower():
-                ints.add(name)
-    return vals, ints
+            if len(parts) == 2:
+                vals[parts[0]] = float(parts[1])
+    return vals, set(INT_PARAMS)
 
 
 def run_task(binary, extra, games, seed, params_path):
