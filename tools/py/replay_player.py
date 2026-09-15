@@ -78,11 +78,14 @@ def load_csv(path, session_from_end=1):
             ours = []
             if fn in R:
                 r = R[fn]
-                ours = [(r[4 * k], r[4 * k + 1], int(r[4 * k + 3])) for k in range(5)]
+                # R 行每组 4 个数：x, y, rot, role
+                ours = [(r[4 * k], r[4 * k + 1], int(r[4 * k + 3]), r[4 * k + 2])
+                        for k in range(5)]
             opps = []
             if fn in O:
                 o = O[fn]
-                opps = [(o[1 + 3 * k], o[2 + 3 * k]) for k in range(5)]
+                # O 行每组 3 个数：x, y, rot
+                opps = [(o[1 + 3 * k], o[2 + 3 * k], o[3 + 3 * k]) for k in range(5)]
             rec.frames.append((fn, (float(f[4]), float(f[5])), ours, opps,
                                int(f[2]), int(f[8])))
         except (ValueError, IndexError):
@@ -96,9 +99,21 @@ def load_rlg(path):
     rec = Rec()
     for fr in MV.parse_rlg(path):
         blue, yel, ball, gs = fr
-        rec.frames.append((len(rec.frames), ball, [(x, y, i) for i, (x, y) in enumerate(blue)],
+        rec.frames.append((len(rec.frames), ball, [(x, y, i, 0.0) for i, (x, y) in enumerate(blue)],
                            yel, gs, 0))
     return rec if rec.frames else None
+
+
+def arrow(d, x, y, rot_deg, color, length=26, width=3):
+    """从机器人中心朝 rot 方向画箭头（场地 y 向上 → 屏幕 y 要取反）"""
+    import math
+    a = math.radians(rot_deg)
+    x1 = MV.field_px(x, y)[0], MV.field_px(x, y)[1]
+    ex, ey = x1[0] + math.cos(a) * length, x1[1] - math.sin(a) * length
+    d.line([x1[0], x1[1], ex, ey], fill=color, width=width)
+    for sgn in (+1, -1):                      # 箭头两撇
+        b = a + math.pi + sgn * 0.42
+        d.line([ex, ey, ex + math.cos(b) * 9, ey - math.sin(b) * 9], fill=color, width=width)
 
 
 def draw_frame(d, fr, idx, total, extra=""):
@@ -106,13 +121,15 @@ def draw_frame(d, fr, idx, total, extra=""):
     MV.FIELD_W = FIELD_W
     d.rectangle([0, 0, FIELD_W, H], fill=MV.FIELD_BG)
     MV.draw_field(d)
-    for (x, y) in opps:
+    for (x, y, rot) in opps:                       # 对手（黄圈 + 细箭头）
         if 0 <= x <= MV.FW and 0 <= y <= MV.FH:
             MV.draw_robot(d, x, y, False, 0)
+            arrow(d, x, y, rot, (240, 220, 90), length=22, width=2)
     bad = []
-    for i, (x, y, _r) in enumerate(ours):
+    for i, (x, y, _r, rot) in enumerate(ours):     # 我方（实心 + 角色色箭头）
         if 0 <= x <= MV.FW and 0 <= y <= MV.FH:
             MV.draw_robot(d, x, y, True, i)
+            arrow(d, x, y, rot, MV.ROLE_COLOR.get(i, (255, 255, 255)), length=28, width=3)
         if i >= 1 and 170 <= x <= 220 and 75 <= y <= 105:
             bad.append(i)
     MV.draw_ball(d, ball[0], ball[1])
@@ -132,10 +149,11 @@ def draw_frame(d, fr, idx, total, extra=""):
         lines.append(f"{MV.ROLE_NAME[i]:<3}（{i} 号）")
     d.text((x0 + 10, 70), "\n".join(lines), font=MV.font(19), fill=MV.DIM, spacing=8)
     for i in range(5):
-        d.line([x0 + 8, 76 + 19 * (6 + i) - 6, x0 + 20, 76 + 19 * (6 + i) + 6],
+        d.line([x0 + 8, 70 + 27 * (6 + i) - 6, x0 + 20, 70 + 27 * (6 + i) + 6],
                fill=MV.ROLE_COLOR[i], width=8)
     if extra:
         d.text((20, H - 30), extra, font=MV.font(18), fill=(255, 210, 130))
+    d.text((20, H - 56), "箭头 = 机头朝向（角色的颜色）", font=MV.font(16), fill=MV.DIM)
 
 
 def main():
