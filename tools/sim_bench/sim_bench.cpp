@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // sim_bench.cpp — 快速无头仿真器（训练量/回归测试/参数搜索用）
 //
 // 目标：一场完整比赛（600s×40Hz=24000 帧）压缩到 ~0.2 秒，
@@ -34,6 +34,7 @@
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
 #include "simuro5/shoot.hpp"          // 借墙射门计数（bank_plan_count/bank_frame_count）
+#include "simuro5/tunable.hpp"        // 参数注入（--params / --dump-params，见 docs/work/RL参数搜索规格.md）
 
 using namespace simuro5;
 
@@ -657,6 +658,8 @@ int main(int argc, char **argv) {
     double opp_strength = 1.0;               // 脚本对手强度倍率（1.0=demo 校准档，>1 更强，见 docs/12）
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
     const char *traj_path = nullptr;         // --traj out.csv：导出第一场逐帧轨迹（docs/18）
+    const char *params_path = nullptr;       // --params in.txt：注入策略参数（离线搜索用）
+    const char *dump_path = nullptr;         // --dump-params out.txt：导出参数表
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--games" && i + 1 < argc) games = std::atoi(argv[++i]);
@@ -672,10 +675,30 @@ int main(int argc, char **argv) {
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed = (uint64_t)std::atoll(argv[++i]);
         else if (a == "--traj" && i + 1 < argc) traj_path = argv[++i];
+        // 参数注入（离线搜索用；默认不注入 ⇒ 行为与编译期常量完全一致）
+        else if (a == "--params" && i + 1 < argc) params_path = argv[++i];
+        else if (a == "--dump-params" && i + 1 < argc) dump_path = argv[++i];
         else if (a == "--help") {
             printf("sim_bench: --games N --frames N --opp scripted|self|yellow|wall [--strength X] [--debug N] [--seed N] [--traj out.csv]\n");
+            printf("           --params in.txt（注入参数） --dump-params out.txt（导出全部可调参数及默认值）\n");
             return 0;
         }
+    }
+    if (dump_path) {
+        int n = simuro5::dump_params(dump_path);
+        printf("=== 已导出 %d 个可调参数 → %s ===\n", n, dump_path);
+        return 0;
+    }
+    if (params_path) {
+        std::vector<std::string> unknown;
+        int n = simuro5::apply_param_file(params_path, &unknown);
+        if (n < 0) { printf("sim_bench: 无法读取参数文件 %s\n", params_path); return 1; }
+        printf("=== 已注入 %d 个参数（来自 %s）", n, params_path);
+        if (!unknown.empty()) {
+            printf("；⚠️ 未识别 %d 个:", (int)unknown.size());
+            for (size_t k = 0; k < unknown.size() && k < 8; ++k) printf(" %s", unknown[k].c_str());
+        }
+        printf(" ===\n");
     }
     if (traj_path) {
         g_traj = fopen(traj_path, "w");
@@ -723,5 +746,11 @@ int main(int argc, char **argv) {
     printf("=== 借墙射门: 机会 %.1f 次/场, 采纳 %ld 帧 (%.1f 帧/场) ===\n",
            (double)simuro5::bank_plan_count() / games,
            simuro5::bank_frame_count(), (double)simuro5::bank_frame_count() / games);
+    // 机器可读汇总（参数搜索/脚本解析专用，格式稳定，勿改字段顺序）
+    // 字段：net 净胜球/场、gf/ga 场均进球、poss 控球%、shots 场均射门、
+    //       gaf 门区2+人帧/场、fb 争球重置/场、sec 耗时
+    printf("FIT games=%d net=%.4f gf=%.4f ga=%.4f poss=%.2f shots=%.2f gaf=%.3f fb=%.2f sec=%.2f\n",
+           games, (double)(t_blue - t_yellow) / games, (double)t_blue / games, (double)t_yellow / games,
+           t_poss / games, (double)t_shots / games, (double)t_ga / games, (double)t_fb / games, sec);
     return 0;
 }

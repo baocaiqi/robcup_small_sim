@@ -3,6 +3,8 @@
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/defense.hpp"
+#define TUNABLE_PREFIX "strategy."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -17,18 +19,18 @@ namespace simuro5 {
 //      （丢球→立即收缩，夺球→立即前插，无需等下帧重算）；
 //   3. 威胁等级改由「状态 + 球位」稳定输出，不再随单帧球权抖动。
 // ============================================================
-static const int kStateHysteresisFrames = 3;   // 滞回帧数（可调，见 docs/06）
+TUNABLE(kStateHysteresisFrames, 3);  // 滞回帧数（可调，见 docs/06）
 
 // 反击快攻窗口帧数（docs/13 攻击强化 方案 A）：
 //   断球瞬间起 30 帧（≈0.75s）内，assist/midfield 豁免回防条件立即前插接应，
 //   让 ACTIVE 断球后有传球选择；窗口过后恢复正常回防逻辑。
 //   30 帧约等于 demo 就地反抢到位所需时间——窗口内把球传/带过半场即成功。
-static const int kCounterWindowFrames = 30;
+TUNABLE(kCounterWindowFrames, 30);
 
 // 罚球点几何（真机 rlg 实测，2026-09-12 两场共 14 次摆球）
-constexpr double kPenaltySpotDist  = 39.4;   // 罚球点到门线距离 cm
-constexpr double kPenaltySpotTol   = 1.5;    // 容差 cm
-constexpr double kPenaltySpotStill = 1.0;    // cm/帧：球静止判定
+TUNABLE(kPenaltySpotDist, 39.4);  // 罚球点到门线距离 cm
+TUNABLE(kPenaltySpotTol, 1.5);  // 容差 cm
+TUNABLE(kPenaltySpotStill, 1.0);  // cm/帧：球静止判定
 
 bool we_take_penalty_spot(const WorldModel &wm) {
     bool state_says_ours = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||

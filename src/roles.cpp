@@ -6,6 +6,8 @@
 #include "simuro5/defense.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/route.hpp"
+#define TUNABLE_PREFIX "roles."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -17,7 +19,7 @@ namespace {
 // 对方机器人避障半径（本体 6 + 净空 4）。
 //   ⚠️ 与 plan_route 的 margin（默认 0.5）是绑定关系：路径允许侵入本膨胀圈最多 margin，
 //   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
-constexpr double kRouteInflate = 10.0;
+TUNABLE(kRouteInflate, 10.0);
 
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
@@ -128,10 +130,10 @@ double spread_y(const WorldModel &wm, double bx, double by,
 //   ② 让开之后本规则不再触发（lat ≥ 25cm），门将才可以绕到球的门侧去推，
 //      或走"门线封堵"（第 55 轮）抢预测落点——那时路径离球 25cm，不会碰到球。
 // ============================================================
-constexpr double kGkNoPushDist = 50.0;   // 球进我方门口这个距离内才管（cm）
-constexpr double kGkSideClear  = 35.0;   // 侧向让开距离（cm，25→35：用户指令「绕球角度还要增加」）
-constexpr double kGkBackOff    = 10.0;   // 场侧回撤（cm）：目标是球后 10cm，绝不越球
-constexpr double kGkBehindMargin = 8.0;  // 球必须已"明显越过门将"这么多才让开（cm）
+TUNABLE(kGkNoPushDist, 50.0);  // 球进我方门口这个距离内才管（cm）
+TUNABLE(kGkSideClear, 35.0);  // 侧向让开距离（cm，25→35：用户指令「绕球角度还要增加」）
+TUNABLE(kGkBackOff, 10.0);  // 场侧回撤（cm）：目标是球后 10cm，绝不越球
+TUNABLE(kGkBehindMargin, 8.0);  // 球必须已"明显越过门将"这么多才让开（cm）
 //   ↑ 只拦"追在球后面推"这一种（真机 6 个丢球形态：球在门将门侧 7~17cm）；
 //     门将跟球基本齐平时照常清球——sim A/B 实测不让它清球会多丢 0.6 球/场。
 
@@ -164,10 +166,10 @@ bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty) {
 //   是 cm/帧（= 200cm/s），而真机实测球朝门速度只有 1.0~4.4 cm/帧（40~175cm/s）
 //   → 该分支实际从不触发（这也是本条要独立成支的原因）。
 // ============================================================
-constexpr double kCoverLineDanger = 1.0;   // cm/帧：球朝门速度下限（40cm/s）
-constexpr double kCoverLineTta    = 22.0;  // 帧：到门线时间上限（0.55s）
-constexpr double kCoverLineDist   = 70.0;  // cm：球离门线多近才抢
-constexpr double kCoverLineGiveUp = 12.0;  // cm：门将已贴球到此距离 → 让位给清球
+TUNABLE(kCoverLineDanger, 1.0);  // cm/帧：球朝门速度下限（40cm/s）
+TUNABLE(kCoverLineTta, 22.0);  // 帧：到门线时间上限（0.55s）
+TUNABLE(kCoverLineDist, 70.0);  // cm：球离门线多近才抢
+TUNABLE(kCoverLineGiveUp, 12.0);  // cm：门将已贴球到此距离 → 让位给清球
 
 bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty) {
     const TeamContext &ctx = wm.ctx;
@@ -563,35 +565,35 @@ void run_goalie(WorldModel &wm, int id) {
 //   途中 4~8 帧内贴球，"纯停留"帧计数不超限）；贴球(≤25cm)后 active_ga_frames
 //   清零（攻门作业不累计），走带球/推射链（plan_shoot 每帧重评，球距门<70cm 即射）；
 //   追不到/超时由 kActiveGaLimit 撤出分支兜底，不会赖在门区送判罚。
-constexpr double kReboundRushSpeed = 8.0;   // cm/帧：反弹球可抢速度阈值（GK扑出/挡回典型 <10）
-constexpr double kReboundRushDist  = 90.0;  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
+TUNABLE(kReboundRushSpeed, 8.0);  // cm/帧：反弹球可抢速度阈值（GK扑出/挡回典型 <10）
+TUNABLE(kReboundRushDist, 90.0);  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
 // —— 禁区前沿变角推射次数上限（docs/17，模仿官方"沿变角推球"）——
-constexpr int kMaxShootPushes = 3;   // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+TUNABLE(kMaxShootPushes, 3);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
 // —— 到点定向射门（docs/18 §8）：准备点距离/位置容差/朝向容差 ——
 //   球后 20cm：够得着球（下一帧直线推穿能碰到球心），又不至于贴太近把球顶走
 //   位置容差 3cm：制动包线停住精度 ~1.5cm，留余量
 //   朝向容差 10°：1m 处横向偏差 = 100·tan10° ≈ 17.6cm < 门半宽 20cm → 能射正；
 //     旧口径是 40°（1m 处偏 92cm = 两个门宽），真机实测机头−瞄准线 p50=51.6°、≤10° 仅 6%
-constexpr double kPrepDist   = 20.0;
+TUNABLE(kPrepDist, 20.0);
 // 罚点球助跑距离（cm）：出球速度 = 撞球瞬间的机头速度，20cm 助跑只有 ~103cm/s，
 //   40cm 外的点球飞行 ~17 帧 → 门将横移 17cm 就够到（真机 09-13 rlg 帧 2350 球被打偏）。
-constexpr double kPenaltyPrepDist = 15.0;   // 15cm（原 35：真机实证倒车太久会被截）
+TUNABLE(kPenaltyPrepDist, 15.0);  // 15cm（原 35：真机实证倒车太久会被截）
 // ⚠️ 第 66 轮已删除 kPenaltyNoBackOpp（45cm）：
 //   真机 16:01 场实测对手在 34cm 时**仍然倒了车**（说明这条阈值规则没起作用），
 //   现在改成"点球一律不倒车"（见 run_active 的点球分支），不再依赖对手距离。
 double shoot_prep_dist(const WorldModel &wm) {
     return wm.in_penalty_exec ? kPenaltyPrepDist : kPrepDist;
 }
-constexpr double kPrepPosTol = 3.0;
-constexpr double kPrepAngTol = 10.0;
+TUNABLE(kPrepPosTol, 3.0);
+TUNABLE(kPrepAngTol, 10.0);
 // 对准尝试超时（帧）：球一直在动/被抢，死等对准会把机会全耗掉 → 超时按当前朝向推
 //   ⚠️ sim A/B 反对本项（净胜 -1.63）：sim 的 carry 机制隐含"机头对着球"、
 //   且是弱脚本门将（"快推"优于"推准"）→ 由用户决定真机观查（docs/06 第 47 轮）。
-constexpr int    kShootAlignTimeout = 40;
+TUNABLE(kShootAlignTimeout, 40);
 // 带球推进的机头对准容差（度）：比射门(10°)略松，但远紧于旧的 40°
-constexpr double kDribAngTol = 20.0;
-static const int kActiveGaLimit  = 8;
-static const int kActiveGaTotal  = 18;  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
+TUNABLE(kDribAngTol, 20.0);
+TUNABLE(kActiveGaLimit, 8);
+TUNABLE(kActiveGaTotal, 18);  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
 
 void run_active(WorldModel &wm, int id) {

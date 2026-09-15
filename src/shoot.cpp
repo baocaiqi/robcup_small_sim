@@ -28,6 +28,8 @@
 #include "simuro5/shoot.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/geometry.hpp"
+#define TUNABLE_PREFIX "shoot."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -46,38 +48,43 @@ namespace {
 //   · 本轮 sim 4 种子 A/B：放宽到 110cm（带闸门）净胜 -1.0（噪声 σ=0.66）→ 已回退
 //   因此 kFarShotEnabled 默认 false：远射档作为**能力**保留（一个常量可开），
 //   等真机对准率提上来、有真机 A/B 数据后再单开一轮评估。
-constexpr double kMaxShotNormal  = 70.0;   // 常规射程（旧口径，sim/真机都验证过的主力区）
-constexpr double kMaxShotPenalty = 110.0;  // 点球：罚球点距门 92cm，必须能射
-constexpr double kMaxShotFar     = 110.0;  // 远射档上限
+TUNABLE(kMaxShotNormal, 70.0);  // 常规射程（旧口径，sim/真机都验证过的主力区）
+TUNABLE(kMaxShotPenalty, 110.0);  // 点球：罚球点距门 92cm，必须能射
+TUNABLE(kMaxShotFar, 110.0);  // 远射档上限
 // 远射档开关：**用户 2026-09-11 决定开启**（真机观查）。注意 sim A/B 是反对的：
 //   50 场×4 种子净胜 -1.0~-1.68（σ=0.66）；docs/06 第 47 轮有完整数据。
 //   用户理由：sim 的 carry 机制/弱脚本门将无法复现真机"射正率 8% vs 对手 48%"的问题，
 //   该项只能真机裁决。若真机验证下来进攻变差，把这里改回 false 即回退（单常量）。
 constexpr bool   kFarShotEnabled = true;
-constexpr double kMinShot    = 5.0;     // 球距门线过近(<5cm)不射（无可推空间）
+TUNABLE(kMinShot, 5.0);  // 球距门线过近(<5cm)不射（无可推空间）
 constexpr double kLegacyRange= 70.0;    // ≤此距离维持无条件可射（A/B 校准，勿当参数乱调）
-constexpr double kMinOpen    = 8.0;     // 远射放行的最小净开口角（度）
-constexpr double kAngleFull  = 18.0;    // 开口评分饱和角（度）
-constexpr double kSpeedFull  = 8.0;     // 球速评分饱和（cm/帧）
-constexpr double kGkRadius   = 8.0;     // GK 有效遮挡半径（本体 6 + 扑救余量 2）
-constexpr double kLaneLen    = 30.0;    // 射门路线拦截检查长度 cm
-constexpr double kLaneBlockR = 8.0;     // 拦截者判挡半径（本体 6 + 余量 2）
-constexpr double kWOpen = 0.5, kWDist = 0.3, kWSpeed = 0.2;   // quality 权重
+TUNABLE(kMinOpen, 8.0);  // 远射放行的最小净开口角（度）
+TUNABLE(kAngleFull, 18.0);  // 开口评分饱和角（度）
+TUNABLE(kSpeedFull, 8.0);  // 球速评分饱和（cm/帧）
+TUNABLE(kGkRadius, 8.0);  // GK 有效遮挡半径（本体 6 + 扑救余量 2）
+TUNABLE(kLaneLen, 30.0);  // 射门路线拦截检查长度 cm
+TUNABLE(kLaneBlockR, 8.0);  // 拦截者判挡半径（本体 6 + 余量 2）
+TUNABLE(kWOpen, 0.5);
+TUNABLE(kWDist, 0.3);
+TUNABLE(kWSpeed, 0.2);  // quality 权重
 
 
 // —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
 // 撞墙系数不在这里写死：唯一真值来源是 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()
-constexpr double kBankMaxDist= 260.0;   // 借墙总路程上限 cm（超过则距离项 0）
-constexpr double kBankCornerFull = 40.0;// 反弹点离对方门线多远算满分（否则像"蹭门柱"）
-constexpr double kBankCornerMin  = 12.0;// 反弹点离门线近于此 → 直接否决
-constexpr double kBankAngleFull  = 18.0;// 借墙的开口满分角（与直线同口径）
-constexpr double kBankMinSlope   = 0.25;// 入射"陡度"下限 |法向|/|切向|：太低=贴墙扫，不可靠
-constexpr double kBankMinQ       = 0.45;// 借墙放行阈值
-constexpr double kBankMargin     = 0.10;// 必须比直线好这么多才换（不打平就换）
-constexpr double kBankDirectWeak = 0.35;// 直线 quality 低于此才算"没戏"，才考虑借墙
-constexpr double kBankPrepDist   = 20.0;// 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
-constexpr double kBankPrepMargin = 5.0; // 准备点离场边余量
-constexpr double kBankWOpen = 0.30, kBankWDist = 0.25, kBankWBounce = 0.25, kBankWSpd = 0.20;
+TUNABLE(kBankMaxDist, 260.0);  // 借墙总路程上限 cm（超过则距离项 0）
+TUNABLE(kBankCornerFull, 40.0);  // 反弹点离对方门线多远算满分（否则像"蹭门柱"）
+TUNABLE(kBankCornerMin, 12.0);  // 反弹点离门线近于此 → 直接否决
+TUNABLE(kBankAngleFull, 18.0);  // 借墙的开口满分角（与直线同口径）
+TUNABLE(kBankMinSlope, 0.25);  // 入射"陡度"下限 |法向|/|切向|：太低=贴墙扫，不可靠
+TUNABLE(kBankMinQ, 0.45);  // 借墙放行阈值
+TUNABLE(kBankMargin, 0.10);  // 必须比直线好这么多才换（不打平就换）
+TUNABLE(kBankDirectWeak, 0.35);  // 直线 quality 低于此才算"没戏"，才考虑借墙
+TUNABLE(kBankPrepDist, 20.0);  // 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
+TUNABLE(kBankPrepMargin, 5.0);  // 准备点离场边余量
+TUNABLE(kBankWOpen, 0.30);
+TUNABLE(kBankWDist, 0.25);
+TUNABLE(kBankWBounce, 0.25);
+TUNABLE(kBankWSpd, 0.20);
 // 借墙射门总开关：默认开。sim A/B 用它做"只隔离借墙"的对照（同一份代码跑开/关两批），
 // 真机若验证下来进攻变差，改回 false 即回退（单常量，和 kFarShotEnabled 一个套路）。
 constexpr bool kBankEnabled = true;

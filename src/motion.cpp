@@ -1,5 +1,7 @@
 #include "simuro5/motion.hpp"
 #include "simuro5/geometry.hpp"
+#define TUNABLE_PREFIX "motion."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -82,11 +84,11 @@ void position(RobotState &r, double tx, double ty, TargetMode mode) {
 // 为什么用"原地转"而不是"边走边对"：差速轮可原地旋转，转正是确定性的；
 //   而"边走边对"要同时满足位置与朝向两个约束，路径会绕大圈且到点朝向仍靠运气。
 namespace {
-constexpr double kAlignedGain = 0.22;   // 轮速命令/度
-constexpr double kMaxRotW     = 14.0;   // 转正轮速上限（≈160°/s，防大角度命令爆表）
-constexpr double kMinRotW     = 2.5;    // 转正轮速下限（≈29°/s，防最后几度爬行）
-constexpr double kNearDist    = 12.0;   // cm：进入"近距相位"的半径（先转正、再微调位置）
-constexpr double kCreepMax    = 20.0;   // cm/s：近距平移速度上限（对准后小步靠近）
+TUNABLE(kAlignedGain, 0.22);  // 轮速命令/度
+TUNABLE(kMaxRotW, 14.0);  // 转正轮速上限（≈160°/s，防大角度命令爆表）
+TUNABLE(kMinRotW, 2.5);  // 转正轮速下限（≈29°/s，防最后几度爬行）
+TUNABLE(kNearDist, 12.0);  // cm：进入"近距相位"的半径（先转正、再微调位置）
+TUNABLE(kCreepMax, 20.0);  // cm/s：近距平移速度上限（对准后小步靠近）
 }
 bool position_aligned(RobotState &r, double tx, double ty, double desired_rot,
                       double pos_tol, double ang_tol) {
