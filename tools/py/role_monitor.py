@@ -31,21 +31,21 @@ W, H = 980, 720
 FIELD_W = 760
 
 
-def read_latest(csv_path):
-    """取最新 session 里最后一条 F 行 + 它对应的 R/O 行"""
+def read_latest(csv_path, tail_bytes=262144):
+    """读黑匣子 CSV **尾部**（只取最后约 256KB）——整文件读会每 0.25 秒吞 10MB+，
+    实测会让监视窗卡住、看起来"什么都看不到"（这就是用户看不到角色标的可能原因）。"""
     try:
-        lines = io.open(csv_path, encoding="utf-8", errors="replace").read().splitlines()
+        with open(csv_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            lines = f.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return None
-    if not lines:
-        return None
-    start = 0
-    for k in range(len(lines) - 1, -1, -1):
-        if lines[k].startswith("#"):
-            start = k
-            break
+    if len(lines) > 1:
+        lines = lines[1:]                     # 丢掉可能被截断的首行
     F = R = O = None
-    for l in reversed(lines[start:]):
+    for l in reversed(lines):
         t = l.split(",")
         if t[0] == "F" and F is None:
             F = t
@@ -59,9 +59,7 @@ def read_latest(csv_path):
         return None
     try:
         ours = [(float(R[3 + 4 * i]), float(R[4 + 4 * i]), int(R[6 + 4 * i])) for i in range(5)]
-        opps = []
-        if O:
-            opps = [(float(O[2 + 3 * i]), float(O[3 + 3 * i])) for i in range(5)]
+        opps = [(float(O[2 + 3 * i]), float(O[3 + 3 * i])) for i in range(5)] if O else []
         return dict(frame=int(F[1]), gs=int(F[2]), whos=int(F[3]),
                     ball=(float(F[4]), float(F[5])), ours=ours, opps=opps,
                     ours_ball=int(F[8]), pen=int(F[9]))
