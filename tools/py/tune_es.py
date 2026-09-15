@@ -66,6 +66,7 @@ GROUPS = {
               "roles.kCoverLineTta", "defense.kInterceptLineDist",
               "pass.PASS_MAX_DIST", "motion.kNearDist", "roles.kReboundRushDist"],
 }
+GROUPS["both"] = GROUPS["attack"] + GROUPS["defense"]   # 攻防合起来评估"组合拳"效果
 
 # 手工给的范围（安全边界；没列到的按 ±25% 兜底）
 RANGES = {
@@ -95,7 +96,12 @@ RANGES = {
 
 PEN_SHOts = 0.02    # 被射门恶化 1% → 扣 0.02 球
 PEN_FB = 0.02       # 争球重置恶化 1% → 扣 0.02 球
-PEN_GAF = 0.10      # 门区纪律恶化 1 帧/场 → 扣 0.1 球
+PEN_GAF = 0.25      # 门区纪律恶化 1 帧/场 → 扣 0.25 球
+# 系数选择史（都是实测，不是拍脑袋）：
+#   0.10 → 搜出"多压上、后院挤人"的解：净胜球 +1.27（两独立种子集都复现）但门区纪律 2.6→6.6 帧/场；
+#   0.35 + 硬判死(1.5×) → 把有效候选全毙了，留出集 Δnet 反而 ≈0（复制轮次 74 的教训）；
+#   0.25 + 宽松硬限(3×) → 既不让纪律崩到 10 倍，也不误杀"用一点纪律换更多进球"的解。
+GAF_HARD_MULT = 3.0
 
 
 def load_baseline_params():
@@ -158,11 +164,17 @@ def eval_vector(x, names, tasks, ints, workers, tmpdir, tag=""):
 
 
 def fitness(agg, base):
-    """适应度：净胜球提升为正值，被射门/卡球/门区纪律退化扣分。"""
+    """适应度：净胜球提升为正值，被射门/卡球/门区纪律退化扣分。
+
+    硬约束：门区纪律（我方禁区里挤 2 人以上的帧数）超过基线 1.5 倍 → 直接判死。
+    理由是这指标直接对应"被判点球"，不能用进球去换。
+    """
     d_net = agg["net"] - base["net"]
     shots_w = max(0.0, (agg["shots"] - base["shots"]) / max(base["shots"], 1e-9) * 100.0)
     fb_w = max(0.0, (agg["fb"] - base["fb"]) / max(base["fb"], 1e-9) * 100.0)
     gaf_w = max(0.0, agg["gaf"] - base["gaf"])
+    if agg["gaf"] > base["gaf"] * GAF_HARD_MULT:
+        return -9e9          # 硬约束：纪律崩了，不管进多少球都不要
     return d_net - PEN_SHOts * shots_w - PEN_FB * fb_w - PEN_GAF * gaf_w
 
 
@@ -205,6 +217,17 @@ def cmd_search(args, base_vals, ints):
         b = min(b, d + abs(d) * 0.6 + 0.5)
         lo.append(min(a, d)); hi.append(max(b, d))
     x0 = [base_vals[n] for n in names]
+    if args.init:
+        # 从已验证的参数文件出发继续搜（坐标上升式：先攻后守，后一组以前一组结果为起点）
+        with open(args.init, encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                p = line.split()
+                if len(p) == 2 and p[0] in names:
+                    x0[names.index(p[0])] = float(p[1])
+        print(f"（起点来自 {args.init}）")
     print(f"=== 差分进化搜索：{dim} 个参数，种群 {args.pop}，{args.gens} 代，"
           f"每候选 {len(tasks)} 个任务（{args.games} 局/任务），{args.workers} 并发 ===")
     print(f"    对手池: {sorted({t['name'] for t in tasks})}  种子: {args.seeds}")
@@ -318,6 +341,7 @@ def main():
     ap.add_argument("--baseline", default=os.path.join("docs", "work", "tune_baseline.json"))
     ap.add_argument("--out", default=os.path.join("docs", "work", "best_params.txt"))
     ap.add_argument("--params", default=None, help="eval 模式：要评估的参数文件")
+    ap.add_argument("--init", default=None, help="search 模式：从该参数文件出发（缺省=默认值）")
     ap.add_argument("--holdout", action="store_true")
     ap.add_argument("--tmpdir", default=os.path.join("build", "tune"))
     ap.add_argument("--binary", default=BENCH)
