@@ -723,6 +723,16 @@ void run_active(WorldModel &wm, int id) {
     //   真机（射正率 8% vs 对手 48%）是否值得为此付代价，**必须真机单开一轮验证**，
     //   不能拿 sim 判。到点定向的能力（motion::position_aligned）与单测已就位，随时可接。
     ShootPlan sp = plan_shoot(wm, id);
+    // —— 配合进攻（docs/06 第 69 轮，用户 2026-09-15 指令）——
+    //   队友接球后的射门机会比我自己高 0.15 以上、且他能**安全接到** → 传给他（只向前传）。
+    //   安全性（线路无遮挡/接球点 20cm 内无对手/距离≤120cm）在 pass.cpp 里判定；点球执行期不传。
+    CoopPass cp = plan_coop_pass(wm, id);
+    const bool coop_pass = cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15;
+    if (coop_pass) {
+        sp.dir_x = cp.dir_x; sp.dir_y = cp.dir_y; sp.aim_rot = cp.aim_rot;
+        sp.target_x = wm.ball.x - cp.dir_x * 8.0; sp.target_y = wm.ball.y - cp.dir_y * 8.0;
+        sp.viable = true;
+    }
     // —— 点球执行期：瞄准方向**锁一次**（docs/06 第 66 轮）——
     //   为什么：实测真机点球里瞄准方向每帧重算 → 准备点跟着漂移 → 机器人退到球后又折返，
     //   折返时偏离瞄准线 15~24cm，从球的侧上方掠过把球推偏（出球 0.7cm/帧、方向几乎垂直
@@ -748,14 +758,14 @@ void run_active(WorldModel &wm, int id) {
     //   点球（penalty）quality 置 1 → 直接放行。
     const double kShootNowQ = 0.35;
     bool shoot_now = sp.viable &&
-                     (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ);
+                     (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ || coop_pass);
     if (shoot_now && wm.shoot_push_count < kMaxShootPushes) {
         double bx = wm.ball.x, by = wm.ball.y;
         int this_side = (sp.aim_y > 90.0) ? 1 : -1;
         // 变角推射（docs/17）：同一轮已推 >=2 次且本次仍瞄上次同一侧 → 强制换另一侧重推
         // ⚠️ 借墙方案（docs/06 第 65 轮）**不适用**：那个覆盖逻辑是"直接瞄向门口的另一点"，
         //    用在借墙方案上会把方向改回直线（而直线正是被封掉才走借墙的）→ 必须排除。
-        if (!sp.bank && wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
+        if (!sp.bank && !coop_pass && wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
             wm.shoot_push_last_side != 0) {
             double ogx = ctx.opp_goal_x(), ad2 = ctx.attack_dir();
             double oy = 90.0 - (sp.aim_y - 90.0);
@@ -832,6 +842,24 @@ void run_active(WorldModel &wm, int id) {
             wm.shoot_align_frames = 0;
             ready = motion::position_aligned(r, px, py, sp.aim_rot, kPrepPosTol, kPrepAngTol);
             if (ready && !near) ready = false;  // 到了准备点但仍够不着球 → 继续靠近
+        }
+        // —— 禁止"过冲后反向穿球"（docs/06 第 70 轮；真机实证：主攻冲过球再倒着撞，
+        //    把球推回自家门：球从帧 896 起朝 +x（自家门）加速到 +5.6cm/帧）——
+        //   判据：球在我推球方向的反面（side<0，留 3cm 余量）⇒ 我已经在球的**球门侧**。
+        //   此时沿瞄准线回推 = 用身体把球往自家门顶 ⇒ 必须先绕弧线（球侧方 22cm）回到球正后方。
+        {
+            const double side = (bx - r.x) * sp.dir_x + (by - r.y) * sp.dir_y;
+            if (side < -3.0) {
+                const double nx = -sp.dir_y, ny = sp.dir_x;          // 垂直瞄准方向
+                double cx = bx + nx * 22.0, cy = by + ny * 22.0;    // 侧向绕行点
+                if (dist(r.x, r.y, cx, cy) >
+                    dist(r.x, r.y, bx - nx * 22.0, by - ny * 22.0)) {
+                    cx = bx - nx * 22.0; cy = by - ny * 22.0;       // 选更近的一侧绕
+                }
+                wm.shoot_align_frames = 0;
+                motion::position(r, cx, cy, motion::TM_PASS);       // 绕行，绝不穿球
+                return;
+            }
         }
         if (ready) {
             wm.shoot_align_frames = 0;
