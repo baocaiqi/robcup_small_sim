@@ -31,6 +31,9 @@ PREFIX_TO_FILE = {
     "roles.": "src/roles.cpp",
     "strategy.": "src/strategy.cpp",
     "motion.": "src/motion.cpp",
+    # 仿真物理参数（定标产出）也写回源码：这样"重跑搜索"时仿真就是定标过的，
+    # 不用每次手动带 --params；sim_bench 与平台 DLL 共用同一份注册表，互不影响。
+    "sim.": os.path.join("tools", "sim_bench", "sim_bench.cpp"),
 }
 
 
