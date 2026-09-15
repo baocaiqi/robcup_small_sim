@@ -187,6 +187,9 @@ inline bool opp_kick_direction(const WorldModel &wm, double &dx, double &dy, int
 // 由预测方向推"球会从我们门线哪个 y 进"；只在落进门框内时返回 true（供门将提前站位）
 inline bool opp_kick_target_y(const WorldModel &wm, double &y_at_goal) {
     double dx = 0.0, dy = 0.0; int who = -1;
+    // 只在**我方门前 120cm 内**才值得提前封线：中场/对方半场的静止球，
+    //   即使对手贴球，射线打到我们门线也是巧合（sim A/B 实测放宽后净胜 +0.48→+0.12）。
+    if (wm.ctx.dist_our_goal(wm.ball.x) > 120.0) return false;
     if (!opp_kick_direction(wm, dx, dy, who)) return false;
     if (!predict_y_at_x(wm.ball.x, wm.ball.y, dx, dy, wm.ctx.our_goal_x(), y_at_goal))
         return false;
