@@ -34,6 +34,7 @@
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
 #include "simuro5/shoot.hpp"          // 借墙射门计数（bank_plan_count/bank_frame_count）
+#define TUNABLE_PREFIX "sim."
 #include "simuro5/tunable.hpp"        // 参数注入（--params / --dump-params，见 docs/work/RL参数搜索规格.md）
 
 using namespace simuro5;
@@ -52,28 +53,44 @@ struct Rng {
     double range(double a, double b) { return a + (b - a) * unit(); }
 };
 
-// ==================== 简化物理常量（可调） ====================
-static constexpr double kDt        = 1.0 / 40.0;   // 40Hz
-static constexpr double kSpeed     = 0.9;          // 轮速→cm/s 缩放
-static constexpr double kWheelBase = 10.0;         // 轮距 cm（决定转向灵敏度）
-static constexpr double kAccel     = 300.0;        // 轮速最大加速度 cm/s²（每帧 ±7.5）
-                                                   //   真实平台有惯性：机器人不能瞬间 0→112，
-                                                   //   否则追球过冲把球铲向错误方向（本 sim 主要失真源）
-static constexpr double kBallDecay = 0.985;        // 球每帧摩擦衰减（校准: 真实rlg高速段 0.986-0.994/帧，一致）
-static constexpr double kWallRest  = 0.66;         // 法向恢复：实测 118 场 rlg 中位（docs/06 第65轮）
-static constexpr double kWallFric  = 0.81;         // 切向保持：实测中位（旧值 0.90 与实测不符）
-                                                   //   ——否则球沿墙滑 vy 不降，一路滑进角落/门角（2007论文怪癖: 球卡四角）
-static constexpr double kContact   = 5.5;          // 球-机器人最小分离 cm（防球嵌进机器人身体）
-static constexpr double kCarryR    = 9.0;          // 携带区半径 cm：略大于策略"球后 8cm 推球点"，
-                                                   //   机器人站到推球点即可带球；但防止提前携带
-                                                   //   （接近途中 9-12cm 就带球会把球斜推偏，射门失效）
-static constexpr double kCarryArc  = 40.0;         // 携带区前向半弧（度）：球几乎在正前方才携带，
-                                                   //   防止机器人斜向接近时把球"斜推"带偏射门方向
-static constexpr double kDeflect   = 0.45;         // 守门员挡球反弹恢复系数（挡不是带）
-static constexpr double kRobotR    = 6.0;          // 机器人-机器人最小间距 cm
-static constexpr double kGoalLo = 70.0, kGoalHi = 110.0;  // 门宽
+// ==================== 物理常量（可注入旋钮，默认值=原来的硬编码值） ====================
+// 生活化比喻：这些原来是焊死的螺母，现在换成带刻度的旋钮——
+//   默认仍拧在原来的位置，所以"不注入参数"时行为与打补丁前逐位一致。
+//   定标脚本（tools/py/calibrate_sim.py）用真机 132 场 rlg 反推它们该拧到哪。
+static constexpr double kDt = 1.0 / 40.0;                 // 40Hz（平台定死，不可调）
+static constexpr double kGoalLo = 70.0, kGoalHi = 110.0;  // 门宽（规则，不可调）
+TUNABLE(kSpeed, 0.9);            // 轮速→cm/s 缩放（真机实测我方 p99≈154cm/s，现在只有 90）
+TUNABLE(kWheelBase, 10.0);       // 轮距 cm（决定转向灵敏度）
+TUNABLE(kAccel, 300.0);          // 轮速最大加速度 cm/s²（真机 p90≈0.209cm/帧² ⇒ 量级正确）
+TUNABLE(kBallDecay, 0.985);      // 球**高速段**每帧衰减（真机实测 0.992~0.994）
+TUNABLE(kBallDecaySlow, 0.985);  // 球**低速段**每帧衰减（真机实测 ≈0.9999 几乎不减速）
+TUNABLE(kDecayVref, 0.0);        // 速度分档阈值 cm/帧；0 = 关闭两档（默认与旧行为一致）
+TUNABLE(kWallRest, 0.66);        // 撞墙法向恢复（真机新测法实测 0.451/0.449）
+TUNABLE(kWallFricX, 0.81);       // x 墙切向保持（真机实测 ≈0.99 几乎无损失）
+TUNABLE(kWallFricY, 0.81);       // y 墙切向保持（真机实测 0.78~0.84）
+TUNABLE(kContact, 5.5);          // 球-机器人最小分离 cm（防球嵌进机器人身体）
+TUNABLE(kCarryR, 9.0);           // 携带区半径 cm（略大于策略"球后 8cm 推球点"）
+TUNABLE(kCarryArc, 40.0);        // 携带区前向半弧（度）
+TUNABLE(kDeflect, 0.45);         // 守门员挡球反弹恢复系数
+TUNABLE(kRobotR, 6.0);           // 机器人-机器人最小间距 cm
+// —— 新增：真机有、仿真原先没有的两个执行环节 ——
+TUNABLE(kActDelay, 0.0);         // 指令生效延迟帧数（真机至少 1 帧；0=旧行为）
+TUNABLE(kWheelDead, 0.0);        // 轮速死区：小于此值的轮速命令推不动（0=旧行为）
+// —— 推球动量（原来硬编码 0.3 / 0.7） ——
+TUNABLE(kPushKeep, 0.3);         // 推球时保留旧球速的比例
+TUNABLE(kPushGain, 0.7);         // 推球时机器人速度注入的比例
+// —— 脚本对手速度（原来写死 80/30/50/40；实测"对手慢一半"的根因就在这里） ——
+TUNABLE(oppChaseSpeed, 80.0);      // 追击手（远球）
+TUNABLE(oppChaseNearSpeed, 30.0);  // 追击手（近球 20cm 内）
+TUNABLE(oppSupportSpeed, 50.0);    // 协防
+TUNABLE(oppFormationSpeed, 40.0);  // 阵型站位
+TUNABLE(oppGkSpeed, 30.0);         // 门将横向 cm/s
 
-struct SimRobot { double x=0, y=0, rot=0, vl=0, vr=0, pl=0, pr=0; };
+struct SimRobot {
+    double x=0, y=0, rot=0, vl=0, vr=0, pl=0, pr=0;
+    double hist_l[4]={0,0,0,0}, hist_r[4]={0,0,0,0};  // 指令延迟缓冲（见 kActDelay）
+    int hidx=0;
+};
 
 struct SimState {
     SimRobot blue[5], yellow[5];
@@ -184,8 +201,17 @@ static void step_physics(SimState &s) {
     // 机器人运动（差速轮），带加速度限制（模拟真实平台惯性，防追球过冲铲球）
     auto move = [&](SimRobot &r) {
         // 轮速受加速度限制：每帧最多变化 kAccel * kDt
+        // 指令延迟：真机上本帧算出的轮速，要过 kActDelay 帧才生效
+        int D = (int)(kActDelay + 0.5); if (D > 3) D = 3; if (D < 0) D = 0;
+        r.hist_l[r.hidx & 3] = r.vl; r.hist_r[r.hidx & 3] = r.vr;
+        r.hidx++;
+        double cmd_l = r.hist_l[(r.hidx + 4 - D) & 3];
+        double cmd_r = r.hist_r[(r.hidx + 4 - D) & 3];
+        // 轮速死区：真机小轮速推不动（0 = 关闭，保持旧行为）
+        if (std::fabs(cmd_l) < kWheelDead) cmd_l = 0;
+        if (std::fabs(cmd_r) < kWheelDead) cmd_r = 0;
         double maxdv = kAccel * kDt;
-        double nvl = r.vl, nvr = r.vr;
+        double nvl = cmd_l, nvr = cmd_r;
         if (nvl > r.pl) { if (nvl - r.pl > maxdv) nvl = r.pl + maxdv; }
         else           { if (r.pl - nvl > maxdv) nvl = r.pl - maxdv; }
         if (nvr > r.pr) { if (nvr - r.pr > maxdv) nvr = r.pr + maxdv; }
@@ -227,19 +253,22 @@ static void step_physics(SimState &s) {
     // 球运动
     s.bx += s.bvx * kDt;
     s.by += s.bvy * kDt;
-    s.bvx *= kBallDecay; s.bvy *= kBallDecay;
+    // 两档衰减：真机实测低速段几乎不减速(0.9999)，高速段 0.992~0.994
+    { double bspd = std::hypot(s.bvx, s.bvy);
+      double dec = (kDecayVref > 0.0 && bspd < kDecayVref) ? kBallDecaySlow : kBallDecay;
+      s.bvx *= dec; s.bvy *= dec; }
 
     // 球-墙反弹（垂直分量衰减 + 平行分量摩擦衰减）；门线开口处（y∈门宽）不反弹——球要能进门！
     if (s.bx < 0) {
         if (s.by >= kGoalLo && s.by <= kGoalHi) { /* 进门：交给 check_goal 判定 */ }
-        else { s.bx = -s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFric; }
+        else { s.bx = -s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFricX; }
     }
     if (s.bx > 220) {
         if (s.by >= kGoalLo && s.by <= kGoalHi) { /* 进门 */ }
-        else { s.bx = 440 - s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFric; }
+        else { s.bx = 440 - s.bx; s.bvx = -s.bvx * kWallRest; s.bvy *= kWallFricX; }
     }
-    if (s.by < 0) { s.by = -s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFric; }
-    if (s.by > 180) { s.by = 360 - s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFric; }
+    if (s.by < 0) { s.by = -s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFricY; }
+    if (s.by > 180) { s.by = 360 - s.by; s.bvy = -s.bvy * kWallRest; s.bvx *= kWallFricY; }
 
     // —— 球-机器人交互 ——
     // 1) 携带：球在「非守门员」机器人前方弧区（距离≤kCarryR 且 |偏角|≤kCarryArc）内，
@@ -282,8 +311,8 @@ static void step_physics(SimState &s) {
         if (rv > bv * 0.9) {
             if (s.dbg_contacts) printf("  [接触] %s%d 携带推球 rv%.0f\n",
                                        carry_blue ? "蓝" : "黄", carry_i, rv);
-            s.bvx = s.bvx * 0.3 + rvx * 0.7;
-            s.bvy = s.bvy * 0.3 + rvy * 0.7;
+            s.bvx = s.bvx * kPushKeep + rvx * kPushGain;
+            s.bvy = s.bvy * kPushKeep + rvy * kPushGain;
         }
         // 球保持在机器人前方接触区（防球钻进机器人身体）
         const SimRobot &c = carry_blue ? s.blue[carry_i] : s.yellow[carry_i];
@@ -372,7 +401,7 @@ static void scripted_opponent(SimState &s, bool is_blue, double strength) {
         gk_react = 0;
     }
     double dy = gk_target - gk.y;
-    double maxdy = 30.0 * strength / 40.0;       // 30*strength cm/s 横向限速
+    double maxdy = oppGkSpeed * strength / 40.0;  // oppGkSpeed*strength cm/s 横向限速
     if (dy > maxdy) dy = maxdy; else if (dy < -maxdy) dy = -maxdy;
     gk.y += dy;
     gk.x = gx_in;                                // 门线站位固定
@@ -392,15 +421,15 @@ static void scripted_opponent(SimState &s, bool is_blue, double strength) {
             // 追击手模拟真实 demo：带球质量低（推球点不准+速度慢），球易被碰丢
             //  —— 真实 demo 场均只进 0.8 球；strength↑ → 抖动↓、近球减速↓（带球更稳）
             double wob = 14.0 / std::min(strength, 3.0) * std::sin(s.frames * 0.07 + i * 2.4);
-            double spd_near = 30.0 + 25.0 * (strength - 1.0);
-            double spd = (db < 20.0) ? spd_near : (80.0 * (0.6 + 0.4 * strength));
+            double spd_near = oppChaseNearSpeed * (0.6 + 0.4 * strength);
+            double spd = (db < 20.0) ? spd_near : (oppChaseSpeed * (0.6 + 0.4 * strength));
             // 站球后推球（朝对方球门方向）：推球点 = 球后方 6cm = 靠己方门一侧。
             drive(R[i], s.bx - att_sign * 6.0 + wob * 0.6, s.by + wob, spd);
         } else if (i == support) {
             // 协防：站到球与己方球门连线 40% 处（截击传球路线），不直接贴球。
             double mx = is_blue ? (s.bx + 220.0) * 0.6 : (s.bx + 0.0) * 0.4;
             double my = (s.by + 90.0) * 0.5;
-            drive(R[i], mx, my, 50);
+            drive(R[i], mx, my, oppSupportSpeed);
         } else {
             // 阵型站位：中线散开（防反击）；站位点避开球
             double sx = (is_blue ? 125.0 - (i - 1) * 8.0 : 95.0 + (i - 1) * 8.0);
@@ -414,7 +443,7 @@ static void scripted_opponent(SimState &s, bool is_blue, double strength) {
                                  sy = R[i].y + (ay - R[i].y) / al * 20.0; }
                 sx = std::min(std::max(sx, 15.0), 205.0); sy = std::min(std::max(sy, 15.0), 165.0);
             }
-            drive(R[i], sx, sy, 40);
+            drive(R[i], sx, sy, oppFormationSpeed);
         }
     }
 }
