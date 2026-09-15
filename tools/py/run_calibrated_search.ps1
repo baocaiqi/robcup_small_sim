@@ -1,4 +1,4 @@
-﻿# run_calibrated_search.ps1 — 在**已定标的仿真**上重跑攻防参数搜索（第二阶段）
+# run_calibrated_search.ps1 — 在**已定标的仿真**上重跑攻防参数搜索（第二阶段）
 #
 # 为什么要有第二阶段：第一阶段的搜索跑在"球更黏、墙更弹、脚本对手慢一半"的旧仿真上，
 # 结论不一定能迁移到真机。定标把仿真对齐到真机统计量之后，需要在新地基上重搜一遍。
@@ -40,9 +40,13 @@ Step "基线-训练集(1,2,3)" "$PY $T baseline --group both --games 20 --seeds 
 Step "基线-留出A(1001-1003)" "$PY $T baseline --group both --games 20 --seeds 1001 1002 1003 --workers 8 --binary $BIN --baseline $W\cal_base_A20.json"
 Step "基线-留出B(2001-2003)" "$PY $T baseline --group both --games 20 --seeds 2001 2002 2003 --workers 8 --binary $BIN --baseline $W\cal_base_B20.json"
 
-# ---- 3) 定标后重搜：进攻组 → 防守组（起点用第一阶段验证过的 pilot 参数，让它自己决定要不要保留）----
-Step "搜索-进攻组(定标版)" "$PY $T search --group attack --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --init $W\best_params_pilot.txt --baseline $W\cal_base_train20.json --out $W\cal_best_attack.txt"
-Step "搜索-防守组(定标版)" "$PY $T search --group defense --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --init $W\cal_best_attack.txt --baseline $W\cal_base_train20.json --out $W\cal_best_defense.txt"
+# ---- 3) 定标后重搜：进攻组 → 防守组 ----
+# 注意：**不从第一阶段的 pilot 参数出发**。pilot 是在"球更黏、墙更弹、对手慢一半"的旧仿真上
+# 搜出来的（例如"传球距离砍到 33cm"），定标后球没那么容易停，这个结论很可能失效，
+# 拿它当起点会把搜索带偏。所以进攻组从默认值开始，让 DE 在新地基上自己找。
+# 防守组以前一组的产物为起点（坐标上升：先攻后守，符合规格 §5 的分组搜索约定）。
+Step "搜索-进攻组(定标版,从默认值)" "$PY $T search --group attack --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --baseline $W\cal_base_train20.json --out $W\cal_best_attack.txt"
+Step "搜索-防守组(定标版,以进攻组为起点)" "$PY $T search --group defense --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --init $W\cal_best_attack.txt --baseline $W\cal_base_train20.json --out $W\cal_best_defense.txt"
 
 # ---- 4) 合并 + 三方验收（训练集 / 留出A / 留出B）----
 Get-Content "$W\cal_best_attack.txt", "$W\cal_best_defense.txt" | Set-Content "$W\cal_best_combined.txt"

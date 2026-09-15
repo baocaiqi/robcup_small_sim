@@ -118,6 +118,10 @@ def sim_stats_for(x, names, games, seeds, tmpdir, tag, frames=24000, binary=None
         if not os.path.exists(traj):
             return None
         all_frames.extend(sim_stats.load(traj))
+        try:
+            os.remove(traj)          # 统计量算完就删（单文件 ~1.5MB，一轮 130 次评估会攒到几百 MB）
+        except OSError:
+            pass
     if len(all_frames) < 3000:
         return None
     return sim_stats.compute(all_frames)
@@ -235,6 +239,11 @@ def main():
             b = min(range(a.pop), key=lambda k: pop_f[k])
             log.write("%d,%.5f,%.5f\n" % (g, pop_f[b], sum(pop_f) / a.pop))
             log.flush()
+            # 每代都把"当前最优"单独落盘：万一最后一步出问题（第一次跑就踩了
+            # UnicodeEncodeError 把结果写空），也不会白跑一场
+            with open(os.path.join(a.tmpdir, "calib_best_sofar.txt"), "w", encoding="utf-8") as bf:
+                for n, v in zip(names, pop_x[b]):
+                    bf.write("%s %.6g\n" % (n, v))
             print(f"  第 {g}/{a.gens} 代: 最好 loss={pop_f[b]:.5f} 均值={sum(pop_f)/a.pop:.5f}"
                   f"  [{time.time()-t0:.0f}s, 已评估 {len(cache)}]")
     b = min(range(a.pop), key=lambda k: pop_f[k])
@@ -242,7 +251,7 @@ def main():
     _, stb = evaluate(xb, "best")
     report(stb, tgt, "定标后（最优参数 vs 真机）")
     print(f"  损失 {l0:.5f} → {pop_f[b]:.5f}")
-    with open(a.out, "w", encoding="ascii") as f:
+    with open(a.out, "w", encoding="utf-8") as f:      # 必须 utf-8：注释里有中文
         for n, v0, v1 in zip(names, x0, xb):
             f.write("%s %.6g   # 原 %.6g\n" % (n, v1, v0))
     print(f"→ {a.out}")

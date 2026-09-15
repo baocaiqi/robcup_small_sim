@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tune_es as T
 
 SETS = [
-    ("训练集", [1, 2, 3], os.path.join("docs", "work", "tune_base_train20.json")),
-    ("留出A", [1001, 1002, 1003], os.path.join("docs", "work", "tune_base_A20.json")),
-    ("留出B", [2001, 2002, 2003], os.path.join("docs", "work", "tune_base_B20.json")),
+    ("训练集", [1, 2, 3], "train20"),
+    ("留出A", [1001, 1002, 1003], "A20"),
+    ("留出B", [2001, 2002, 2003], "B20"),
 ]
 MIN_DNET = 0.30      # 留出集净胜球至少涨这么多
 MAX_SHOTS = 1.10     # 被射门最多涨 10%
@@ -61,10 +61,23 @@ def main():
     ap.add_argument("--games", type=int, default=20)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--tmpdir", default=os.path.join("build", "accept"))
+    # 基线前缀：第一阶段（旧仿真）用 tune_base_，定标后（cal 仿真）用 cal_base_。
+    # 必须跟着仿真换，否则拿旧仿真的基线判新仿真的结果，判定会全错。
+    ap.add_argument("--base-prefix", default="tune_base_")
+    ap.add_argument("--binary", default=None,
+                    help="用哪个 sim_bench（定标后用 build_calib 里的那个）")
     a = ap.parse_args()
+    if a.binary:
+        T.BENCH = a.binary
     os.makedirs(a.tmpdir, exist_ok=True)
     names = T.GROUPS[a.group]
     base_vals, ints = T.load_baseline_params()
+    sets = [(label, seeds, os.path.join("docs", "work", a.base_prefix + tag))
+            for label, seeds, tag in SETS]
+    for _, _, bj in sets:
+        if not os.path.exists(bj):
+            print(f"✗ 缺基线文件 {bj}（定标后要先用 cal_base_ 前缀重算基线）")
+            return 2
 
     print(f"=== 验收：group={a.group}（{len(names)} 个参数），每组 {a.games} 局/任务 × 12 任务 ===")
     all_pass = True
@@ -74,7 +87,7 @@ def main():
               f"{'门区纪律':>8} {'争球':>7} {'相对':>7}  判定")
         file_ok = True
         holdout_ok = True
-        for label, seeds, bj in SETS:
+        for label, seeds, bj in sets:
             base, agg = eval_on(pf, names, seeds, bj, a.games, ints, a.workers, a.tmpdir)
             d = agg["net"] - base["net"]
             sr = agg["shots"] / max(base["shots"], 1e-9)
