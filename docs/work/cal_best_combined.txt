@@ -1,0 +1,41 @@
+# ⚠️ 这组参数【被否决，禁止上机】：offline_test 有 6 项失败
+#    门将让开后仍去拦球 / 门前持球不夹抢 / 慢球也触发门线封堵 / 借墙射门被关掉(bank=0) / 接应点偏离 / 取值固定项
+#    详见 docs/06 轮次 77。它靠'关掉防守行为与借墙射门'换来仿真 +1.1 球/场。
+shoot.kMinOpen 12.6574
+shoot.kAngleFull 16.8801
+shoot.kWOpen 0.773371
+shoot.kBankWOpen 0.223982
+shoot.kBankMinQ 0.8
+shoot.kBankMargin 0
+shoot.kBankMaxDist 234.092
+shoot.kBankDirectWeak 0.381596
+shoot.kBankPrepDist 13.3482
+shoot.kBankPrepMargin 5.60872
+roles.kPrepDist 14.1804
+roles.kPrepPosTol 4.9262
+roles.kPrepAngTol 14.0694
+roles.kShootAlignTimeout 50.4774
+roles.kDribAngTol 21.3201
+roles.kMaxShootPushes 4
+pass.PASS_MAX_DIST 69.1446
+pass.BLOCK_THRESHOLD 7.87759
+pass.OFFSET_BASE 10.1
+pass.THREAT_RADIUS 27.4336
+defense.kInterceptLineDist 40.9252
+defense.kMinBallSpeed 1.3437
+defense.kMySpeed 3.45036
+defense.kReachMargin 0.823412
+defense.kDoubleTeamDangerDist 104.996
+defense.kDoubleTeamLateral 23.563
+defense.kDoubleTeamCarryDist 12.3523
+defense.kDoubleTeamCoverDist 37.841
+roles.kCoverLineDanger 0.315068
+roles.kCoverLineTta 27.4803
+roles.kCoverLineDist 56.5111
+roles.kCoverLineGiveUp 12.5563
+roles.kReboundRushSpeed 7.37701
+roles.kReboundRushDist 82.8252
+roles.kGkNoPushDist 64.0134
+roles.kGkSideClear 40.5197
+roles.kGkBackOff 11.6102
+roles.kGkBehindMargin 7.94095
