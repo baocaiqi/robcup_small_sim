@@ -149,7 +149,8 @@ def run_task(binary, extra, games, seed, params_path):
 def make_tasks(games, seeds, opp_filter=None):
     tasks = []
     for name, extra, w in OPPONENTS:
-        if opp_filter and name not in opp_filter:
+        # 对手名用**子串**匹配（--opp scripted 同时选中 scripted1.0/1.4）
+        if opp_filter and not any(f in name for f in opp_filter):
             continue
         for s in seeds:
             tasks.append({"name": name, "extra": extra, "w": w, "games": games, "seed": s})
@@ -190,6 +191,10 @@ def fitness(agg, base):
 
 def cmd_baseline(args, base_vals, ints):
     tasks = make_tasks(args.games, args.seeds, args.opp)
+    if not tasks:
+        print("✗ 任务池为空（检查 --opp 名称是否写错；可用: %s）"
+              % ", ".join(n for n, _, _ in OPPONENTS))
+        return 2
     t0 = time.time()
     names = [n for n in GROUPS[args.group]]
     x0 = [base_vals[n] for n in names]

@@ -1,7 +1,15 @@
 #include "simuro5/pass.hpp"
+#include "simuro5/shoot.hpp"        // 复用射门质量（把球挪到接球点问一次）
+#include "simuro5/defense.hpp"      // segment_clear_of_circles / CircleObstacle
+#include "simuro5/field_info.hpp"   // in_opp_goal_area
+#include <cmath>
+#include <algorithm>
+
 #include "simuro5/geometry.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/role_assignment.hpp"
+#define TUNABLE_PREFIX "pass."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -9,12 +17,12 @@ namespace simuro5 {
 
 namespace {
 // 调参常量
-constexpr double PASS_MAX_DIST     = 60.0;    // 最大传球距离 cm
-constexpr double PASS_MIN_DIST     = 8.0;     // 最小传球距离，避免贴脸传球
-constexpr double BLOCK_THRESHOLD   = 15.0;    // 传球线路阻挡阈值 cm
-constexpr double OFFSET_BASE       = 6.0;     // 接应点向前的领球偏移 cm
-constexpr double THREAT_RADIUS     = 30.0;    // 接应点周围敌方威胁半径 cm
-constexpr double FIELD_MARGIN      = 6.0;     // 接应点离边线的最小距离 cm
+TUNABLE(PASS_MAX_DIST, 60.0);  // 最大传球距离 cm
+TUNABLE(PASS_MIN_DIST, 8.0);  // 最小传球距离，避免贴脸传球
+TUNABLE(BLOCK_THRESHOLD, 15.0);  // 传球线路阻挡阈值 cm
+TUNABLE(OFFSET_BASE, 6.0);  // 接应点向前的领球偏移 cm
+TUNABLE(THREAT_RADIUS, 30.0);  // 接应点周围敌方威胁半径 cm
+TUNABLE(FIELD_MARGIN, 6.0);  // 接应点离边线的最小距离 cm
 
 // 路线 (sx,sy)->(tx,ty) 是否被某个对手机器人挡住
 bool route_blocked(const WorldModel &wm, double sx, double sy, double tx, double ty) {
@@ -136,6 +144,64 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     plan.target_x = best_tx;
     plan.target_y = best_ty;
     return plan;
+}
+
+// ============================================================
+// 配合进攻：选"接球后射门机会最好"的队友（docs/06 第 69 轮，用户 2026-09-15 指令）
+//   打分 = 把球挪到该队友的接球点、问一次射门模块得到的 quality（复用同一套净开口几何）；
+//   若从那里根本射不了（>110cm 射程外），给一个随距离衰减的底分，避免所有远点同为 0 分。
+//   安全性（用户要求的"可以安全接受"）：
+//     ① 球→接球点 线段上无对手（对手按半径 8cm 圆盘）
+//     ② 接球点 20cm 内无对手（被贴身不算安全）
+//     ③ 传球距离 ≤120cm（再长容易被对方中场截）
+//   只向前：接球点到对方门的距离必须比球更近 5cm 以上；接球点不得在对方门区（纪律）。
+// ============================================================
+CoopPass plan_coop_pass(const WorldModel &wm, int passer_id) {
+    CoopPass best;
+    const TeamContext &ctx = wm.ctx;
+    const double bx = wm.ball.x, by = wm.ball.y;
+    const double ogx = ctx.opp_goal_x();
+    const double d_goal = dist(bx, by, ogx, 90.0);
+
+    const int cand[3] = {2, 3, 4};                     // 助攻 / 中场 / 后卫（门将不参与）
+    const double ax[3] = {wm.assist_x, wm.mid_x, wm.passive_x};
+    const double ay[3] = {wm.assist_y, wm.mid_y, wm.passive_y};
+
+    for (int k = 0; k < 3; ++k) {
+        const int i = cand[k];
+        if (i == passer_id) continue;
+        const double rx = ax[k], ry = ay[k];
+        if (in_opp_goal_area(ctx, rx, ry)) continue;                       // 纪律：不进对方门区
+        if (dist(rx, ry, ogx, 90.0) > d_goal - 5.0) continue;              // 只向前传
+        if (dist(bx, by, rx, ry) > 120.0) continue;                        // 太远不传
+
+        CircleObstacle obs[PLAYERS_PER_SIDE];
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j) {
+            obs[j].x = wm.opp[j].x; obs[j].y = wm.opp[j].y; obs[j].r = 8.0;
+        }
+        if (!segment_clear_of_circles(bx, by, rx, ry, obs, PLAYERS_PER_SIDE)) continue;   // ① 线路
+        double opp_min = 1e9;
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j)
+            opp_min = std::min(opp_min, dist(rx, ry, wm.opp[j].x, wm.opp[j].y));
+        if (opp_min < 20.0) continue;                                      // ② 接球点被贴身
+
+        WorldModel tmp = wm;                                               // 借一份世界模型问射门
+        tmp.ball.x = rx; tmp.ball.y = ry; tmp.ball.vx = 0.0; tmp.ball.vy = 0.0;
+        tmp.in_penalty_exec = false;
+        ShootPlan ps = plan_shoot(tmp, i);
+        double q = ps.viable ? ps.quality : 0.0;
+        if (!ps.viable) {                                                  // 射程外：按距离给底分
+            const double dg = dist(rx, ry, ogx, 90.0);
+            q = 0.25 * clamp((160.0 - dg) / 160.0, 0.0, 1.0);
+        }
+        if (q <= best.score) continue;
+        best.viable = true; best.receiver_id = i; best.rx = rx; best.ry = ry; best.score = q;
+        double dx = rx - bx, dy = ry - by;
+        const double L = std::hypot(dx, dy);
+        if (L > 1e-6) { best.dir_x = dx / L; best.dir_y = dy / L; }
+        best.aim_rot = angle_to(0.0, 0.0, best.dir_x, best.dir_y);
+    }
+    return best;
 }
 
 } // namespace simuro5

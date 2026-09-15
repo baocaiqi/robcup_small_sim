@@ -1,0 +1,8 @@
+shoot.kMinOpen 6
+shoot.kBankMinQ 0.442931
+roles.kPrepDist 32
+roles.kCoverLineTta 14
+defense.kInterceptLineDist 62
+pass.PASS_MAX_DIST 34
+motion.kNearDist 11
+roles.kReboundRushDist 109
