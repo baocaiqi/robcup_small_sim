@@ -185,7 +185,16 @@ inline bool opp_kick_direction(const WorldModel &wm, double &dx, double &dy, int
 }
 
 // 由预测方向推"球会从我们门线哪个 y 进"；只在落进门框内时返回 true（供门将提前站位）
+// 开关（用户 2026-09-15 指令：**需要**这个功能 → 默认开）：
+//   ⚠️ **sim A/B 反对**：开=净胜 +0.12、把触发收紧到门前 120cm=−0.32，
+//   都低于不开时的 +0.48（同 seed，见 docs/06 第 71 轮）。原因推断：脚本对手的
+//   "机头对球"时刻与真机 demo 不同，且门将提前离开常规站位本身有代价。
+//   真机对手是官方 demo（出脚基本是前推）⇒ 只能真机裁决；真机若防守变差，
+//   把这里改 false 即回退（单常量）。
+inline constexpr bool kOppKickPredict = true;
+
 inline bool opp_kick_target_y(const WorldModel &wm, double &y_at_goal) {
+    if (!kOppKickPredict) return false;
     double dx = 0.0, dy = 0.0; int who = -1;
     // 只在**我方门前 120cm 内**才值得提前封线：中场/对方半场的静止球，
     //   即使对手贴球，射线打到我们门线也是巧合（sim A/B 实测放宽后净胜 +0.48→+0.12）。
