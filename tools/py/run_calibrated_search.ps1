@@ -45,8 +45,8 @@ Step "基线-留出B(2001-2003)" "$PY $T baseline --group both --games 20 --seed
 # 搜出来的（例如"传球距离砍到 33cm"），定标后球没那么容易停，这个结论很可能失效，
 # 拿它当起点会把搜索带偏。所以进攻组从默认值开始，让 DE 在新地基上自己找。
 # 防守组以前一组的产物为起点（坐标上升：先攻后守，符合规格 §5 的分组搜索约定）。
-Step "搜索-进攻组(定标版,从默认值)" "$PY $T search --group attack --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --baseline $W\cal_base_train20.json --out $W\cal_best_attack.txt"
-Step "搜索-防守组(定标版,以进攻组为起点)" "$PY $T search --group defense --games 20 --seeds 1 2 3 --pop 16 --gens 15 --workers 8 --binary $BIN --init $W\cal_best_attack.txt --baseline $W\cal_base_train20.json --out $W\cal_best_defense.txt"
+Step "搜索-进攻组(定标版,从默认值)" "$PY $T search --group attack --games 20 --seeds 1 2 3 --pop 14 --gens 12 --workers 8 --binary $BIN --baseline $W\cal_base_train20.json --out $W\cal_best_attack.txt"
+Step "搜索-防守组(定标版,以进攻组为起点)" "$PY $T search --group defense --games 20 --seeds 1 2 3 --pop 14 --gens 12 --workers 8 --binary $BIN --init $W\cal_best_attack.txt --baseline $W\cal_base_train20.json --out $W\cal_best_defense.txt"
 
 # ---- 4) 合并 + 三方验收（训练集 / 留出A / 留出B）----
 Get-Content "$W\cal_best_attack.txt", "$W\cal_best_defense.txt" | Set-Content "$W\cal_best_combined.txt"
