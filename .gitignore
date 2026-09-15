@@ -43,3 +43,10 @@ sim_eval_*.json
 回放_*.mp4
 build/replay/
 
+
+# 工作区自包含归集（tools/py/collect_workspace.py 同步过来）
+#   external/ = 官方 demo 源码/DLL/备份 —— **不进库**（原创红线：避免查重风险）
+#   logs/     = 真机 .rlg 日志、黑匣子 CSV、平台日志（体积大且是原始数据）
+external/
+logs/
+build_calib/
