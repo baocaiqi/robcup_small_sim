@@ -203,10 +203,12 @@ static void step_physics(SimState &s) {
         // 轮速受加速度限制：每帧最多变化 kAccel * kDt
         // 指令延迟：真机上本帧算出的轮速，要过 kActDelay 帧才生效
         int D = (int)(kActDelay + 0.5); if (D > 3) D = 3; if (D < 0) D = 0;
-        r.hist_l[r.hidx & 3] = r.vl; r.hist_r[r.hidx & 3] = r.vr;
-        r.hidx++;
-        double cmd_l = r.hist_l[(r.hidx + 4 - D) & 3];
-        double cmd_r = r.hist_r[(r.hidx + 4 - D) & 3];
+        r.hist_l[r.hidx] = r.vl; r.hist_r[r.hidx] = r.vr;
+        // D=0 → 读本帧刚写入那格（无延迟，保持旧行为）；D=1 → 读上一帧的命令
+        int rd = ((r.hidx - D) % 4 + 4) % 4;
+        r.hidx = (r.hidx + 1) & 3;
+        double cmd_l = r.hist_l[rd];
+        double cmd_r = r.hist_r[rd];
         // 轮速死区：真机小轮速推不动（0 = 关闭，保持旧行为）
         if (std::fabs(cmd_l) < kWheelDead) cmd_l = 0;
         if (std::fabs(cmd_r) < kWheelDead) cmd_r = 0;

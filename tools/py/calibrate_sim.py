@@ -105,14 +105,14 @@ def write_params(x, names, path):
             f.write("%s %.6g\n" % (n, v))
 
 
-def sim_stats_for(x, names, games, seeds, tmpdir, tag):
+def sim_stats_for(x, names, games, seeds, tmpdir, tag, frames=24000, binary=None):
     """跑 games 局（多种子）仿真并汇总统计量。"""
     pfile = os.path.join(tmpdir, "simpact_%s.txt" % tag)
     write_params(x, names, pfile)
     all_frames = []
     for s in seeds[:games]:
         traj = os.path.join(tmpdir, "traj_%s_%d.csv" % (tag, s))
-        cmd = [BENCH, "--games", "1", "--frames", "24000", "--seed", str(s),
+        cmd = [binary or BENCH, "--games", "1", "--frames", str(frames), "--seed", str(s),
                "--traj", traj, "--params", pfile]
         r = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
         if not os.path.exists(traj):
@@ -157,6 +157,7 @@ def report(st, tgt, title):
 
 
 def main():
+    global BENCH          # 必须在任何使用之前声明（--binary 默认值也用它）
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", type=int, default=3, help="每次评估跑几局（多种子汇总统计量）")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
@@ -168,7 +169,11 @@ def main():
     ap.add_argument("--eval-only", action="store_true")
     ap.add_argument("--out", default=os.path.join("docs", "work", "sim_params_calibrated.txt"))
     ap.add_argument("--tmpdir", default=os.path.join("build", "calib"))
+    ap.add_argument("--frames", type=int, default=24000, help="每局跑多少帧（降成本用）")
+    ap.add_argument("--binary", default=BENCH,
+                    help="用哪个 sim_bench（定标必须用打了 sim.* 补丁的那个）")
     a = ap.parse_args()
+    BENCH = a.binary
     os.makedirs(a.tmpdir, exist_ok=True)
 
     tgt = load_targets()
@@ -184,7 +189,7 @@ def main():
         key = tuple(round(v, 5) for v in x)
         if key in cache:
             return cache[key]
-        st = sim_stats_for(x, names, a.games, a.seeds, a.tmpdir, tag)
+        st = sim_stats_for(x, names, a.games, a.seeds, a.tmpdir, tag, a.frames, a.binary)
         if st is None:
             res = (1e9, None)
         else:
