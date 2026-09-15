@@ -160,6 +160,40 @@ inline void rebound_point(const WorldModel &wm, double y_side, double &x, double
 inline double rebound_min_danger() { return 8.0; }
 
 // ============================================================
+// 对方"要出脚"的方向预测（docs/06 第 71 轮，用户 2026-09-15 指令）
+//   平台规则「球出射方向 ≈ 撞球瞬间的机头方向」只在**前推**时成立：
+//   对方倒着撞球时球会沿运动方向出去（真机实证：我方点球帧 896 起球被顶向自家门，
+//   机头朝 −x 而球朝 +x）。
+//   所以只在三个条件同时成立时才采信它的 rot：① 球几乎静止 ② 对手贴近球(≤25cm)
+//   ③ 它的机头大致指着球(≤35°)。球在动时一律交给轨迹外推，不看向。
+// ============================================================
+inline bool opp_kick_direction(const WorldModel &wm, double &dx, double &dy, int &who) {
+    who = -1;
+    if (!wm.ball.valid) return false;
+    if (std::hypot(wm.ball.vx, wm.ball.vy) > 1.0) return false;       // ① 球在动 → 不用朝向
+    double dmin = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        const double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
+        if (d < dmin) { dmin = d; who = i; }
+    }
+    if (who < 0 || dmin > 25.0) return false;                         // ② 没人贴球
+    const double to_ball = angle_to(wm.opp[who].x, wm.opp[who].y, wm.ball.x, wm.ball.y);
+    if (std::fabs(angle_diff(wm.opp[who].rot, to_ball)) > 35.0) return false;   // ③ 机头没对着球
+    const double ra = wm.opp[who].rot * SIMURO5_PI / 180.0;
+    dx = std::cos(ra); dy = std::sin(ra);
+    return true;
+}
+
+// 由预测方向推"球会从我们门线哪个 y 进"；只在落进门框内时返回 true（供门将提前站位）
+inline bool opp_kick_target_y(const WorldModel &wm, double &y_at_goal) {
+    double dx = 0.0, dy = 0.0; int who = -1;
+    if (!opp_kick_direction(wm, dx, dy, who)) return false;
+    if (!predict_y_at_x(wm.ball.x, wm.ball.y, dx, dy, wm.ctx.our_goal_x(), y_at_goal))
+        return false;
+    return y_at_goal >= goal_y_low() && y_at_goal <= goal_y_high();
+}
+
+// ============================================================
 // 防守计划
 // ============================================================
 struct DefensePlan {

@@ -336,6 +336,17 @@ void run_goalie(WorldModel &wm, int id) {
             return;
         }
     }
+    // —— 对方要出脚：按它的机头方向提前封线（docs/06 第 71 轮）——
+    //   球静止 + 对手贴球 + 机头对着球 → 用它的朝向预测出球方向，抢门线上的预测落点。
+    //   （球一动就让位给下面的"门线封堵"，那里用真实轨迹，更准。）
+    {
+        double y_pred = 90.0;
+        if (opp_kick_target_y(wm, y_pred)) {
+            motion::position(r, ctx.our_goal_x() + ctx.attack_dir() * 3.0,
+                             clamp(y_pred, 74.0, 106.0), motion::TM_PASS);
+            return;
+        }
+    }
     // 对方持球压门（球距门<45 且对方离球<25）→ 不冲球，封球-门连线：
     //   真机丢球复盘（12:03 场下角两球）：demo 高速带球到门前时，门将冲球
     //   推穿目标在球身上，demo 变向一推球就换侧进门；改为站在球与门心

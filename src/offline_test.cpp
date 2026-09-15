@@ -2195,6 +2195,35 @@ static int test_no_reverse_through_ball() {
 }
 
 // ============================================================
+// docs/06 第 71 轮：对方出脚方向预测（只采信"球静止+贴球+机头对球"的 rot）
+// ============================================================
+static int test_opp_kick_predict() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220，门框 y∈[70,110]
+    wm.ball.valid = true;
+    wm.ball.x = 180; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 300; wm.opp[i].y = 20 + i * 30; wm.opp[i].rot = 0; }
+    // 对手贴球、机头正对球 → 预测落点约 y=91.8（在门框内）
+    wm.opp[0].x = 158; wm.opp[0].y = 89;
+    wm.opp[0].rot = angle_to(158, 89, 180, 90);
+    double y = 0.0;
+    if (!opp_kick_target_y(wm, y)) { printf("FAIL: 贴球且机头对球应给出预测落点\n"); return 1; }
+    if (std::fabs(y - 91.8) > 1.5) { printf("FAIL: 预测落点应≈91.8，实际 %.1f\n", y); return 1; }
+    // ② 球在动 → 不用朝向
+    wm.ball.vx = 2.0;
+    if (opp_kick_target_y(wm, y)) { printf("FAIL: 球在动时不该用朝向预测\n"); return 1; }
+    wm.ball.vx = 0.0;
+    // ③ 机头没对着球（转 90°）→ 不采信
+    wm.opp[0].rot = normalize_angle(wm.opp[0].rot + 90.0);
+    if (opp_kick_target_y(wm, y)) { printf("FAIL: 机头没对球不该预测\n"); return 1; }
+    // ④ 没人贴球（>25cm）→ 不预测
+    wm.opp[0].x = 140;
+    if (opp_kick_target_y(wm, y)) { printf("FAIL: 对手离球太远不该预测\n"); return 1; }
+    printf("opp kick predict: OK (贴球+对球才预测/球在动不用/机头偏不采信/太远不预测)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 68 轮：我方门区"只能有门将"硬闸
 //   真机 09-14 20:46 场：我方门区 ≥2 人 674 帧（≈9%），同场被判 9 次点球 ⇒ 病根在此。
 // ============================================================
@@ -2313,6 +2342,7 @@ int main() {
     rc |= test_penalty_aim_offcenter();
     rc |= test_own_goalarea_guard();
     rc |= test_no_reverse_through_ball();
+    rc |= test_opp_kick_predict();
     // rc |= test_coop_pass();   // ⚠️ 暂未注册：见 docs/06 第 69 轮（用例里候选被全部过滤，原因待加调试输出定位）
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
