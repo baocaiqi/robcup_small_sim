@@ -93,8 +93,13 @@ RANGES = {
     "defense.kDoubleTeamCarryDist": (8.0, 30.0), "defense.kDoubleTeamCoverDist": (25.0, 70.0),
     # 门线封堵：慢球阈值不能压太低（否则慢球也触发封堵、把人拉出位置；轮次 77 挂过该测试）
     "roles.kCoverLineDanger": (0.8, 2.5), "roles.kCoverLineTta": (8.0, 60.0),
-    "roles.kCoverLineDist": (20.0, 140.0), "roles.kCoverLineGiveUp": (85.0, 215.0),
-    "roles.kReboundRushSpeed": (0.5, 6.0), "roles.kReboundRushDist": (20.0, 150.0),
+    "roles.kCoverLineDist": (20.0, 140.0),
+    # ⚠️ kCoverLineGiveUp 默认只有 12（不是 85cm 那种量纲）。
+    #    我曾写成 (85,215) ⇒ 经 ±60% 夹取后 **上界(19.7) < 下界(85)（范围倒置）**，
+    #    该参数在每个候选里都被钉死在 19.7（+64%），导致防守组 182 个候选**全部**被闸门否决。
+    "roles.kCoverLineGiveUp": (7.0, 20.0),
+    # kReboundRushSpeed 默认 8；原范围 (0.5,6) 不含默认值 ⇒ 起点被夹到 6（-25%），量纲对不上，改宽
+    "roles.kReboundRushSpeed": (4.0, 14.0), "roles.kReboundRushDist": (20.0, 150.0),
     # 门将让开（功能关键）：轮次 77 挂过"已让开就不该再拦"（可能把球顶进自家门）
     "roles.kGkNoPushDist": (20.0, 100.0), "roles.kGkSideClear": (20.0, 50.0),
     "roles.kGkBackOff": (5.0, 20.0), "roles.kGkBehindMargin": (4.0, 16.0),
@@ -250,6 +255,13 @@ def cmd_search(args, base_vals, ints):
         a, b = min(a, b), max(a, b)
         a = max(a, d - abs(d) * 0.6 - 0.5)      # 兜底范围别离默认值太远（防"跑飞"）
         b = min(b, d + abs(d) * 0.6 + 0.5)
+        if a >= b:
+            # 护栏：夹取后若区间反了（说明 RANGES 与默认值量纲不符），退回默认值附近的窄区间并报警。
+            # 踩过的坑：kCoverLineGiveUp 写成 (85,215) 而默认只有 12 ⇒ 区间倒置 ⇒
+            # 该参数被钉死在 19.7，防守组 182 个候选**全部**被测试闸门否决。
+            print(f"  ⚠️ 参数 {n} 的范围夹取后倒置（RANGES 与默认值 {d:g} 量纲不符），"
+                  f"已退回 ±10% 窄区间")
+            a, b = d * 0.9, d * 1.1
         # 注意：**不能**用 hi = max(b, d) 把默认值包进范围。
         # 之前的写法让"默认值本身不合理"的参数（如 kBankMaxDist 默认 260 > 场长 220）
         # 把人为设的上限顶穿（160 → 260），等于范围失效。现在改成把默认值**夹进**范围。

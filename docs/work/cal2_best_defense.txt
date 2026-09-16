@@ -1,0 +1,21 @@
+# 防守组搜索结果【未达标，未合并】：留出A Δnet +0.247 / 留出B +0.097，均 < 验收线 +0.30
+#    训练集 +0.230（小提升），被射门 -0.8%、门区纪律 20.23->20.20、争球 -0.5%；offline_test 通过。
+#    结论：防守参数已接近手工调优上限，这批旋钮的余量很小；保持默认值。
+defense.kInterceptLineDist 63.1226
+defense.kMinBallSpeed 2.76736
+defense.kMySpeed 2.11842
+defense.kReachMargin 0.883201
+defense.kDoubleTeamDangerDist 88.9956
+defense.kDoubleTeamLateral 27.8537
+defense.kDoubleTeamCarryDist 8
+defense.kDoubleTeamCoverDist 56.7196
+roles.kCoverLineDanger 1.07001
+roles.kCoverLineTta 15.5741
+roles.kCoverLineDist 73.4972
+roles.kCoverLineGiveUp 11.7812
+roles.kReboundRushSpeed 5.82613
+roles.kReboundRushDist 98.3358
+roles.kGkNoPushDist 50.7918
+roles.kGkSideClear 39.4761
+roles.kGkBackOff 8.22611
+roles.kGkBehindMargin 6.98191
