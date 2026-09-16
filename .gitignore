@@ -50,3 +50,10 @@ build/replay/
 external/
 logs/
 build_calib/
+# 演示/讲解类材料（用户 2026-09-16 要求：从仓库移除，文件保留在工作区磁盘）
+#   —— 这些是提交材料/讲解稿，不属于代码仓库；需要时单独交付
+Hnnu策略视频*.mp4
+Hnnu策略介绍.*
+Hnnu策略说明书.*
+视频演讲稿.md
+docs/work/*稿*.md
