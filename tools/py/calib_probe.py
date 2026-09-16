@@ -140,9 +140,25 @@ def probe(logs, tag):
 
 
 res = {}
-res['Hnnu'] = probe(load(HNNU, LIMIT), "我方日志（Hnnu，17 场量级）")
+res['Hnnu'] = probe(load(HNNU, LIMIT), "我方日志（Hnnu）")
 if DEMO:
-    res['DEMO'] = probe(load(DEMO, LIMIT), "官方 demo 日志（校准脚本对手用）")
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calib_probe_result.json'), 'w') as f:
-    json.dump(res, f, indent=2, ensure_ascii=False)
-print("\n→ tools/py/calib_probe_result.json")
+    res['DEMO'] = probe(load(DEMO, LIMIT), "官方 demo 日志")
+
+# 一个日志集里同时含我方(blue)与对手(yellow)的统计量，所以同一份结果既能当"我方靶子"
+# 也能当"对手靶子"。只跑一个集合时，把结果同时挂到 ALL / Hnnu / DEMO 三个键下，
+# 定标脚本就不必关心分区名（这是"用当前配置的数据定标"这条纪律需要的：黄队档位一变就要重标）。
+if res.get('Hnnu') and not res.get('DEMO'):
+    m = res['Hnnu']
+    res = {'ALL': m, 'Hnnu': m, 'DEMO': m}
+
+out_path = None
+if '--out' in sys.argv:
+    out_path = sys.argv[sys.argv.index('--out') + 1]
+label = sys.argv[sys.argv.index('--label') + 1] if '--label' in sys.argv else LOGDIR
+if out_path:
+    res['_meta'] = {'source_dir': LOGDIR, 'label': label,
+                    'log_files': len(LOGS), 'probed_files': min(LIMIT, len(LOGS)),
+                    'hint': '靶子必须来自与"比赛时相同配置"的日志（黄队档位/策略版本），配置一变就重标'}
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(res, f, indent=2, ensure_ascii=False)
+    print(f"\n→ {out_path}（label={label}，日志 {len(LOGS)} 场，实际用 {min(LIMIT, len(LOGS))} 场）")

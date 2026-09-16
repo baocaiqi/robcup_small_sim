@@ -31,6 +31,9 @@ import sim_stats  # 同一口径的仿真侧统计量
 
 BENCH = os.path.join("build", "Release", "sim_bench.exe")
 PROBE = os.path.join("tools", "py", "calib_probe_result.json")
+# 参数快照（由 sim_bench --dump-params 刷新）：用**当前源码里的值**当定标起点，
+# 避免"已经标好的球/墙物理"在重标时被丢回历史默认值。
+SNAPSHOT = os.path.join("docs", "work", "params_基线.txt")
 
 # 要拧的仿真旋钮：(名字, 当前值, 下界, 下界说明见 docs/06 轮次 75)
 SIM_PARAMS = {
@@ -86,12 +89,13 @@ MATCH = [
 ]
 
 
-def load_targets():
-    with open(PROBE, encoding="utf-8") as f:
+def load_targets(path=None):
+    with open(path or PROBE, encoding="utf-8") as f:
         probe = json.load(f)
     tgt = {}
     for sim_key, real_key, section, w in MATCH:
-        sec = probe.get(section) or probe.get(section.upper()) or probe.get(section.capitalize()) or {}
+        sec = (probe.get(section) or probe.get(section.upper()) or probe.get(section.capitalize())
+               or probe.get("ALL") or {})
         v = sec.get(real_key)
         if v is None or (isinstance(v, float) and v != v):   # None / NaN
             continue
@@ -176,16 +180,34 @@ def main():
     ap.add_argument("--frames", type=int, default=24000, help="每局跑多少帧（降成本用）")
     ap.add_argument("--binary", default=BENCH,
                     help="用哪个 sim_bench（定标必须用打了 sim.* 补丁的那个）")
+    ap.add_argument("--target", default=None,
+                    help="真机靶子 JSON（默认 tools/py/calib_probe_result.json；"
+                         "换配置后要用新日志重标 ⇒ 传新的靶子文件）")
     a = ap.parse_args()
     BENCH = a.binary
     os.makedirs(a.tmpdir, exist_ok=True)
 
-    tgt = load_targets()
-    print(f"真机靶子 {len(tgt)} 项（来自 {PROBE}）")
+    tgt = load_targets(getattr(a, "target", None))
+    print(f"真机靶子 {len(tgt)} 项（来自 {getattr(a, 'target', None) or PROBE}）")
     names = list(SIM_PARAMS)
     lo = [SIM_PARAMS[n][1] for n in names]
     hi = [SIM_PARAMS[n][2] for n in names]
-    x0 = [SIM_PARAMS[n][0] for n in names]
+    # 起点 = 当前源码值（快照），缺失才退回脚本里的历史默认值
+    snap = {}
+    if os.path.exists(SNAPSHOT):
+        for line in open(SNAPSHOT, encoding="utf-8"):
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            p = line.split()
+            if len(p) == 2:
+                try:
+                    snap[p[0]] = float(p[1])
+                except ValueError:
+                    pass
+    x0 = [snap.get(n, SIM_PARAMS[n][0]) for n in names]
+    n_from_snap = sum(1 for n in names if n in snap)
+    print(f"起点：{n_from_snap}/{len(names)} 个参数取自当前源码快照（其余用脚本默认值）")
 
     cache = {}
 

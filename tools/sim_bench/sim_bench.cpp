@@ -59,32 +59,32 @@ struct Rng {
 //   定标脚本（tools/py/calibrate_sim.py）用真机 132 场 rlg 反推它们该拧到哪。
 static constexpr double kDt = 1.0 / 40.0;                 // 40Hz（平台定死，不可调）
 static constexpr double kGoalLo = 70.0, kGoalHi = 110.0;  // 门宽（规则，不可调）
-TUNABLE(kSpeed, 1.02019);            // 轮速→cm/s 缩放（真机实测我方 p99≈154cm/s，现在只有 90）
-TUNABLE(kWheelBase, 11.7143);       // 轮距 cm（决定转向灵敏度）
-TUNABLE(kAccel, 292.982);          // 轮速最大加速度 cm/s²（真机 p90≈0.209cm/帧² ⇒ 量级正确）
-TUNABLE(kBallDecay, 0.996323);      // 球**高速段**每帧衰减（真机实测 0.992~0.994）
+TUNABLE(kSpeed, 1.12856);            // 轮速→cm/s 缩放（真机实测我方 p99≈154cm/s，现在只有 90）
+TUNABLE(kWheelBase, 12.1851);       // 轮距 cm（决定转向灵敏度）
+TUNABLE(kAccel, 334.84);          // 轮速最大加速度 cm/s²（真机 p90≈0.209cm/帧² ⇒ 量级正确）
+TUNABLE(kBallDecay, 0.9999);      // 球**高速段**每帧衰减（真机实测 0.992~0.994）
 TUNABLE(kBallDecaySlow, 0.985);  // 球**低速段**每帧衰减（真机实测 ≈0.9999 几乎不减速）
 TUNABLE(kDecayVref, 0.0);        // 速度分档阈值 cm/帧；0 = 关闭两档（默认与旧行为一致）
-TUNABLE(kWallRest, 0.436842);        // 撞墙法向恢复（真机新测法实测 0.451/0.449）
+TUNABLE(kWallRest, 0.448686);        // 撞墙法向恢复（真机新测法实测 0.451/0.449）
 TUNABLE(kWallFricX, 0.81);       // x 墙切向保持（真机实测 ≈0.99 几乎无损失）
 TUNABLE(kWallFricY, 0.81);       // y 墙切向保持（真机实测 0.78~0.84）
-TUNABLE(kContact, 5.19905);          // 球-机器人最小分离 cm（防球嵌进机器人身体）
-TUNABLE(kCarryR, 10.0703);           // 携带区半径 cm（略大于策略"球后 8cm 推球点"）
-TUNABLE(kCarryArc, 39.1333);        // 携带区前向半弧（度）
-TUNABLE(kDeflect, 0.457258);         // 守门员挡球反弹恢复系数
+TUNABLE(kContact, 7.15354);          // 球-机器人最小分离 cm（防球嵌进机器人身体）
+TUNABLE(kCarryR, 13.9858);           // 携带区半径 cm（略大于策略"球后 8cm 推球点"）
+TUNABLE(kCarryArc, 53.4047);        // 携带区前向半弧（度）
+TUNABLE(kDeflect, 0.394744);         // 守门员挡球反弹恢复系数
 TUNABLE(kRobotR, 10);           // 机器人-机器人最小间距 cm
 // —— 新增：真机有、仿真原先没有的两个执行环节 ——
 TUNABLE(kActDelay, 0);         // 指令生效延迟帧数（真机至少 1 帧；0=旧行为）
 TUNABLE(kWheelDead, 0);        // 轮速死区：小于此值的轮速命令推不动（0=旧行为）
 // —— 推球动量（原来硬编码 0.3 / 0.7） ——
-TUNABLE(kPushKeep, 0.229509);         // 推球时保留旧球速的比例
-TUNABLE(kPushGain, 0.928806);         // 推球时机器人速度注入的比例
+TUNABLE(kPushKeep, 0.427589);         // 推球时保留旧球速的比例
+TUNABLE(kPushGain, 0.98998);         // 推球时机器人速度注入的比例
 // —— 脚本对手速度（原来写死 80/30/50/40；实测"对手慢一半"的根因就在这里） ——
-TUNABLE(oppChaseSpeed, 87.9856);      // 追击手（远球）
-TUNABLE(oppChaseNearSpeed, 24.675);  // 追击手（近球 20cm 内）
-TUNABLE(oppSupportSpeed, 103.834);    // 协防
-TUNABLE(oppFormationSpeed, 26.7409);  // 阵型站位
-TUNABLE(oppGkSpeed, 33.4612);         // 门将横向 cm/s
+TUNABLE(oppChaseSpeed, 145.712);      // 追击手（远球）
+TUNABLE(oppChaseNearSpeed, 10);  // 追击手（近球 20cm 内）
+TUNABLE(oppSupportSpeed, 120);    // 协防
+TUNABLE(oppFormationSpeed, 37.624);  // 阵型站位
+TUNABLE(oppGkSpeed, 77.2724);         // 门将横向 cm/s
 
 struct SimRobot {
     double x=0, y=0, rot=0, vl=0, vr=0, pl=0, pr=0;
