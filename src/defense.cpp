@@ -22,11 +22,11 @@ namespace simuro5 {
 //   越近 → 站位越靠门，堵门更稳，但断球更晚、留给反应的时间更少；
 //   越远 → 断球更早，但离门远、一旦被变向绕过就回不来。
 //   默认 50cm（沿用旧版「球-门连线 50cm」的口径）。
-TUNABLE(kInterceptLineDist, 50.0);
+TUNABLE(kInterceptLineDist, 48.5364);
 
 // 球速阈值(cm/帧)：低于此值视为「球基本停着」，外推方向噪声大、
 // 无断球价值，直接回退到静态球-门连线站位。
-TUNABLE(kMinBallSpeed, 3.0);
+TUNABLE(kMinBallSpeed, 1.35924);
 
 // 断球点夹取范围，防止站出场地或贴死边线。
 TUNABLE(kMinX, 12.0);
@@ -38,11 +38,11 @@ TUNABLE(kMaxY, 165.0);
 //   标定来源：world_model.cpp 对方速度差分处实测「机器人正常 ~2.5 cm/帧」
 //   （kMaxOppVel=8.0 那条注释），同物理引擎下我方速度一致，取 2.5 与实测对齐。
 //   原 2.0 是未标定的保守拍脑袋值——偏低会高估我到达时间、漏掉实际追得上的断球点。
-TUNABLE(kMySpeed, 2.5);
+TUNABLE(kMySpeed, 2.18624);
 
 // 可达余量倍数：我到达时间 ≤ 球到达时间 × 该系数 才认为追得上。
 //   >1 给自己留缓冲（比如 1.2 = 多留 20% 时间余量）。
-TUNABLE(kReachMargin, 1.2);
+TUNABLE(kReachMargin, 1.04068);
 
 // ============================================================
 // 纯函数：球轨迹 ∩ 球门前拦截线
@@ -288,10 +288,10 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
 //   只让 assist/midfield 里「非清道夫、且离持球者更近」的那一个上前，
 //   另一个留在区域里保持纵深（两个同时压上会被一脚直塞打穿）。
 // ============================================================
-TUNABLE(kDoubleTeamDangerDist, 100.0);  // 持球者离门多近才夹抢(cm)
-TUNABLE(kDoubleTeamLateral, 20.0);  // 夹抢点横向偏移(cm)：与盯人者错开角度
-TUNABLE(kDoubleTeamCarryDist, 15.0);  // 持球者判定：离球 <此值视为正带球
-TUNABLE(kDoubleTeamCoverDist, 45.0);  // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
+TUNABLE(kDoubleTeamDangerDist, 111.151);  // 持球者离门多近才夹抢(cm)
+TUNABLE(kDoubleTeamLateral, 32.5);  // 夹抢点横向偏移(cm)：与盯人者错开角度
+TUNABLE(kDoubleTeamCarryDist, 8);  // 持球者判定：离球 <此值视为正带球
+TUNABLE(kDoubleTeamCoverDist, 53.832);  // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
 
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
