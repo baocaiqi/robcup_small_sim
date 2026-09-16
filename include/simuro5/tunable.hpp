@@ -57,6 +57,17 @@ inline void reset_params() {
     for (auto& e : param_registry()) *e.ptr = e.def;
 }
 
+// 按名字取值（找不到返回 fallback）。
+// 用途：单元测试里做"按当前旋钮值断言"——例如"射门前准备距离应等于 kPrepDist"，
+// 而不是写死 20cm。否则自动调参一改这个旋钮，所有候选都会挂在测试上，
+// 测试就从"守住行为"变成了"禁止调参"。
+inline double get_param(const char* name, double fallback = 0.0) {
+    for (auto& e : param_registry()) {
+        if (e.name == name) return *e.ptr;
+    }
+    return fallback;
+}
+
 // 从文本文件读参数：每行 "name value"，# 或 // 开头为注释，空行忽略。
 // 返回成功设置的条数；unknown 非空时收集未识别的名字。
 inline int apply_param_file(const char* path, std::vector<std::string>* unknown = nullptr) {

@@ -58,30 +58,30 @@ TUNABLE(kMaxShotFar, 110.0);  // 远射档上限
 constexpr bool   kFarShotEnabled = true;
 TUNABLE(kMinShot, 5.0);  // 球距门线过近(<5cm)不射（无可推空间）
 constexpr double kLegacyRange= 70.0;    // ≤此距离维持无条件可射（A/B 校准，勿当参数乱调）
-TUNABLE(kMinOpen, 8.0);  // 远射放行的最小净开口角（度）
-TUNABLE(kAngleFull, 18.0);  // 开口评分饱和角（度）
+TUNABLE(kMinOpen, 9.00123);  // 远射放行的最小净开口角（度）
+TUNABLE(kAngleFull, 19.2041);  // 开口评分饱和角（度）
 TUNABLE(kSpeedFull, 8.0);  // 球速评分饱和（cm/帧）
 TUNABLE(kGkRadius, 8.0);  // GK 有效遮挡半径（本体 6 + 扑救余量 2）
 TUNABLE(kLaneLen, 30.0);  // 射门路线拦截检查长度 cm
 TUNABLE(kLaneBlockR, 8.0);  // 拦截者判挡半径（本体 6 + 余量 2）
-TUNABLE(kWOpen, 0.5);
+TUNABLE(kWOpen, 0.371001);
 TUNABLE(kWDist, 0.3);
 TUNABLE(kWSpeed, 0.2);  // quality 权重
 
 
 // —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
 // 撞墙系数不在这里写死：唯一真值来源是 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()
-TUNABLE(kBankMaxDist, 260.0);  // 借墙总路程上限 cm（超过则距离项 0）
+TUNABLE(kBankMaxDist, 300);  // 借墙总路程上限 cm（超过则距离项 0）
 TUNABLE(kBankCornerFull, 40.0);  // 反弹点离对方门线多远算满分（否则像"蹭门柱"）
 TUNABLE(kBankCornerMin, 12.0);  // 反弹点离门线近于此 → 直接否决
 TUNABLE(kBankAngleFull, 18.0);  // 借墙的开口满分角（与直线同口径）
 TUNABLE(kBankMinSlope, 0.25);  // 入射"陡度"下限 |法向|/|切向|：太低=贴墙扫，不可靠
-TUNABLE(kBankMinQ, 0.45);  // 借墙放行阈值
-TUNABLE(kBankMargin, 0.10);  // 必须比直线好这么多才换（不打平就换）
-TUNABLE(kBankDirectWeak, 0.35);  // 直线 quality 低于此才算"没戏"，才考虑借墙
-TUNABLE(kBankPrepDist, 20.0);  // 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
-TUNABLE(kBankPrepMargin, 5.0);  // 准备点离场边余量
-TUNABLE(kBankWOpen, 0.30);
+TUNABLE(kBankMinQ, 0.522055);  // 借墙放行阈值
+TUNABLE(kBankMargin, 0.144751);  // 必须比直线好这么多才换（不打平就换）
+TUNABLE(kBankDirectWeak, 0.471292);  // 直线 quality 低于此才算"没戏"，才考虑借墙
+TUNABLE(kBankPrepDist, 17.2849);  // 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
+TUNABLE(kBankPrepMargin, 7.94513);  // 准备点离场边余量
+TUNABLE(kBankWOpen, 0.274509);
 TUNABLE(kBankWDist, 0.25);
 TUNABLE(kBankWBounce, 0.25);
 TUNABLE(kBankWSpd, 0.20);

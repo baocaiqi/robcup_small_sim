@@ -568,13 +568,13 @@ void run_goalie(WorldModel &wm, int id) {
 TUNABLE(kReboundRushSpeed, 8.0);  // cm/帧：反弹球可抢速度阈值（GK扑出/挡回典型 <10）
 TUNABLE(kReboundRushDist, 90.0);  // cm：我方距球超过此值不冲（就近补，防全场狂奔）
 // —— 禁区前沿变角推射次数上限（docs/17，模仿官方"沿变角推球"）——
-TUNABLE(kMaxShootPushes, 3);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+TUNABLE(kMaxShootPushes, 1);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
 // —— 到点定向射门（docs/18 §8）：准备点距离/位置容差/朝向容差 ——
 //   球后 20cm：够得着球（下一帧直线推穿能碰到球心），又不至于贴太近把球顶走
 //   位置容差 3cm：制动包线停住精度 ~1.5cm，留余量
 //   朝向容差 10°：1m 处横向偏差 = 100·tan10° ≈ 17.6cm < 门半宽 20cm → 能射正；
 //     旧口径是 40°（1m 处偏 92cm = 两个门宽），真机实测机头−瞄准线 p50=51.6°、≤10° 仅 6%
-TUNABLE(kPrepDist, 20.0);
+TUNABLE(kPrepDist, 23.5578);
 // 罚点球助跑距离（cm）：出球速度 = 撞球瞬间的机头速度，20cm 助跑只有 ~103cm/s，
 //   40cm 外的点球飞行 ~17 帧 → 门将横移 17cm 就够到（真机 09-13 rlg 帧 2350 球被打偏）。
 TUNABLE(kPenaltyPrepDist, 15.0);  // 15cm（原 35：真机实证倒车太久会被截）
@@ -584,14 +584,14 @@ TUNABLE(kPenaltyPrepDist, 15.0);  // 15cm（原 35：真机实证倒车太久会
 double shoot_prep_dist(const WorldModel &wm) {
     return wm.in_penalty_exec ? kPenaltyPrepDist : kPrepDist;
 }
-TUNABLE(kPrepPosTol, 3.0);
-TUNABLE(kPrepAngTol, 10.0);
+TUNABLE(kPrepPosTol, 4.01318);
+TUNABLE(kPrepAngTol, 13.1809);
 // 对准尝试超时（帧）：球一直在动/被抢，死等对准会把机会全耗掉 → 超时按当前朝向推
 //   ⚠️ sim A/B 反对本项（净胜 -1.63）：sim 的 carry 机制隐含"机头对着球"、
 //   且是弱脚本门将（"快推"优于"推准"）→ 由用户决定真机观查（docs/06 第 47 轮）。
-TUNABLE(kShootAlignTimeout, 40);
+TUNABLE(kShootAlignTimeout, 54.7289);
 // 带球推进的机头对准容差（度）：比射门(10°)略松，但远紧于旧的 40°
-TUNABLE(kDribAngTol, 20.0);
+TUNABLE(kDribAngTol, 31.423);
 TUNABLE(kActiveGaLimit, 8);
 TUNABLE(kActiveGaTotal, 18);  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）

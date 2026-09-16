@@ -22,6 +22,7 @@
 #include "simuro5/field_info.hpp"
 #include "simuro5/pass.hpp"
 #include "simuro5/shoot.hpp"
+#include "simuro5/tunable.hpp"   // 参数注册表：--params 注入 + 按当前旋钮值断言
 
 using namespace simuro5;
 
@@ -401,8 +402,11 @@ static int test_pass() {
             printf("FAIL: 场景④应联动站位点选ASSIST(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
             return 1;
         }
-        if (fabs(p.target_x - 54.0) > 0.5 || fabs(p.target_y - 70.0) > 0.5) {
-            printf("FAIL: 场景④接应点未基于站位点 (%.1f,%.1f)\n", p.target_x, p.target_y);
+        // 接应点 = 站位点朝进攻方向前移 pass.OFFSET_BASE（原来是写死的 6cm）
+        const double off = simuro5::get_param("pass.OFFSET_BASE", 6.0);
+        if (fabs(p.target_x - (60.0 - off)) > 0.5 || fabs(p.target_y - 70.0) > 0.5) {
+            printf("FAIL: 场景④接应点未基于站位点 (%.1f,%.1f) 期望 x=%.1f（60 - OFFSET_BASE=%.1f）\n",
+                   p.target_x, p.target_y, 60.0 - off, off);
             return 1;
         }
     }
@@ -1973,11 +1977,12 @@ static int test_penalty_shot_prep() {
             return 1;
         }
     }
-    // 常规射门：助跑仍是 20cm
+    // 常规射门：助跑距离应等于**当前旋钮值**
     wm.in_penalty_exec = false;
     wm.ball.x = 60.0;
-    if (std::fabs(shoot_prep_dist(wm) - 20.0) > 0.01) {
-        printf("FAIL: 常规助跑应 20 got %.1f\n", shoot_prep_dist(wm));
+    const double prep_expect = simuro5::get_param("roles.kPrepDist", 20.0);
+    if (std::fabs(shoot_prep_dist(wm) - prep_expect) > 0.01) {
+        printf("FAIL: 常规助跑应 %.1f（当前 kPrepDist）got %.1f\n", prep_expect, shoot_prep_dist(wm));
         return 1;
     }
 
@@ -2332,8 +2337,18 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
     int rc = 0;
+    // --params <文件>：注入参数后再跑全部测试。
+    // 这是"自动调参的行为护栏"：搜索时对每个候选跑一遍本程序，
+    // 跑不过就直接判死（防止优化器靠"关掉防守行为/借墙射门"刷分，见 docs/06 轮次 77）。
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
+            int n = simuro5::apply_param_file(argv[++i]);
+            if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
+            printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
+        }
+    }
     rc |= test_strategy_run(300);
     rc |= test_formation();
     rc |= test_placement_semantics();

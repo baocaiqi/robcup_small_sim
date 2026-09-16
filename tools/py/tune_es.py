@@ -72,8 +72,14 @@ GROUPS["both"] = GROUPS["attack"] + GROUPS["defense"]   # 攻防合起来评估"
 RANGES = {
     "shoot.kMinOpen": (2.0, 30.0), "shoot.kAngleFull": (8.0, 45.0),
     "shoot.kWOpen": (0.05, 0.9), "shoot.kBankWOpen": (0.05, 0.9),
-    "shoot.kBankMinQ": (0.2, 0.8), "shoot.kBankMargin": (0.0, 0.4),
-    "shoot.kBankMaxDist": (60.0, 160.0), "shoot.kBankDirectWeak": (0.1, 0.7),
+    # 借墙射门（功能关键）：范围收紧到"绝不会关掉功能"的区间。
+    # 轮次 77 的教训：原范围 (0.2,0.8) 让搜索把 kBankMinQ 顶到 0.8 ⇒ 借墙射门几乎永不触发（bank=0），
+    # 净胜球却因为"少做无效尝试"变好 —— 典型的拿功能换分。
+    "shoot.kBankMinQ": (0.30, 0.60), "shoot.kBankMargin": (0.05, 0.30),
+    # kBankMaxDist 语义是"允许走借墙的总路径上限"，默认 260 ≈ 不限（场长 220）。
+    # ⚠️ 教训：我曾把它限到 (60,140) ⇒ 借墙测试直接挂（bank=0），**整个搜索空间不可行**、
+    #    182 个候选全被闸门否决。所以这个参数只能放宽，不能收紧。
+    "shoot.kBankMaxDist": (100.0, 300.0), "shoot.kBankDirectWeak": (0.1, 0.7),
     "shoot.kBankPrepDist": (10.0, 70.0), "shoot.kBankPrepMargin": (0.0, 20.0),
     "roles.kPrepDist": (10.0, 70.0), "roles.kPrepPosTol": (2.0, 20.0),
     "roles.kPrepAngTol": (5.0, 60.0), "roles.kShootAlignTimeout": (10.0, 200.0),
@@ -82,13 +88,16 @@ RANGES = {
     "pass.OFFSET_BASE": (0.0, 30.0), "pass.THREAT_RADIUS": (10.0, 70.0),
     "defense.kInterceptLineDist": (20.0, 110.0), "defense.kMinBallSpeed": (1.0, 10.0),
     "defense.kMySpeed": (1.0, 6.0), "defense.kReachMargin": (0.2, 5.0),
-    "defense.kDoubleTeamDangerDist": (40.0, 160.0), "defense.kDoubleTeamLateral": (10.0, 80.0),
-    "defense.kDoubleTeamCarryDist": (10.0, 80.0), "defense.kDoubleTeamCoverDist": (10.0, 80.0),
-    "roles.kCoverLineDanger": (0.2, 4.0), "roles.kCoverLineTta": (8.0, 60.0),
+    # 夹抢（功能关键）：范围收紧，避免"不夹抢"把分数刷上去（轮次 77 挂过"门前持球应夹抢"）
+    "defense.kDoubleTeamDangerDist": (60.0, 140.0), "defense.kDoubleTeamLateral": (10.0, 40.0),
+    "defense.kDoubleTeamCarryDist": (8.0, 30.0), "defense.kDoubleTeamCoverDist": (25.0, 70.0),
+    # 门线封堵：慢球阈值不能压太低（否则慢球也触发封堵、把人拉出位置；轮次 77 挂过该测试）
+    "roles.kCoverLineDanger": (0.8, 2.5), "roles.kCoverLineTta": (8.0, 60.0),
     "roles.kCoverLineDist": (20.0, 140.0), "roles.kCoverLineGiveUp": (85.0, 215.0),
     "roles.kReboundRushSpeed": (0.5, 6.0), "roles.kReboundRushDist": (20.0, 150.0),
-    "roles.kGkNoPushDist": (20.0, 100.0), "roles.kGkSideClear": (10.0, 70.0),
-    "roles.kGkBackOff": (2.0, 40.0), "roles.kGkBehindMargin": (2.0, 30.0),
+    # 门将让开（功能关键）：轮次 77 挂过"已让开就不该再拦"（可能把球顶进自家门）
+    "roles.kGkNoPushDist": (20.0, 100.0), "roles.kGkSideClear": (20.0, 50.0),
+    "roles.kGkBackOff": (5.0, 20.0), "roles.kGkBehindMargin": (4.0, 16.0),
     "motion.kAlignedGain": (0.05, 1.0), "motion.kMaxRotW": (4.0, 25.0),
     "motion.kMinRotW": (0.5, 8.0), "motion.kNearDist": (4.0, 40.0),
     "motion.kCreepMax": (5.0, 60.0),
@@ -158,11 +167,22 @@ def make_tasks(games, seeds, opp_filter=None):
 
 
 def eval_vector(x, names, tasks, ints, workers, tmpdir, tag=""):
-    """把一个参数向量写成文件并跑完所有任务，返回加权指标 + 每任务结果。"""
+    """把一个参数向量写成文件并跑完所有任务，返回加权指标 + 每任务结果。
+
+    **行为护栏（docs/06 轮次 77 的教训）**：候选参数必须先通过 `offline_test`（单元测试）。
+    否则优化器会靠"关掉门将让开/夹抢/门线封堵、把借墙射门门槛顶到上限"来刷净胜球——
+    在脚本对手身上看不出来，真机（对手是官方 demo、犯规真判点球）就是灾难。
+    跑不过测试的候选返回 None，调用方按适应度 -9e9 处理。
+    """
     pfile = os.path.join(tmpdir, f"p_{tag or 'x'}.txt")
     with open(pfile, "w", encoding="ascii") as f:
         for n, v in zip(names, x):
             f.write("%s %.6g\n" % (n, round(v) if n in ints else v))
+    gate = os.path.join(os.path.dirname(BENCH), "offline_test.exe")
+    if os.path.exists(gate):
+        g = subprocess.run([gate, "--params", pfile], capture_output=True, text=True, errors="replace")
+        if "ALL TESTS PASSED" not in (g.stdout or ""):
+            return None
     with ThreadPoolExecutor(max_workers=workers) as ex:
         res = list(ex.map(lambda t: run_task(BENCH, t["extra"], t["games"], t["seed"], pfile), tasks))
     if any(r is None for r in res):
@@ -230,7 +250,11 @@ def cmd_search(args, base_vals, ints):
         a, b = min(a, b), max(a, b)
         a = max(a, d - abs(d) * 0.6 - 0.5)      # 兜底范围别离默认值太远（防"跑飞"）
         b = min(b, d + abs(d) * 0.6 + 0.5)
-        lo.append(min(a, d)); hi.append(max(b, d))
+        # 注意：**不能**用 hi = max(b, d) 把默认值包进范围。
+        # 之前的写法让"默认值本身不合理"的参数（如 kBankMaxDist 默认 260 > 场长 220）
+        # 把人为设的上限顶穿（160 → 260），等于范围失效。现在改成把默认值**夹进**范围。
+        lo.append(a)
+        hi.append(b)
     x0 = [base_vals[n] for n in names]
     if args.init:
         # 从已验证的参数文件出发继续搜（坐标上升式：先攻后守，后一组以前一组结果为起点）
@@ -243,6 +267,13 @@ def cmd_search(args, base_vals, ints):
                 if len(p) == 2 and p[0] in names:
                     x0[names.index(p[0])] = float(p[1])
         print(f"（起点来自 {args.init}）")
+    # 起点也必须夹进搜索范围（默认值可能本身就超出合理范围）
+    clipped = [min(hi[k], max(lo[k], x0[k])) for k in range(dim)]
+    if any(abs(clipped[k] - x0[k]) > 1e-9 for k in range(dim)):
+        print("（提示：起点有参数被夹进搜索范围，" +
+              ", ".join(f"{names[k]}: {x0[k]:.4g}→{clipped[k]:.4g}"
+                        for k in range(dim) if abs(clipped[k] - x0[k]) > 1e-9) + "）")
+    x0 = clipped
     print(f"=== 差分进化搜索：{dim} 个参数，种群 {args.pop}，{args.gens} 代，"
           f"每候选 {len(tasks)} 个任务（{args.games} 局/任务），{args.workers} 并发 ===")
     print(f"    对手池: {sorted({t['name'] for t in tasks})}  种子: {args.seeds}")
@@ -258,16 +289,27 @@ def cmd_search(args, base_vals, ints):
         cache[key] = (f, agg)
         return cache[key]
 
+    def fmt_agg(agg):
+        """打印候选指标；被测试闸门否决的候选（agg=None）要单独标出来。"""
+        if agg is None:
+            return "❌ 被测试闸门否决（行为退化，直接判死）"
+        return (f"净胜球={agg['net']:.2f} 被射门={agg['shots']:.0f} "
+                f"门区={agg['gaf']:.2f} 争球={agg['fb']:.0f}")
+
     pop_x = [list(x0)]
     for i in range(1, args.pop):
         pop_x.append([min(hi[k], max(lo[k], x0[k] + rnd.gauss(0, 0.15 * (hi[k] - lo[k]))))
                       for k in range(dim)])
     pop_f = []
+    n_reject = 0
     for i, x in enumerate(pop_x):
         f, agg = evaluate(x, f"g0_{i}")
+        if agg is None:
+            n_reject += 1
         pop_f.append(f)
-        print(f"  [初始 {i+1}/{args.pop}] fitness={f:+.4f}  净胜球={agg['net']:.2f} "
-              f"被射门={agg['shots']:.0f} 门区={agg['gaf']:.2f} 争球={agg['fb']:.0f}")
+        print(f"  [初始 {i+1}/{args.pop}] fitness={f:+.4f}  {fmt_agg(agg)}")
+    if n_reject:
+        print(f"  ⚠️ 初始种群有 {n_reject}/{args.pop} 个候选被测试闸门否决（这些参数会破坏防守行为/借墙射门）")
 
     t0 = time.time()
     log_path = os.path.join(args.tmpdir, "train_log.csv")
@@ -293,14 +335,21 @@ def cmd_search(args, base_vals, ints):
             f, agg = cache[tuple(round(v, 4) for v in pop_x[best])]
             mean_f = sum(pop_f) / args.pop
             log.write("%d,%.4f,%.4f,%.4f,%.2f,%.3f,%.2f\n"
-                      % (g, f, mean_f, agg["net"], agg["shots"], agg["gaf"], agg["fb"]))
+                      % (g, f, mean_f, (agg or {}).get("net", float("nan")),
+                         (agg or {}).get("shots", float("nan")),
+                         (agg or {}).get("gaf", float("nan")),
+                         (agg or {}).get("fb", float("nan"))))
             log.flush()
             print(f"  第 {g}/{args.gens} 代: 最好 fitness={f:+.4f} 均值={mean_f:+.4f} "
-                  f"净胜球={agg['net']:.2f} 被射门={agg['shots']:.0f} 门区={agg['gaf']:.2f} "
-                  f"争球={agg['fb']:.0f}  [{time.time()-t0:.0f}s, 已评估 {len(cache)} 个候选]")
+                  f"{fmt_agg(agg)}  [{time.time()-t0:.0f}s, 已评估 {len(cache)} 个候选, "
+                  f"累计否决 {sum(1 for v in cache.values() if v[1] is None)}]")
 
     best = max(range(args.pop), key=lambda k: pop_f[k])
     xb = pop_x[best]
+    if pop_f[best] <= -1e8:
+        print("✗ 所有候选都被测试闸门否决 —— 这说明搜索范围或起点有问题，"
+              "不写出参数文件（避免误用）。请检查 offline_test 的失败项。")
+        return 5
     with open(args.out, "w", encoding="ascii") as f:
         for n, v in zip(names, xb):
             f.write("%s %.6g\n" % (n, round(v) if n in ints else v))

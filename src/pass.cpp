@@ -17,11 +17,11 @@ namespace simuro5 {
 
 namespace {
 // 调参常量
-TUNABLE(PASS_MAX_DIST, 60.0);  // 最大传球距离 cm
+TUNABLE(PASS_MAX_DIST, 69.4267);  // 最大传球距离 cm
 TUNABLE(PASS_MIN_DIST, 8.0);  // 最小传球距离，避免贴脸传球
-TUNABLE(BLOCK_THRESHOLD, 15.0);  // 传球线路阻挡阈值 cm
-TUNABLE(OFFSET_BASE, 6.0);  // 接应点向前的领球偏移 cm
-TUNABLE(THREAT_RADIUS, 30.0);  // 接应点周围敌方威胁半径 cm
+TUNABLE(BLOCK_THRESHOLD, 7.4329);  // 传球线路阻挡阈值 cm
+TUNABLE(OFFSET_BASE, 10.1);  // 接应点向前的领球偏移 cm
+TUNABLE(THREAT_RADIUS, 34.1917);  // 接应点周围敌方威胁半径 cm
 TUNABLE(FIELD_MARGIN, 6.0);  // 接应点离边线的最小距离 cm
 
 // 路线 (sx,sy)->(tx,ty) 是否被某个对手机器人挡住
