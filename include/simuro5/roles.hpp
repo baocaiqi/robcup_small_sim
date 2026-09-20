@@ -59,6 +59,9 @@ double shoot_prep_dist(const WorldModel &wm);
 // 追球者（持球核心）：射门 → 传球推进 → 追球
 void run_active(WorldModel &wm, int id);
 
+// 角色执行前取消不安全的配合任务/临时控球；飞行中不按散球或重算线路取消。
+void cancel_unsafe_coop_pass(WorldModel &wm);
+
 // 防守站位：站球-门连线拦截点
 void run_passive(WorldModel &wm, int id);
 

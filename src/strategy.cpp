@@ -96,6 +96,10 @@ void Strategy::run(WorldModel &wm) {
                 dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
             bool penalty = wm.in_penalty_exec && wm.role[i] == ROLE_ACTIVE;
             if (in_ga && !shooting_work && !penalty) {
+                if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
+                    wm.coop_pass_task.active = false;
+                if (wm.coop_ball_control.active && (i == 1 || i == wm.coop_ball_control.receiver_id))
+                    wm.coop_ball_control.active = false;
                 double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
                 motion::position(wm.home[i], ogx - ad * 70.0, clamp(wm.home[i].y, 72.5, 107.5));
                 continue;   // 冷却期禁令：跳过角色函数
@@ -126,6 +130,10 @@ void Strategy::run(WorldModel &wm) {
             bool shooting_work = ball_in_ga &&
                 dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
             if (!shooting_work && ++wm.ga_overstay[i] > 15) {
+                if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
+                    wm.coop_pass_task.active = false;
+                if (wm.coop_ball_control.active && (i == 1 || i == wm.coop_ball_control.receiver_id))
+                    wm.coop_ball_control.active = false;
                 wm.ga_overstay[i] = 0;
                 wm.ga_cooldown[i] = 30;
                 motion::position(wm.home[i], hold_x, hold_y);

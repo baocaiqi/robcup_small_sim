@@ -2133,21 +2133,23 @@ static int test_penalty_spot_detect() {
 
 // ============================================================
 // docs/06 第 69 轮：配合进攻（按"接球后射门机会质量"选传球目标：+0.15 门槛、只向前传、安全接球为前提）
-//   ⚠️ 本用例暂时未注册（注册行被注释）：第一次跑就发现"候选被全部过滤"（id=-1），
-//   但手工代入四个闸门（门区/向前/距离/线路+贴身）逐条都是通过 ⇒ 还有一处我没定位到的过滤，
-//   下次先在这里加 printf 打四个闸门的实际值再定位。实现代码（pass.cpp/roles.cpp）保留不动。
+//   默认随全量测试运行；--coop-pass-only 可单独复现，保留原场景和断言。
 // ============================================================
 static int test_coop_pass() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                 // 蓝队攻 x=0
     wm.ball.valid = true;
-    wm.ball.x = 60; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
-    wm.assist_x = 40;   wm.assist_y = 65;       // 助攻更靠对方门、且在门区外（向前、可接）
+    wm.ball.x = 90; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+    wm.assist_x = 60;   wm.assist_y = 65;       // 助攻更靠对方门、且在门区外（向前、可接）
     wm.mid_x = 90;      wm.mid_y = 120;         // 中场在我方一侧（向后 → 不该被选）
     wm.passive_x = 150; wm.passive_y = 90;      // 后卫更靠后 → 不该被选
     for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 90; }
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 20 + i * 40; }
 
+    if (in_opp_goal_area(wm.ctx, wm.assist_x, wm.assist_y) ||
+        hypot(wm.assist_x, wm.assist_y - 90.0) > hypot(wm.ball.x, wm.ball.y - 90.0) - 5.0) {
+        printf("FAIL: 测试前提错误：助攻接球点必须在门区外且满足向前传球\n"); return 1;
+    }
     CoopPass cp = plan_coop_pass(wm, 1);
     if (!cp.viable || cp.receiver_id != 2) {
         printf("FAIL: 应传给更靠门的助攻(2)，实际 id=%d viable=%d\n",
@@ -2155,15 +2157,29 @@ static int test_coop_pass() {
         return 1;
     }
     if (cp.score <= 0.0) { printf("FAIL: 接球后射门分应>0\n"); return 1; }
+    printf("coop pass legal forward: OK\n");
 
-    wm.opp[0].x = 50; wm.opp[0].y = 78;         // ② 正压在球→接球点连线上
+    wm.opp[0].x = 80; wm.opp[0].y = 82;         // ② 挡线，但距接球点至少 20cm，单独验证线路规则
+    CircleObstacle blocker{wm.opp[0].x, wm.opp[0].y, 8.0};
+    if (hypot(wm.opp[0].x - wm.assist_x, wm.opp[0].y - wm.assist_y) < 20.0 ||
+        segment_clear_of_circles(wm.ball.x, wm.ball.y, wm.assist_x, wm.assist_y, &blocker, 1)) {
+        printf("FAIL: 测试前提错误：对手必须挡线且不贴身\n"); return 1;
+    }
     CoopPass cp2 = plan_coop_pass(wm, 1);
     if (cp2.viable && cp2.receiver_id == 2) { printf("FAIL: 线路被挡时不该传\n"); return 1; }
-    wm.opp[0].x = 45; wm.opp[0].y = 63;         // ③ 贴在接球点旁（<20cm）
+    printf("coop pass blocked line only: OK\n");
+    wm.opp[0].x = 60; wm.opp[0].y = 50;         // ③ 距接球点 15cm、线段外 15cm，贴身但不挡线
+    blocker = CircleObstacle{wm.opp[0].x, wm.opp[0].y, 8.0};
+    if (hypot(wm.opp[0].x - wm.assist_x, wm.opp[0].y - wm.assist_y) >= 20.0 ||
+        !segment_clear_of_circles(wm.ball.x, wm.ball.y, wm.assist_x, wm.assist_y, &blocker, 1)) {
+        printf("FAIL: 测试前提错误：对手必须贴身且不挡线\n"); return 1;
+    }
     CoopPass cp3 = plan_coop_pass(wm, 1);
     if (cp3.viable && cp3.receiver_id == 2) { printf("FAIL: 接球点被贴身时不该传\n"); return 1; }
+    printf("coop pass close opponent only: OK\n");
     wm.opp[0].x = 200; wm.opp[0].y = 20;        // ④ 恢复干净局面 → 又能传
     if (!plan_coop_pass(wm, 1).viable) { printf("FAIL: 干净局面应可传\n"); return 1; }
+    printf("coop pass restored clear: OK\n");
     printf("coop pass: OK (选最靠门的接球人/线路被挡不传/贴身不传/只向前)\n");
     return 0;
 }
@@ -2172,6 +2188,325 @@ static int test_coop_pass() {
 // docs/06 第 70 轮：禁止"过冲后反向穿球"（主攻冲过球、再沿瞄准线回推 = 把球顶向自家门）
 //   真机实证：点球帧 896 起球朝 +x 加速到 +5.6cm/帧，就是因为 1 号已在球的球门侧。
 // ============================================================
+// 配合任务必须决定实际轮速，而不只是保存一份无人执行的坐标。
+static WorldModel coop_task_scene() {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.ball.valid = true;
+        wm.ball.x = 75; wm.ball.y = 150;
+        wm.we_have_ball = true; wm.threat_level = 0.1;
+        wm.assist_x = 55; wm.assist_y = 90;
+        wm.mid_x = 130; wm.mid_y = 90;
+        wm.passive_x = 150; wm.passive_y = 40;
+        for (int i = 0; i < 5; ++i) {
+            wm.home[i].x = 120; wm.home[i].y = 130;
+            wm.opp[i].x = 200; wm.opp[i].y = 20 + 30 * i;
+        }
+        const double len = hypot(20.0, 60.0);
+        // 门将留门前，另一对手封主攻射门线但不封向助攻的传球线。
+        wm.opp[0].x = 0; wm.opp[0].y = 90;
+        wm.opp[1].x = 50; wm.opp[1].y = 134;
+        wm.home[1].x = wm.ball.x + 20.0 / len * 5.0;
+        wm.home[1].y = wm.ball.y + 60.0 / len * 5.0;
+        wm.home[1].rot = angle_to(75, 150, 55, 90);
+        return wm;
+}
+
+static int test_coop_pass_task() {
+    auto scene = coop_task_scene;
+    auto same_wheels = [](const RobotState &a, const RobotState &b) {
+        return fabs(a.vl - b.vl) < 1e-8 && fabs(a.vr - b.vr) < 1e-8;
+    };
+    using Runner = void (*)(WorldModel &, int);
+    const Runner runners[] = {run_assist, run_midfield, run_passive};
+    for (int receiver = 2; receiver <= 4; ++receiver) {
+        WorldModel wm = scene();
+        if (receiver != 2) { wm.assist_x = 130; wm.assist_y = 140; }
+        if (receiver == 3) { wm.mid_x = 55; wm.mid_y = 90; }
+        if (receiver == 4) { wm.passive_x = 55; wm.passive_y = 90; }
+        CoopPass cp = plan_coop_pass(wm, 1);
+        ShootPlan sp = plan_shoot(wm, 1);
+        if (!cp.viable || cp.receiver_id != receiver || cp.score <= sp.quality + 0.15) {
+            printf("FAIL: coop task fixture receiver=%d actual=%d pass=%.3f shot=%.3f\n", receiver, cp.receiver_id, cp.score, sp.quality); return 1;
+        }
+        // 已达到射门上限，球速足够触发原射门计次：配合传球仍须推球且不计射门。
+        const int limit = (int)ceil(get_param("roles.kMaxShootPushes", 1.0));
+        wm.shoot_push_count = limit;
+        wm.ball.vx = cp.dir_x * 6; wm.ball.vy = cp.dir_y * 6;
+        RobotState expected_passer = wm.home[1];
+        motion::position(expected_passer, wm.ball.x + cp.dir_x * 20, wm.ball.y + cp.dir_y * 20, motion::TM_PASS);
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != receiver ||
+            wm.coop_pass_task.passer_id != 1 || wm.coop_pass_task.rx != cp.rx || wm.coop_pass_task.ry != cp.ry ||
+            wm.shoot_push_count != limit || !same_wheels(wm.home[1], expected_passer)) {
+            printf("FAIL: coop task publish/push/count receiver=%d active=%d count=%d\n", receiver, (int)wm.coop_pass_task.active, wm.shoot_push_count); return 1;
+        }
+        // 普通站位故意换到另一边；任务目标和轮速不能被普通避敌/间距覆盖。
+        wm.assist_x = wm.mid_x = wm.passive_x = 130;
+        wm.assist_y = wm.mid_y = wm.passive_y = 150;
+        RobotState expected_receiver = wm.home[receiver];
+        motion::position(expected_receiver, cp.rx, cp.ry);
+        WorldModel ordinary = wm; ordinary.coop_pass_task.active = false;
+        runners[receiver - 2](ordinary, receiver);
+        runners[receiver - 2](wm, receiver);
+        if (!same_wheels(wm.home[receiver], expected_receiver) || same_wheels(wm.home[receiver], ordinary.home[receiver])) {
+            printf("FAIL: coop task receiver target overwritten id=%d\n", receiver); return 1;
+        }
+        for (int other = 2; other <= 4; ++other) {
+            if (other == receiver) continue;
+            WorldModel with_task = wm, without_task = wm;
+            without_task.coop_pass_task.active = false;
+            runners[other - 2](with_task, other); runners[other - 2](without_task, other);
+            if (!same_wheels(with_task.home[other], without_task.home[other])) {
+                printf("FAIL: coop task changed unrelated teammate id=%d\n", other); return 1;
+            }
+        }
+        // 空闲球与防守状态切换不能让任务丢失，候选站位已经全换走。
+        wm.we_have_ball = false; wm.no_possession_frames = 4;
+        wm.team_state = TS_DEFENSE; wm.threat_level = 0.4;
+        wm.ball.x += cp.dir_x * 3; wm.ball.y += cp.dir_y * 3;
+        expected_passer = wm.home[1];
+        motion::position(expected_passer, wm.ball.x + cp.dir_x * 20, wm.ball.y + cp.dir_y * 20, motion::TM_PASS);
+        int left = wm.coop_pass_task.frames_left;
+        run_active(wm, 1);
+        runners[receiver - 2](wm, receiver);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.rx != cp.rx || wm.coop_pass_task.ry != cp.ry ||
+            wm.coop_pass_task.frames_left >= left || !same_wheels(wm.home[receiver], expected_receiver) ||
+            !same_wheels(wm.home[1], expected_passer)) {
+            printf("FAIL: coop task lost/reselected during loose ball id=%d\n", receiver); return 1;
+        }
+        // 到期后恢复普通角色动作。
+        wm.coop_pass_task.frames_left = 1;
+        run_active(wm, 1);
+        ordinary = wm; ordinary.coop_pass_task.active = false;
+        runners[receiver - 2](ordinary, receiver);
+        runners[receiver - 2](wm, receiver);
+        if (wm.coop_pass_task.active || !same_wheels(wm.home[receiver], ordinary.home[receiver])) {
+            printf("FAIL: coop task timeout/ordinary recovery id=%d\n", receiver); return 1;
+        }
+    }
+    // 新任务与存量任务都要服从危险/比赛状态；不允许取消后同帧重发。
+    for (int reason = 0; reason < 9; ++reason) {
+        WorldModel wm = scene(); run_active(wm, 1);
+        if (!wm.coop_pass_task.active) { printf("FAIL: coop cancel fixture\n"); return 1; }
+        if (reason == 0) wm.game_state = PM_PlaceKick_Blue;
+        if (reason == 1) { wm.whos_ball = 2; wm.we_have_ball = false; wm.opp[0] = wm.home[1]; wm.opp[0].x = wm.ball.x; wm.opp[0].y = wm.ball.y; wm.home[1].x = 120; }
+        if (reason == 2) wm.threat_level = 0.6;
+        if (reason == 3) wm.in_penalty_exec = true;
+        if (reason == 4) { wm.ball.x = 5; wm.ball.y = 5; }
+        if (reason == 5) wm.ga_cooldown[2] = 10;
+        if (reason == 6) { wm.opp[2].x = 60; wm.opp[2].y = 95; }
+        if (reason == 7) { wm.ball.x = 180; wm.ball.y = 90; wm.ball.vx = wm.ball.vy = 0; }
+        if (reason == 8) { wm.opp[2].x = 65; wm.opp[2].y = 120; }
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active) { printf("FAIL: coop task not cancelled reason=%d\n", reason); return 1; }
+    }
+    // 评分通过也不能提前发布：球合法，但准备点落入角区，执行必须停下。
+    for (int existing = 0; existing < 2; ++existing) {
+        WorldModel wm = scene();
+        wm.ball.x = existing ? 155 : 175; wm.ball.y = 150;
+        wm.assist_x = 65; wm.assist_y = 105;
+        for (int i = 1; i < 5; ++i) { wm.opp[i].x = 220; wm.opp[i].y = 0; }
+        wm.mid_x = wm.passive_x = 210;
+        wm.home[1].x = 195; wm.home[1].y = 150;
+        if (existing) {
+            run_active(wm, 1);
+            if (!wm.coop_pass_task.active) { printf("FAIL: coop late safety fixture\n"); return 1; }
+            wm.ball.x = 175;
+        }
+        CoopPass cp = plan_coop_pass(wm, 1);
+        ShootPlan sp = plan_shoot(wm, 1);
+        if (!cp.viable || cp.score <= sp.quality + 0.15 ||
+            !in_no_push_zone(wm.ball.x - cp.dir_x * shoot_prep_dist(wm), wm.ball.y - cp.dir_y * shoot_prep_dist(wm))) {
+            printf("FAIL: coop prep guard fixture pass=%.3f shot=%.3f\n", cp.score, sp.quality); return 1;
+        }
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || wm.home[1].vl != 0 || wm.home[1].vr != 0) {
+            printf("FAIL: coop unsafe prep published/retained task\n"); return 1;
+        }
+    }
+    // 真实调度会刷新普通站位，但应保留任务并先执行主攻再执行接球人。
+    {
+        WorldModel wm = scene(); run_active(wm, 1);
+        CoopPassTask saved = wm.coop_pass_task;
+        RobotState expected = wm.home[2]; motion::position(expected, saved.rx, saved.ry);
+        Strategy strategy; strategy.run(wm);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.rx != saved.rx || wm.coop_pass_task.ry != saved.ry ||
+            !same_wheels(wm.home[2], expected)) {
+            printf("FAIL: coop task overwritten by full strategy scheduling\n"); return 1;
+        }
+        Environment env; init_env(env, 75, 150); env.gameState = PM_PlaceKick_Blue;
+        wm.update(&env, TeamContext{true});
+        if (wm.coop_pass_task.active) { printf("FAIL: coop task survives game-state update\n"); return 1; }
+    }
+    printf("coop task: OK (3 receivers/shared target/loose ball/timeout/safety/shoot limit)\n");
+    return 0;
+}
+
+static int test_coop_lifecycle() {
+    using Phase = CoopPassPhase;
+    auto frame = [](WorldModel &wm, double x, double y) {
+        wm.ball_last = wm.ball;
+        wm.ball.vx = x - wm.ball.x; wm.ball.vy = y - wm.ball.y;
+        wm.ball.x = x; wm.ball.y = y;
+        run_active(wm, 1);
+        run_assist(wm, 2); run_midfield(wm, 3); run_passive(wm, 4);
+    };
+    auto stopped = [](const RobotState &r) { return r.vl == 0.0 && r.vr == 0.0; };
+    auto start = [&](int receiver) {
+        WorldModel wm = coop_task_scene();
+        if (receiver == 3) { wm.assist_x = 130; wm.assist_y = 140; wm.mid_x = 55; wm.mid_y = 90; }
+        frame(wm, 75, 150);
+        return wm;
+    };
+    const double dx = -20.0 / hypot(20.0, 60.0), dy = -60.0 / hypot(20.0, 60.0);
+    // 多次发出轮速而球不动，不能假报出球；速度字段单独跳高也不算。
+    {
+        WorldModel wm = start(2);
+        for (int i = 0; i < 4; ++i) frame(wm, 75, 150);
+        wm.ball.vx = dx * 6; wm.ball.vy = dy * 6; run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != Phase::Preparing || wm.coop_ball_control.active) {
+            printf("FAIL: coop lifecycle command/stale velocity mistaken for release\n"); return 1;
+        }
+        wm.coop_pass_task.frames_left = 1; frame(wm, 75, 150);
+        if (wm.coop_pass_task.active) { printf("FAIL: coop unreleased timeout\n"); return 1; }
+    }
+    // 球跟人一起移动仍是带球，必须真的和传球人分离；倒向/横向移动也不算出脚。
+    for (int mode = 0; mode < 3; ++mode) {
+        WorldModel wm = start(2);
+        double bx = 75 + dx * 10, by = 150 + dy * 10;
+        if (mode == 0) { wm.home[1].x += dx * 10; wm.home[1].y += dy * 10; }
+        if (mode == 1) { bx = 75 - dx * 10; by = 150 - dy * 10; }
+        if (mode == 2) { bx = 75 - dy * 10; by = 150 + dx * 10; }
+        frame(wm, bx, by);
+        if (wm.coop_pass_task.phase != Phase::Preparing) { printf("FAIL: coop false release mode=%d\n", mode); return 1; }
+    }
+    for (int receiver : {2, 3}) {
+        WorldModel wm = start(receiver);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != Phase::Preparing) {
+            printf("FAIL: coop lifecycle did not start preparing\n"); return 1;
+        }
+        wm.we_have_ball = false; wm.whos_ball = 0;
+        wm.no_possession_frames = 4; wm.threat_level = 0.4;
+        frame(wm, 75 + dx * 3, 150 + dy * 3);
+        if (wm.coop_pass_task.phase != Phase::Preparing) { printf("FAIL: coop release before separation\n"); return 1; }
+        frame(wm, 75 + dx * 7, 150 + dy * 7);
+        // 出球确认这帧就出现新挡线：必须先识别阶段，再决定是否重查线路。
+        wm.opp[2].x = (75 + dx * 11 + 55) / 2; wm.opp[2].y = (150 + dy * 11 + 90) / 2;
+        frame(wm, 75 + dx * 11, 150 + dy * 11);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != Phase::Receiving || !stopped(wm.home[1])) {
+            printf("FAIL: coop observed release not latched/passer repeats push\n"); return 1;
+        }
+        // 对手进入新算出的球→接球点线段，但没有截到球；飞行不能因此取消。
+        wm.opp[2].x = (wm.ball.x + 55) / 2; wm.opp[2].y = (wm.ball.y + 90) / 2;
+        CircleObstacle blocker{wm.opp[2].x, wm.opp[2].y, 8};
+        if (segment_clear_of_circles(wm.ball.x, wm.ball.y, 55, 90, &blocker, 1)) {
+            printf("FAIL: coop flight blocked-line fixture\n"); return 1;
+        }
+        int n = 0;
+        for (double threat : {0.3, 0.4, 0.59}) {
+            wm.threat_level = threat; ++wm.no_possession_frames;
+            wm.assist_x = wm.mid_x = 130; wm.assist_y = wm.mid_y = 150;
+            RobotState expected = wm.home[receiver]; motion::position(expected, 55, 90);
+            ++n; frame(wm, 75 + dx * (11 + n), 150 + dy * (11 + n));
+            if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != Phase::Receiving || !stopped(wm.home[1]) ||
+                fabs(wm.home[receiver].vl - expected.vl) > 1e-8 || fabs(wm.home[receiver].vr - expected.vr) > 1e-8) {
+                printf("FAIL: coop flight interrupted at threat=%.2f receiver=%d\n", threat, receiver); return 1;
+            }
+        }
+        WorldModel flight = wm;
+        // 到目标而球还没到，不是接球成功。
+        wm.opp[2].x = 200; wm.opp[2].y = 20;
+        wm.home[receiver].x = 55; wm.home[receiver].y = 90;
+        frame(wm, 65, 120);
+        if (!wm.coop_pass_task.active || wm.coop_ball_control.active) { printf("FAIL: coop target arrival mistaken for reception\n"); return 1; }
+        // 球高速掠过脚边也不是控住；接着减速并连续观测己方距离优势。
+        wm.home[receiver].x = 55; wm.home[receiver].y = 85; wm.home[receiver].rot = 90;
+        wm.we_have_ball = true;
+        frame(wm, 55, 90);
+        if (wm.coop_ball_control.active) { printf("FAIL: coop fast fly-by mistaken for possession\n"); return 1; }
+        // 接球人虽近，但贴身争抢且没有己方球权证据，不能宣布接稳。
+        WorldModel contested = wm; contested.we_have_ball = false; contested.whos_ball = 0;
+        contested.opp[2].x = 55; contested.opp[2].y = 96;
+        for (int i = 0; i < 3; ++i) frame(contested, 55, 90);
+        if (!contested.coop_pass_task.active || contested.coop_ball_control.active) {
+            printf("FAIL: coop close ball without possession mistaken for reception\n"); return 1;
+        }
+        frame(wm, 55, 90);
+        if (!wm.coop_pass_task.active || wm.coop_ball_control.active) { printf("FAIL: coop reception lacks consecutive evidence\n"); return 1; }
+        frame(wm, 55, 90);
+        if (wm.coop_pass_task.active || wm.coop_pass_task.phase != Phase::Received || !wm.coop_ball_control.active ||
+            wm.coop_ball_control.receiver_id != receiver || stopped(wm.home[receiver]) || !stopped(wm.home[1])) {
+            printf("FAIL: coop reception did not hand ball to actual receiver\n"); return 1;
+        }
+        // 已接球后仍由接球人处理，不恢复普通分散站位；1号不抢回同一脚球。
+        RobotState expected = wm.home[receiver]; motion::position(expected, 55, 110, motion::TM_PASS);
+        frame(wm, 55, 90);
+        if (!wm.coop_ball_control.active || wm.coop_pass_task.active || !stopped(wm.home[1]) ||
+            fabs(wm.home[receiver].vl - expected.vl) > 1e-8 || fabs(wm.home[receiver].vr - expected.vr) > 1e-8) {
+            printf("FAIL: coop receiver abandoned controlled ball\n"); return 1;
+        }
+        WorldModel scheduled = wm; Strategy strategy; strategy.run(scheduled);
+        if (!scheduled.coop_ball_control.active || !stopped(scheduled.home[1]) ||
+            fabs(scheduled.home[receiver].vl - expected.vl) > 1e-8 || fabs(scheduled.home[receiver].vr - expected.vr) > 1e-8) {
+            printf("FAIL: coop ball ownership lost through fixed role scheduling\n"); return 1;
+        }
+        for (int danger = 0; danger < 4; ++danger) {
+            WorldModel interrupted = wm;
+            if (danger == 0) interrupted.threat_level = 0.6;
+            if (danger == 1) interrupted.in_penalty_exec = true;
+            if (danger == 2) interrupted.ga_cooldown[receiver] = 5;
+            if (danger == 3) { interrupted.opp[2].x = 55; interrupted.opp[2].y = 90; interrupted.home[receiver].x = 85; interrupted.whos_ball = 2; }
+            frame(interrupted, 55, 90);
+            if (interrupted.coop_ball_control.active) { printf("FAIL: coop receiver ignores safety=%d\n", danger); return 1; }
+        }
+        WorldModel reset = wm; Environment env; init_env(env, 55, 90); env.gameState = PM_PlaceKick_Blue;
+        reset.update(&env, TeamContext{true});
+        if (reset.coop_ball_control.active) { printf("FAIL: coop ball ownership survives restart\n"); return 1; }
+        // 控球者失球三帧恢复固定角色；球权被1号明确接管则立即释放临时权。
+        WorldModel takeover = wm; takeover.home[1].x = 55; takeover.home[1].y = 90;
+        takeover.home[receiver].x = 85;
+        frame(takeover, 55, 90);
+        if (takeover.coop_ball_control.active) { printf("FAIL: coop owner blocks teammate takeover\n"); return 1; }
+        wm.home[receiver].x = 100; wm.home[receiver].y = 130; wm.we_have_ball = false;
+        for (int i = 0; i < 3; ++i) frame(wm, 55, 90);
+        if (wm.coop_ball_control.active) { printf("FAIL: coop owner persists after losing ball\n"); return 1; }
+        // 飞行中确实截球/高威胁/超时仍取消，不能被不重算线路的豁免吞掉。
+        for (int cause = 0; cause < 3; ++cause) {
+            WorldModel cancelled = flight;
+            if (cause == 0) { cancelled.opp[2].x = cancelled.ball.x; cancelled.opp[2].y = cancelled.ball.y; cancelled.whos_ball = 2; }
+            if (cause == 1) cancelled.threat_level = 0.6;
+            if (cause == 2) cancelled.coop_pass_task.frames_left = 1;
+            frame(cancelled, cancelled.ball.x, cancelled.ball.y);
+            if (cancelled.coop_pass_task.active || cancelled.coop_ball_control.active) {
+                printf("FAIL: coop flight not cancelled cause=%d\n", cause); return 1;
+            }
+        }
+    }
+    // 飞行中停车不能冻结主攻门区总停留计时（球贴身时调度层存在攻门豁免）。
+    {
+        WorldModel wm = start(2);
+        frame(wm, 75 + dx * 11, 150 + dy * 11);
+        if (wm.coop_pass_task.phase != Phase::Receiving) { printf("FAIL: coop goalie-area fixture\n"); return 1; }
+        wm.home[1].x = 40; wm.home[1].y = 90;
+        wm.ball.x = 45; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 1;
+        wm.active_ga_total = (int)floor(get_param("roles.kActiveGaTotal", 18)) - 1;
+        wm.shoot_push_cd = 5;
+        const int before = wm.active_ga_total;
+        Strategy strategy; strategy.run(wm);
+        if (!wm.coop_pass_task.active || wm.active_ga_total != before + 1 || wm.shoot_push_cd != 4) {
+            printf("FAIL: coop flight freezes goalie-area/shoot cooldown counters\n"); return 1;
+        }
+        wm.ball.y += 1; strategy.run(wm);
+        if (wm.coop_pass_task.active || wm.ga_retreat_fires == 0) {
+            printf("FAIL: coop flight bypasses goalie-area retreat\n"); return 1;
+        }
+    }
+    printf("coop lifecycle: OK (observed release/no release/interception/reception/receiver control/moderate threat/goal-area discipline)\n");
+    return 0;
+}
+
 static int test_no_reverse_through_ball() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                 // 蓝队攻 x=0（对方门在左）
@@ -2339,15 +2674,24 @@ static int test_goalie_line_cover() {
 
 int main(int argc, char **argv) {
     int rc = 0;
+    bool coop_pass_only = false;
     // --params <文件>：注入参数后再跑全部测试。
     // 这是"自动调参的行为护栏"：搜索时对每个候选跑一遍本程序，
     // 跑不过就直接判死（防止优化器靠"关掉防守行为/借墙射门"刷分，见 docs/06 轮次 77）。
     for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
+    }
+    if (coop_pass_only) {
+        rc = test_coop_pass();
+        rc |= test_coop_pass_task();
+        rc |= test_coop_lifecycle();
+        printf(rc ? "=== COOP PASS TEST FAILED ===\n" : "=== COOP PASS TEST PASSED ===\n");
+        return rc;
     }
     rc |= test_strategy_run(300);
     rc |= test_formation();
@@ -2358,7 +2702,9 @@ int main(int argc, char **argv) {
     rc |= test_own_goalarea_guard();
     rc |= test_no_reverse_through_ball();
     rc |= test_opp_kick_predict();
-    // rc |= test_coop_pass();   // ⚠️ 暂未注册：见 docs/06 第 69 轮（用例里候选被全部过滤，原因待加调试输出定位）
+    rc |= test_coop_pass();
+    rc |= test_coop_pass_task();
+    rc |= test_coop_lifecycle();
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();

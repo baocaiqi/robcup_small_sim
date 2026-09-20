@@ -7,6 +7,7 @@
 
 #include "simuro5/geometry.hpp"
 #include "simuro5/field_info.hpp"
+#include "simuro5/shoot.hpp"
 #include "simuro5/role_assignment.hpp"
 #define TUNABLE_PREFIX "pass."
 #include "simuro5/tunable.hpp"
@@ -77,6 +78,60 @@ void clamp_receive_point(const TeamContext &ctx, double &x, double &y) {
     }
 }
 
+// ============================================================
+// D2：传球收益三步升级（P0，2026-09 校赛前）
+//   ① 射门收益：接应点能否形成射门（复用 plan_shoot 预判）
+//   ② 到达时间：对手是否比接应队友更快到点（含速度）
+//   ③ 速度威胁：正在逼近接应点的对手加权（用 opp_vx/opp_vy）
+// ============================================================
+constexpr double SHOOT_BONUS      = 60.0;  // 接应点能射门 → 评分奖励（goal_dist 量级）
+constexpr double ARRIVE_PENALTY   = 40.0;  // 对手明显先到 → 惩罚
+constexpr double SPEED_THREAT_W   = 10.0;  // 速度威胁权重
+constexpr double OUR_ARRIVE_SPEED = 2.0;   // 己方到点速度 cm/帧（与 defense kMySpeed 口径一致）
+constexpr double OPP_MIN_SPEED    = 1.0;   // 对手速度下限 cm/帧（静止兜底，防除零）
+constexpr double ARRIVE_MARGIN    = 1.0;   // 对手到达时间 < 己方×该系数 → 判对手先到
+constexpr double SPEED_BASE       = 2.0;   // 速度投影归一化基准 cm/帧
+
+// ① 接应点能否形成射门：拷贝世界模型、把球放到接应点，调 plan_shoot 预判。
+//    plan_shoot 只读 wm.ball 位置 + 对方门将 y + 球距门距离（不用射手位置），
+//    因此「假球位」即可预判「球推到接应点是否具备射门开口」。
+bool receive_point_can_shoot(const WorldModel &wm, double tx, double ty) {
+    WorldModel wm2 = wm;
+    wm2.ball.x = tx; wm2.ball.y = ty;
+    return plan_shoot(wm2, 0).viable;
+}
+
+// ② 对手到接应点的最短到达时间（帧）。静止对手按 OPP_MIN_SPEED 兜底。
+double opp_arrive_time(const WorldModel &wm, double tx, double ty) {
+    double t_min = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.opp[i].x, wm.opp[i].y, tx, ty);
+        double spd = std::max(std::hypot(wm.opp_vx[i], wm.opp_vy[i]), OPP_MIN_SPEED);
+        t_min = std::min(t_min, d / spd);
+    }
+    return t_min;
+}
+
+// ③ 速度威胁：威胁半径内、正在朝接应点逼近的对手，按接近速度加权。
+//    静态威胁 × (接近速度/基准)；静止或背离的对手不额外加权。
+double speed_threat(const WorldModel &wm, double x, double y) {
+    const double r2 = THREAT_RADIUS * THREAT_RADIUS;
+    double threat = 0.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double dx = wm.opp[i].x - x, dy = wm.opp[i].y - y;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < r2 && d2 > 1e-6) {
+            double d = std::sqrt(d2);
+            double approach = -(wm.opp_vx[i] * dx + wm.opp_vy[i] * dy) / d;  // dx、dy 从接应点指向对手，取负使逼近为正
+            if (approach > 0.0) {
+                threat += (1.0 - d2 / r2) * (approach / SPEED_BASE);
+            }
+        }
+    }
+    return threat;
+}
+
+
 }  // anonymous namespace
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
@@ -123,9 +178,19 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
         double threat = count_near_opponent(wm, tx, ty);
         int front_threat = count_front_opponent(wm, tx, ty, ad);   // 前方威胁（比目标点更靠对方球门）
 
-        // —— 评分：越靠前越好 + 威胁越低越好 + 传球越短越稳 ——
+        // —— D2：射门收益 + 到达时间 + 速度威胁 ——
+        bool can_shoot = receive_point_can_shoot(wm, tx, ty);      // ① 接到即可射门
+        double t_opp = opp_arrive_time(wm, tx, ty);                // ② 对手最快到达时间
+        double t_our = dist(wm.home[id].x, wm.home[id].y, tx, ty) / OUR_ARRIVE_SPEED;
+        bool opp_first = t_opp < t_our * ARRIVE_MARGIN;            // 对手先到 → 危险
+        double spd_threat = speed_threat(wm, tx, ty);              // ③ 逼近中对手
+
+        // —— 评分：越靠前越好 + 威胁越低越好 + 传球越短越稳 + 射门收益 - 对手先到 - 速度威胁 ——
         double goal_dist = std::fabs(tx - ctx.opp_goal_x());
         double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
+        if (can_shoot) score -= SHOOT_BONUS;
+        if (opp_first) score += ARRIVE_PENALTY;
+        score += spd_threat * SPEED_THREAT_W;
 
         if (score < best_score) {
             best_score = score;

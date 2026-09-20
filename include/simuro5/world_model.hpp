@@ -31,7 +31,34 @@ struct BallState {
     bool valid = false;
 };
 
+// 配合传球双方共用的跨帧接球任务；普通 PassPlan 不使用。
+enum class CoopPassPhase { Preparing, Receiving, Received };
+
+struct CoopPassTask {
+    bool active = false;
+    int passer_id = -1, receiver_id = -1;
+    double rx = 0.0, ry = 0.0;
+    int frames_left = 0;
+    int game_state = 0;
+    CoopPassPhase phase = CoopPassPhase::Preparing;
+    // 推球指令只开启观察窗口；之后的球位/速度/人与球分离才是出球证据。
+    bool observing_push = false;
+    double push_ball_x = 0.0, push_ball_y = 0.0;
+    double push_dir_x = 0.0, push_dir_y = 0.0;
+    int receive_frames = 0;
+};
+
+// 接球任务完成后的临时带球权；不改变固定角色，也不调用普通 PassPlan。
+struct CoopBallControl {
+    bool active = false;
+    int receiver_id = -1;
+    int game_state = 0;
+    int loose_frames = 0;
+};
+
 struct WorldModel {
+    CoopPassTask coop_pass_task;
+    CoopBallControl coop_ball_control;
     TeamContext ctx;
 
     BallState ball;          // 当前球
