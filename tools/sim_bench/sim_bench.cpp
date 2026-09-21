@@ -114,7 +114,13 @@ struct SimState {
     double check_x = 110, check_y = 90;   // 僵局检测：每 60 帧对比球位移
     int check_cnt = 0;
     int dbg_contacts = 0;              // 接触事件日志开关（调试用）
+    // 以下只记录物理过程，不参与动力学或策略。
+    int reset_epoch = 0, carry_team = -1, carry_id = -1;
+    unsigned touch_blue = 0, touch_yellow = 0;
+    bool push_applied = false;
 };
+
+#include "coop_observer.hpp"
 
 static double deg2rad(double d) { return d * 3.14159265358979 / 180.0; }
 
@@ -140,6 +146,9 @@ static void traj_write_row(FILE *fp, const SimState &s) {
 
 // 初始摆位（简单开局阵型）；seed 用于引入摆位微扰（模拟真实开局差异）
 static void init_formation(SimState &s, Rng *rng = nullptr) {
+    ++s.reset_epoch;
+    s.carry_team = s.carry_id = -1; s.touch_blue = s.touch_yellow = 0;
+    s.push_applied = false;
     // 蓝队守 x=220
     double bxs[5] = {215, 185, 150, 150, 120};
     double bys[5] = {90, 90, 60, 120, 90};
@@ -164,6 +173,8 @@ static void init_formation(SimState &s, Rng *rng = nullptr) {
         }
         s.bx += rng->range(-2, 2); s.by += rng->range(-2, 2);
     }
+    // 补充实验：复位不冒充球速。默认模式保持历史行为。
+    if (g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
 }
 
 // 把 SimState 填进 Environment（给 WorldModel::update 用）
@@ -187,6 +198,8 @@ static void fill_env(Environment &e, const SimState &s, bool blue_side) {
 
 // 一帧物理推进
 static void step_physics(SimState &s) {
+    s.carry_team = s.carry_id = -1; s.touch_blue = s.touch_yellow = 0;
+    s.push_applied = false;
     // 先记录决策时的速度向量（用 move 前的 rot 计算）——携带推球方向必须基于
     // 策略看到的朝向，否则机器人中途转向站位点时会把球"铲"错方向
     double bvx5[5], bvy5[5], yvx5[5], yvy5[5];
@@ -301,6 +314,7 @@ static void step_physics(SimState &s) {
         }
     }
     if (carry_i >= 0) {
+        s.carry_team = carry_blue ? 0 : 1; s.carry_id = carry_i;
         // 用决策时的速度向量（机器人 move 前朝向），而不是 move 后 rot——
         // 否则机器人转向站位点时会把球铲向错误方向
         double rvx = carry_blue ? bvx5[carry_i] : yvx5[carry_i];
@@ -311,6 +325,7 @@ static void step_physics(SimState &s) {
         // 机器人推球时球获得动量（射门才有"射出感"），脱离接触后自由滚动衰减。
         // 窄携带区(9cm/40°)保证只有"对准球门方向推"时才携带，不会提前斜推。
         if (rv > bv * 0.9) {
+            s.push_applied = true;
             if (s.dbg_contacts) printf("  [接触] %s%d 携带推球 rv%.0f\n",
                                        carry_blue ? "蓝" : "黄", carry_i, rv);
             s.bvx = s.bvx * kPushKeep + rvx * kPushGain;
@@ -333,6 +348,7 @@ static void step_physics(SimState &s) {
             double dx = s.bx - r.x, dy = s.by - r.y;
             double d = std::hypot(dx, dy);
             if (d >= kContact || d < 1e-6) continue;
+            (t ? s.touch_yellow : s.touch_blue) |= 1u << i;
             double nx = dx / d, ny = dy / d;
             double rvx = t ? yvx5[i] : bvx5[i];              // 决策时速度向量
             double rvy = t ? yvy5[i] : bvy5[i];
@@ -517,13 +533,20 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
                        long &r_ga_solo_frames, long &r_ga_solo_eps, long &r_freeball,
                        long &r_freeball_corner, long &r_corner_rescue) {
     SimState s;
+    SimState last_decision_state;
     init_formation(s, &rng);
     TeamContext ctx_blue{true}, ctx_yellow{false};
     WorldModel wm_b, wm_y;
+    g_coop_state = &s;
+    g_coop_tail[0] = g_coop_tail[1] = 0;
+    wm_b.coop_observer = wm_y.coop_observer = coop_csv_row;
     Strategy strat_b, strat_y;
     Environment env_b, env_y;
 
     for (int f = 0; f < frames; ++f) {
+        g_coop_frame = f;
+        const int old_epoch = s.reset_epoch;
+        if (f == frames - 1) last_decision_state = s;
         // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
         if (opp_mode == 2) {
             scripted_opponent(s, true, opp_strength);
@@ -531,6 +554,7 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             fill_env(env_b, s, true);
             wm_b.update(&env_b, ctx_blue);
             strat_b.run(wm_b);
+            coop_sample(wm_b);
             for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
         }
 
@@ -543,6 +567,7 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             fill_env(env_y, s, false);
             wm_y.update(&env_y, ctx_yellow);
             strat_y.run(wm_y);
+            coop_sample(wm_y);
             for (int i = 0; i < 5; ++i) { s.yellow[i].vl = wm_y.home[i].vl; s.yellow[i].vr = wm_y.home[i].vr; }
         }
 
@@ -562,10 +587,11 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             s.dbg_contacts = 0;
         }
 
+        if (g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
         step_physics(s);
 
         // 记录本帧球位作为下一帧的 lastBall（WorldModel 用差分算球速）
-        s.p_bx = s.bx; s.p_by = s.by;
+        if (!g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
 
         if (g_traj) traj_write_row(g_traj, s);   // docs/18：轨迹导出（仅第一场）
 
@@ -665,7 +691,16 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         if (s.bx < 73.0) s.zone_blue_third++;
         else if (s.bx < 147.0) s.zone_mid++;
         else s.zone_yellow_third++;
+        if (g_coop && s.reset_epoch != old_epoch)
+            printf("SIM_EVENT game=%d frame=%d reset=%d score_blue=%d score_yellow=%d\n",
+                g_coop_game, f, s.reset_epoch, s.score_blue, s.score_yellow);
     }
+    g_coop_frame = frames;
+    // 最后决策的 WorldModel 必须配同一时点物理快照；截止帧没有新的决策。
+    g_coop_state = &last_decision_state;
+    if (opp_mode != 2) coop_print_result(wm_b);
+    if (opp_mode == 1 || opp_mode == 2) coop_print_result(wm_y);
+    g_coop_state = nullptr;
     // opp_mode=2 时"蓝"=脚本、"黄"=我们：控球/射门统计换边输出
     r_blue = opp_mode == 2 ? s.score_yellow : s.score_blue;
     r_yellow = opp_mode == 2 ? s.score_blue : s.score_yellow;
@@ -691,10 +726,13 @@ int main(int argc, char **argv) {
     const char *traj_path = nullptr;         // --traj out.csv：导出第一场逐帧轨迹（docs/18）
     const char *params_path = nullptr;       // --params in.txt：注入策略参数（离线搜索用）
     const char *dump_path = nullptr;         // --dump-params out.txt：导出参数表
+    const char *coop_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--games" && i + 1 < argc) games = std::atoi(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
+        else if (a == "--coop-csv" && i + 1 < argc) coop_path = argv[++i];
+        else if (a == "--correct-ball-history") g_correct_ball_history = true;
         else if (a == "--strength" && i + 1 < argc) opp_strength = std::atof(argv[++i]);
         else if (a == "--opp" && i + 1 < argc) {
             std::string o = argv[++i];
@@ -711,6 +749,7 @@ int main(int argc, char **argv) {
         else if (a == "--dump-params" && i + 1 < argc) dump_path = argv[++i];
         else if (a == "--help") {
             printf("sim_bench: --games N --frames N --opp scripted|self|yellow|wall [--strength X] [--debug N] [--seed N] [--traj out.csv]\n");
+            printf("           --coop-csv out.csv（配合生命周期观测） --correct-ball-history（独立球速输入修正实验）\n");
             printf("           --params in.txt（注入参数） --dump-params out.txt（导出全部可调参数及默认值）\n");
             return 0;
         }
@@ -737,6 +776,12 @@ int main(int argc, char **argv) {
         traj_write_header(g_traj);
     }
     const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : (opp_mode == 3 ? "门线堆人墙" : "脚本对手"));
+    if (coop_path) {
+        g_coop = fopen(coop_path, "w");
+        if (!g_coop) { fprintf(stderr, "Cannot open coop CSV: %s\n", coop_path); return 1; }
+        coop_csv_header();
+    }
+    printf("=== COOP observation: ball_history=%s ===\n", g_correct_ball_history ? "corrected_experiment" : "original");
     printf("=== sim_bench: games=%d frames/场=%d 模式=%s 对手强度=%.2f ===\n", games, frames, mode_name, opp_strength);
     long t_blue = 0, t_yellow = 0;
     double t_poss = 0;
@@ -750,6 +795,7 @@ int main(int argc, char **argv) {
         uint64_t gs = seed ? (seed + (uint64_t)g * 0x9E3779B97F4A7C15ull)
                            : (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
         Rng rng(gs);
+        g_coop_game = g + 1; g_coop_seed = gs;
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
         long ga_frames = 0, ga_eps = 0, ga_solo = 0, ga_solo_eps = 0, fb = 0, fb_corner = 0, rescue = 0;
         play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue);
@@ -783,5 +829,6 @@ int main(int argc, char **argv) {
     printf("FIT games=%d net=%.4f gf=%.4f ga=%.4f poss=%.2f shots=%.2f gaf=%.3f fb=%.2f sec=%.2f\n",
            games, (double)(t_blue - t_yellow) / games, (double)t_blue / games, (double)t_yellow / games,
            t_poss / games, (double)t_shots / games, (double)t_ga / games, (double)t_fb / games, sec);
+    if (g_coop) fclose(g_coop);
     return 0;
 }
