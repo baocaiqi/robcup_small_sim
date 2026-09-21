@@ -616,17 +616,17 @@ TUNABLE(kActiveGaTotal, 18);  // 在门区总时长兜底：平台 20 周期判�
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
 
 namespace {
-constexpr int kCoopTaskFrames = 80;  // 约两秒；防接球任务无限占住角色。
-constexpr double kCoopReleaseTravel = 6.0;  // cm：真实向前位移，过滤原地轮速/球速抖动。
-constexpr double kCoopReleaseSpeed = 1.0;   // cm/帧：速度仍朝锁定接球方向。
-constexpr double kCoopReleaseSeparation = 14.0; // cm：球已脱离传球人贴球范围。
-constexpr double kCoopReceiveDistance = 12.0;
-constexpr double kCoopReceiveSpeed = 3.0;   // cm/帧：高速掠过不当作接稳。
-constexpr int kCoopReceiveFrames = 2;
-constexpr double kCoopControlDistance = 20.0;
-constexpr int kCoopControlLooseFrames = 3;
+constexpr int kPassTaskFrames = 80;
+constexpr double kPassReleaseTravel = 6.0;
+constexpr double kPassReleaseSpeed = 1.0;
+constexpr double kPassReleaseSeparation = 14.0;
+constexpr double kPassReceiveDistance = 12.0;
+constexpr double kPassReceiveSpeed = 3.0;
+constexpr int kPassReceiveFrames = 2;
+constexpr double kPassControlDistance = 20.0;
+constexpr int kPassControlLooseFrames = 3;
 
-bool coop_context_safe(const WorldModel &wm) {
+bool pass_context_safe(const WorldModel &wm) {
     if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
         wm.threat_level >= 0.6 || in_no_push_zone(wm.ball.x, wm.ball.y)) return false;
     double ours = 1e9, theirs = 1e9;
@@ -634,58 +634,55 @@ bool coop_context_safe(const WorldModel &wm) {
         ours = std::min(ours, dist(wm.ball.x, wm.ball.y, wm.home[i].x, wm.home[i].y));
         theirs = std::min(theirs, dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y));
     }
-    // 与局势分析一致：明确对方贴球，或非明确己方贴球且平台报告对手球权。
     if ((theirs < 12.0 && theirs + 5.0 < ours) ||
         (wm.whos_ball == 2 && !(ours < 12.0 && ours + 5.0 < theirs))) return false;
-    // 门前紧急协防及来球反弹优先，不能被接球任务抢占。
     if (wm.ctx.dist_our_goal(wm.ball.x) < 80.0 &&
         std::hypot(wm.ball.vx, wm.ball.vy) < 3.0 && theirs < 100.0) return false;
     if (shot_on_target(wm) && ball_danger_speed(wm) > rebound_min_danger()) return false;
     return true;
 }
 
-bool coop_target_safe(const WorldModel &wm, int passer, int receiver, double rx, double ry, bool check_lane = true) {
-    if (!coop_context_safe(wm) || passer != 1 || receiver < 2 || receiver > 4 ||
-        !std::isfinite(rx) || !std::isfinite(ry) || rx < 0 || rx > 220 || ry < 0 || ry > 180 ||
-        in_opp_goal_area(wm.ctx, rx, ry) || in_goal_area(wm.ctx, rx, ry) || in_no_push_zone(rx, ry)) return false;
+bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
+                      double tx, double ty, bool check_lane) {
+    if (!pass_context_safe(wm) || passer != 1 || receiver < 2 || receiver > 4 ||
+        !std::isfinite(tx) || !std::isfinite(ty) || tx < 0 || tx > 220 || ty < 0 || ty > 180 ||
+        in_opp_goal_area(wm.ctx, tx, ty) || in_goal_area(wm.ctx, tx, ty) || in_no_push_zone(tx, ty)) return false;
     for (int id : {passer, receiver}) {
-        if (wm.ga_cooldown[id] > 0 || wm.ga_overstay[id] >= 15 ||
-            in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y)) return false;
+        if (wm.ga_cooldown[id] > 0 || wm.ga_overstay[id] >= 15 || in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y)) return false;
     }
     if (wm.active_ga_frames > kActiveGaLimit || wm.active_ga_total > kActiveGaTotal) return false;
-    // 球已出脚时，挡线/目标附近有人不等于截球；只保留上面的真实危险与纪律。
     if (!check_lane) return true;
     CircleObstacle obs[PLAYERS_PER_SIDE];
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        if (dist(rx, ry, wm.opp[i].x, wm.opp[i].y) < 20.0) return false;
+        if (dist(tx, ty, wm.opp[i].x, wm.opp[i].y) < 20.0) return false;
         obs[i] = {wm.opp[i].x, wm.opp[i].y, 8.0};
     }
-    return segment_clear_of_circles(wm.ball.x, wm.ball.y, rx, ry, obs, PLAYERS_PER_SIDE);
+    return segment_clear_of_circles(wm.ball.x, wm.ball.y, tx, ty, obs, PLAYERS_PER_SIDE);
 }
 
-bool coop_control_safe(const WorldModel &wm) {
+bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
-    return coop_context_safe(wm) && id >= 2 && id <= 4 &&
+    return pass_context_safe(wm) && id >= 2 && id <= 4 &&
         wm.coop_ball_control.game_state == wm.game_state && wm.ga_cooldown[id] <= 0 &&
-        wm.ga_overstay[id] < 15 &&
-        !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
+        wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
 }
 
-// 只在1号主攻的帧入口推进一次；接球角色读取结果，不重复累计证据。
-void observe_coop_lifecycle(WorldModel &wm) {
+void observe_pass_lifecycle(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     if (task.active && task.passer_id == 1 && task.receiver_id >= 2 && task.receiver_id <= 4 &&
-        task.frames_left > 0 && task.game_state == wm.game_state && coop_context_safe(wm)) {
+        task.frames_left > 0 && task.game_state == wm.game_state && pass_context_safe(wm)) {
         if (task.phase == CoopPassPhase::Preparing && task.observing_push) {
             const RobotState &passer = wm.home[task.passer_id];
             double progress = (wm.ball.x - task.push_ball_x) * task.push_dir_x +
                               (wm.ball.y - task.push_ball_y) * task.push_dir_y;
             double speed = wm.ball.vx * task.push_dir_x + wm.ball.vy * task.push_dir_y;
             double ahead = (wm.ball.x - passer.x) * task.push_dir_x + (wm.ball.y - passer.y) * task.push_dir_y;
-            if (progress >= kCoopReleaseTravel && speed >= kCoopReleaseSpeed && ahead > 0.0 &&
-                dist(wm.ball.x, wm.ball.y, passer.x, passer.y) >= kCoopReleaseSeparation)
+            if (progress >= kPassReleaseTravel && speed >= kPassReleaseSpeed && ahead > 0.0 &&
+                dist(wm.ball.x, wm.ball.y, passer.x, passer.y) >= kPassReleaseSeparation) {
                 task.phase = CoopPassPhase::Receiving;
+                wm.coop_released();
+            }
         }
         if (task.phase == CoopPassPhase::Receiving) {
             const RobotState &receiver = wm.home[task.receiver_id];
@@ -693,99 +690,115 @@ void observe_coop_lifecycle(WorldModel &wm) {
             double opp_min = 1e9, teammate_min = 1e9;
             for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
                 opp_min = std::min(opp_min, dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y));
-                if (i != task.receiver_id)
-                    teammate_min = std::min(teammate_min, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
+                if (i != task.receiver_id) teammate_min = std::min(teammate_min, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
             }
             bool evidence = wm.we_have_ball || wm.whos_ball == 1 || db + 5.0 < opp_min;
-            bool received = db < kCoopReceiveDistance && db < teammate_min && db < opp_min && evidence &&
-                std::hypot(wm.ball.vx, wm.ball.vy) <= kCoopReceiveSpeed;
+            bool received = db < kPassReceiveDistance && db < teammate_min && db < opp_min && evidence &&
+                            std::hypot(wm.ball.vx, wm.ball.vy) <= kPassReceiveSpeed;
             task.receive_frames = received ? task.receive_frames + 1 : 0;
-            if (task.receive_frames >= kCoopReceiveFrames &&
-                coop_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
-                task.active = false;
+            if (task.receive_frames >= kPassReceiveFrames &&
+                pass_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
                 task.phase = CoopPassPhase::Received;
                 wm.coop_ball_control = {true, task.receiver_id, wm.game_state, 0};
+                wm.coop_finish(CoopOutcome::Success);
+                wm.coop_control_entered();
             }
         }
     }
     auto &control = wm.coop_ball_control;
-    if (control.active && coop_control_safe(wm)) {
+    if (control.active && pass_control_safe(wm)) {
         const auto &r = wm.home[control.receiver_id];
         double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
-        control.loose_frames = db > kCoopControlDistance ? control.loose_frames + 1 : 0;
-        if (control.loose_frames >= kCoopControlLooseFrames) control.active = false;
+        control.loose_frames = db > kPassControlDistance ? control.loose_frames + 1 : 0;
+        if (control.loose_frames >= kPassControlLooseFrames) wm.coop_control_end(CoopOutcome::LooseBall);
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
             if (i == control.receiver_id) continue;
             double other = dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y);
-            if (other < kCoopReceiveDistance && other + 5.0 < db) control.active = false;
+            if (other < kPassReceiveDistance && other + 5.0 < db) wm.coop_control_end(CoopOutcome::TeammateTakeover);
         }
     }
 }
 
-bool coop_carry_point_safe(const WorldModel &wm, double x, double y) {
+bool pass_carry_point_safe(const WorldModel &wm, double x, double y) {
     return x >= 6.0 && x <= 214.0 && y >= 6.0 && y <= 174.0 &&
         !in_goal_area(wm.ctx, x, y) && !in_opp_goal_area(wm.ctx, x, y) && !in_no_push_zone(x, y);
 }
 
-// 临时接球人自己带球；不调用普通传球或更改射门评分，也不占用射门计次。
-void carry_received_coop_ball(WorldModel &wm, int id) {
+void carry_pass_ball(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
     double bx = wm.ball.x, by = wm.ball.y;
     double tx = clamp(bx + wm.ctx.attack_dir() * 20.0, 6.0, 214.0), ty = by;
-    // 正前方是门区时沿门区外横向带球，保留非主攻门区纪律。
-    if (!coop_carry_point_safe(wm, tx, ty)) {
-        tx = bx; ty = clamp(by + (by >= 90.0 ? 20.0 : -20.0), 6.0, 174.0);
-    }
+    if (!pass_carry_point_safe(wm, tx, ty)) { tx = bx; ty = clamp(by + (by >= 90.0 ? 20.0 : -20.0), 6.0, 174.0); }
     double length = dist(bx, by, tx, ty);
-    if (length < 1e-6 || !coop_carry_point_safe(wm, tx, ty)) {
-        wm.coop_ball_control.active = false; motion::stop(r); return;
-    }
+    if (length < 1e-6 || !pass_carry_point_safe(wm, tx, ty)) { wm.coop_control_end(CoopOutcome::CarryPoint); motion::stop(r); return; }
     double dx = (tx - bx) / length, dy = (ty - by) / length;
-    double aim = angle_to(0.0, 0.0, dx, dy);
     double side = (bx - r.x) * dx + (by - r.y) * dy;
-    double db = dist(r.x, r.y, bx, by);
-    if (side > 0.0 && db < kCoopReceiveDistance) {
-        if (motion::position_aligned(r, r.x, r.y, aim, kPrepPosTol, kPrepAngTol))
+    if (side > 0.0 && dist(r.x, r.y, bx, by) < kPassReceiveDistance) {
+        if (motion::position_aligned(r, r.x, r.y, angle_to(0.0, 0.0, dx, dy), kPrepPosTol, kPrepAngTol))
             motion::position(r, tx, ty, motion::TM_PASS);
         return;
     }
     double px = bx - dx * 8.0, py = by - dy * 8.0;
     if (side < -3.0) { px = bx - dy * 22.0; py = by + dx * 22.0; }
-    if (!coop_carry_point_safe(wm, px, py)) {
-        wm.coop_ball_control.active = false; motion::stop(r); return;
-    }
-    motion::position_aligned(r, px, py, aim, kPrepPosTol, kPrepAngTol);
-}
+    if (!pass_carry_point_safe(wm, px, py)) { wm.coop_control_end(CoopOutcome::CarryPoint); motion::stop(r); return; }
+    motion::position_aligned(r, px, py, angle_to(0.0, 0.0, dx, dy), kPrepPosTol, kPrepAngTol);
 }
 
-void cancel_unsafe_coop_pass(WorldModel &wm) {
+void cancel_unsafe_pass_task(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     if (task.active && (task.frames_left <= 0 || task.game_state != wm.game_state ||
-        !coop_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
-                          task.phase == CoopPassPhase::Preparing))) task.active = false;
-    if (wm.coop_ball_control.active && !coop_control_safe(wm)) wm.coop_ball_control.active = false;
+        !pass_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
+                          task.phase == CoopPassPhase::Preparing))) {
+        CoopOutcome reason = CoopOutcome::InvalidTarget;
+        if (task.game_state != wm.game_state) reason = CoopOutcome::GameState;
+        else if (task.frames_left <= 0)
+            reason = task.phase == CoopPassPhase::Preparing ? CoopOutcome::PrepareTimeout : CoopOutcome::ReceiveTimeout;
+        else if (wm.in_penalty_exec) reason = CoopOutcome::Penalty;
+        else if (in_no_push_zone(wm.ball.x, wm.ball.y)) reason = CoopOutcome::Corner;
+        else if (wm.threat_level >= 0.6) reason = CoopOutcome::HighThreat;
+        else if (wm.whos_ball == 2) reason = CoopOutcome::Intercepted;
+        else if (wm.active_ga_frames > kActiveGaLimit || wm.active_ga_total > kActiveGaTotal ||
+                 wm.ga_cooldown[task.passer_id] > 0 || wm.ga_cooldown[task.receiver_id] > 0)
+            reason = CoopOutcome::GoalDiscipline;
+        else if (wm.ctx.dist_our_goal(wm.ball.x) < 80.0 && std::hypot(wm.ball.vx, wm.ball.vy) < 3.0)
+            reason = CoopOutcome::EmergencyDefense;
+        else {
+            bool marked = false;
+            for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+                marked = marked || dist(task.rx, task.ry, wm.opp[i].x, wm.opp[i].y) < 20.0;
+            if (marked) reason = CoopOutcome::ReceiverMarked;
+            else if (task.phase == CoopPassPhase::Preparing) {
+                CircleObstacle obs[PLAYERS_PER_SIDE];
+                for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+                    obs[i] = {wm.opp[i].x, wm.opp[i].y, 8.0};
+                if (!segment_clear_of_circles(wm.ball.x, wm.ball.y, task.rx, task.ry, obs, PLAYERS_PER_SIDE))
+                    reason = CoopOutcome::LaneBlocked;
+            }
+        }
+        wm.coop_finish(reason);
+    }
+    if (wm.coop_ball_control.active && !pass_control_safe(wm)) wm.coop_control_end(CoopOutcome::InvalidTarget);
 }
 
-static bool run_coop_receiver(WorldModel &wm, int id) {
-    cancel_unsafe_coop_pass(wm);
-    if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) {
-        carry_received_coop_ball(wm, id);
-        return true;
-    }
+bool run_pass_receiver(WorldModel &wm, int id) {
+    cancel_unsafe_pass_task(wm);
+    if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) { carry_pass_ball(wm, id); return true; }
     const auto &task = wm.coop_pass_task;
     if (!task.active || task.receiver_id != id) return false;
     motion::position(wm.home[id], task.rx, task.ry);
     return true;
 }
+}
+
+void cancel_unsafe_coop_pass(WorldModel &wm) { cancel_unsafe_pass_task(wm); }
 
 void run_active(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
     const TeamContext &ctx = wm.ctx;
-    const bool had_coop_task = wm.coop_pass_task.active || wm.coop_ball_control.active;
-    // 固定主攻每帧最先执行；先计龄再进任何早退分支，取消当帧不重新选任务。
+    const bool had_pass_task = wm.coop_pass_task.active || wm.coop_ball_control.active;
     if (wm.coop_pass_task.active) --wm.coop_pass_task.frames_left;
-    observe_coop_lifecycle(wm);
-    cancel_unsafe_coop_pass(wm);
+    observe_pass_lifecycle(wm);
+    cancel_unsafe_pass_task(wm);
 
     // 点球瞄准锁（docs/06 第 66 轮）：执行期结束就在下一帧解锁，下次点球重新算方向。
     //   放在函数最前面 → 任何早退分支都绕不过（放在射门段里会被早退跳过，实测踩过）。
@@ -830,7 +843,7 @@ void run_active(WorldModel &wm, int id) {
     //   本平台"让球动起来"的所有动作都是推球（没有踢球动作），所以这里一旦拦住，
     //   后面的射门/带球/围困/传球/角区救球全部不会执行 → 不可能在角区或死球期推球。
     //   代价：角上的球不去碰（让平台判 FreeBall）；收益：不再吃"每 4 次 +1 球"的犯规。
-    if (!push_allowed(wm)) { wm.coop_pass_task.active = false; hold_out_of_corner(wm, r); return; }
+    if (!push_allowed(wm)) { if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PushForbidden); hold_out_of_corner(wm, r); return; }
 
     // 对方门球/定位球重启：球停死在对方门区(球门前 50cm) → 别冲进去抢。
     //   球是死球，冲进去射门/追球会横穿全场撞进对方门区，冲撞对方门将(门区受保护)
@@ -852,7 +865,7 @@ void run_active(WorldModel &wm, int id) {
             // 不 return —— 落到 plan_shoot/带球逻辑：进门区作业（方案 C 攻门豁免），
             // 直线推穿把球推出对方门区或直接射门
         } else {
-            wm.coop_pass_task.active = false;
+            if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::DeadBall);
             double hold_x = ctx.opp_goal_x() - ctx.attack_dir() * 85.0;
             double hold_y = clamp(wm.ball.y, 72.5, 107.5);
             motion::position(r, hold_x, hold_y);
@@ -870,8 +883,8 @@ void run_active(WorldModel &wm, int id) {
     // 超限后不恋战：传球给禁区外沿接应，无传球则撤到门区前缘外（x=60cm 线，
     //   出区即清零，球留在门区由对方清掉，也比送点球划算）。
     if (wm.active_ga_frames > kActiveGaLimit || wm.active_ga_total > kActiveGaTotal) {
-        wm.coop_pass_task.active = false;
-        wm.coop_ball_control.active = false;
+        if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::GoalDiscipline);
+        if (wm.coop_ball_control.active) wm.coop_control_end(CoopOutcome::GoalDiscipline);
         ++wm.ga_retreat_fires;   // 诊断用（sim_bench 验证超限撤出触发）
         PassPlan pp_ga = plan_pass(wm, id);
         if (pp_ga.viable) { motion::position(r, pp_ga.target_x, pp_ga.target_y); return; }
@@ -880,9 +893,8 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
-    // 停车让球也必须先维护门区计时、射门冷却并执行纪律撤离，不能冻结原有安全状态。
-    cancel_unsafe_coop_pass(wm);
-    if ((wm.coop_pass_task.active && wm.coop_pass_task.phase == CoopPassPhase::Receiving) || wm.coop_ball_control.active) {
+    if ((wm.coop_pass_task.active && wm.coop_pass_task.phase == CoopPassPhase::Receiving) ||
+        wm.coop_ball_control.active) {
         motion::stop(r);
         return;
     }
@@ -902,7 +914,7 @@ void run_active(WorldModel &wm, int id) {
         if (db < 80.0) {
             bool deep = in_no_push_zone(wm.ball.x, wm.ball.y);   // 35cm 口径（原 22cm 太松）
             if (!deep) {
-                wm.coop_pass_task.active = false;
+                if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::Corner);
                 ++wm.corner_rescue_events;   // 统计用（sim_bench 验证救球触发）
                 double ex = 110.0 - wm.ball.x, ey = 90.0 - wm.ball.y;
                 double elen = std::hypot(ex, ey);
@@ -920,6 +932,23 @@ void run_active(WorldModel &wm, int id) {
                 return;
             }
         }
+    }
+
+    // 普通 PassPlan 已锁点后，和配合传球一样只沿锁定方向推进；不走射门计次。
+    if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
+        auto &task = wm.coop_pass_task;
+        if (task.phase == CoopPassPhase::Receiving) { motion::stop(r); return; }
+        double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+        if (length > 1e-6) {
+            task.push_dir_x = (task.rx - wm.ball.x) / length;
+            task.push_dir_y = (task.ry - wm.ball.y) / length;
+            if (!task.observing_push && dist(r.x, r.y, wm.ball.x, wm.ball.y) < kPassReceiveDistance) {
+                task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
+            }
+            motion::position(r, wm.ball.x + task.push_dir_x * 20.0,
+                             wm.ball.y + task.push_dir_y * 20.0, motion::TM_PASS);
+        }
+        return;
     }
 
     // —— 射门：直线推穿（治真实平台"带球射门系统性偏下"）——
@@ -940,18 +969,20 @@ void run_active(WorldModel &wm, int id) {
     CoopPass cp;
     if (wm.coop_pass_task.active) {
         const auto &task = wm.coop_pass_task;
-        cp.viable = true; cp.receiver_id = task.receiver_id;
-        cp.rx = task.rx; cp.ry = task.ry;
-    } else if (!had_coop_task && coop_context_safe(wm)) {
+        cp.viable = true; cp.receiver_id = task.receiver_id; cp.rx = task.rx; cp.ry = task.ry;
+        double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
+        if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
+        cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
+    } else if (!had_pass_task && pass_context_safe(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
     }
-    const bool coop_pass = cp.viable && coop_target_safe(wm, id, cp.receiver_id, cp.rx, cp.ry);
+    const bool existing_coop_task = wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
+    const bool coop_preferred = existing_coop_task ||
+        (cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15);
+    const bool coop_pass = coop_preferred &&
+        (wm.coop_pass_task.active || pass_target_safe(wm, id, cp.receiver_id, cp.rx, cp.ry, true));
     if (coop_pass) {
-        const double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
-        if (length < 1e-6) { wm.coop_pass_task.active = false; motion::stop(r); return; }
-        cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length;
-        cp.aim_rot = angle_to(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         sp.dir_x = cp.dir_x; sp.dir_y = cp.dir_y; sp.aim_rot = cp.aim_rot;
         sp.target_x = wm.ball.x - cp.dir_x * 8.0; sp.target_y = wm.ball.y - cp.dir_y * 8.0;
         sp.viable = true;
@@ -1005,12 +1036,15 @@ void run_active(WorldModel &wm, int id) {
         // docs/06 第 49 轮：准备点也不许落在角落黄区（否则驱车过去会穿过球、
         //   把球往角心顶 → "No pushing" 犯规）。球在对方门角附近射门时最易触发。
         if (!prep_point_ok(px, py) || (coop_pass && in_no_push_zone(px, py))) {
-            wm.coop_pass_task.active = false;
+            if (coop_pass && wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PrepPoint);
             hold_out_of_corner(wm, r); return;
         }
-        // 通过执行前所有门禁后才发布；对准与绕球也是同一传球流程的一部分。
         if (coop_pass && !wm.coop_pass_task.active) {
-            wm.coop_pass_task = {true, id, cp.receiver_id, cp.rx, cp.ry, kCoopTaskFrames, wm.game_state};
+            wm.coop_pass_task = {};
+            wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
+            wm.coop_pass_task.receiver_id = cp.receiver_id; wm.coop_pass_task.rx = cp.rx; wm.coop_pass_task.ry = cp.ry;
+            wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
+            wm.coop_pass_task.kind = PassTaskKind::Coop; wm.coop_created();
         }
         double db = dist(r.x, r.y, bx, by);
         double te_head = angle_diff(sp.aim_rot, r.rot);
@@ -1093,14 +1127,12 @@ void run_active(WorldModel &wm, int id) {
         }
         if (ready) {
             wm.shoot_align_frames = 0;
-            if (coop_pass && !wm.coop_pass_task.observing_push && db < kCoopReceiveDistance) {
-                auto &task = wm.coop_pass_task;
-                task.observing_push = true;
-                task.push_ball_x = bx; task.push_ball_y = by;
-                task.push_dir_x = sp.dir_x; task.push_dir_y = sp.dir_y;
-            }
             // 直线推穿 = 经过型：不套制动包线，保持推球力度
             motion::position(r, bx + sp.dir_x * 20.0, by + sp.dir_y * 20.0, motion::TM_PASS);
+            if (coop_pass && !wm.coop_pass_task.observing_push && db < kPassReceiveDistance) {
+                auto &task = wm.coop_pass_task; task.observing_push = true;
+                task.push_ball_x = bx; task.push_ball_y = by; task.push_dir_x = sp.dir_x; task.push_dir_y = sp.dir_y;
+            }
             // 计次：球已被推动(>5cm/帧)才记一次；cd=20 冷却防同一推多帧重复计
             if (!coop_pass && wm.shoot_push_cd <= 0 && std::hypot(wm.ball.vx, wm.ball.vy) > 5.0) {
                 ++wm.shoot_push_count;
@@ -1112,7 +1144,27 @@ void run_active(WorldModel &wm, int id) {
     }
 
     PassPlan pp = plan_pass(wm, id);
-    if (pp.viable) { motion::position(r, pp.target_x, pp.target_y); return; }
+    if (pp.viable && !coop_preferred) {
+        if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
+            wm.coop_pass_task = {};
+            wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
+            wm.coop_pass_task.receiver_id = pp.receiver_id; wm.coop_pass_task.rx = pp.target_x; wm.coop_pass_task.ry = pp.target_y;
+            wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
+            wm.coop_pass_task.kind = PassTaskKind::Ordinary; wm.coop_created();
+        }
+        if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
+            auto &task = wm.coop_pass_task;
+            double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+            if (length > 1e-6) {
+                task.push_dir_x = (task.rx - wm.ball.x) / length; task.push_dir_y = (task.ry - wm.ball.y) / length;
+                if (!task.observing_push && dist(r.x, r.y, wm.ball.x, wm.ball.y) < kPassReceiveDistance) {
+                    task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
+                }
+            }
+            motion::position(r, task.rx, task.ry);
+        } else motion::position(r, pp.target_x, pp.target_y);
+        return;
+    }
 
     double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
     // 找离球最近的对方防守者（含守门员）：决定带球开口侧 + 判断球权是否在我
@@ -1135,6 +1187,7 @@ void run_active(WorldModel &wm, int id) {
         }
         if (swarm >= 2 || opp_near < 12.0) {
             PassPlan pp2 = plan_pass(wm, id);
+            // 围困时先解围；不发布普通接球任务，避免接球流程把脱困动作拖住。
             if (pp2.viable) { motion::position(r, pp2.target_x, pp2.target_y); return; }
             // 无传球选择：把球带离最近的围困者（向空档方向推，直线推穿不逗留）
             if (near_i >= 0 && opp_near > 1e-6) {
@@ -1214,7 +1267,7 @@ void run_active(WorldModel &wm, int id) {
 }
 
 void run_passive(WorldModel &wm, int id) {
-    if (run_coop_receiver(wm, id)) return;
+    if (run_pass_receiver(wm, id)) return;
     // —— 门前协防（docs/03 第14轮，参考官方 demo CenterDefender 球-门连线思想，自研实现）——
     // 根因（真 vs demo 2:7×2、0:6 复盘）：demo 把球控停我方门前 (205,90) 静止 1.5~2.2s，
     //   其追击手 Y5 从 100cm 外高速直冲抢点推射；原防守 double_team 球进罚球区
@@ -1315,7 +1368,7 @@ void run_passive(WorldModel &wm, int id) {
 }
 
 void run_assist(WorldModel &wm, int id) {
-    if (run_coop_receiver(wm, id)) return;
+    if (run_pass_receiver(wm, id)) return;
     // 威胁高：回防但分散站位（封上侧射门线，不与 passive 挤一点）
     // 反击快攻窗口（docs/13 方案 A）：断球后 counter_attack_frames>0 时豁免回防、立即前插接应，
     //   让 ACTIVE 断球有传球选择（治反击前场真空，真实 9/2 vs demo 0 射门威胁）。
@@ -1382,7 +1435,7 @@ void run_assist(WorldModel &wm, int id) {
 }
 
 void run_midfield(WorldModel &wm, int id) {
-    if (run_coop_receiver(wm, id)) return;
+    if (run_pass_receiver(wm, id)) return;
     // 威胁高：回防但分散站位（封下侧射门线）
     // 反击快攻窗口（docs/13 方案 A）：断球后 counter_attack_frames>0 时豁免回防、立即前插接应，
     //   让 ACTIVE 断球有传球选择（治反击前场真空，真实 9/2 vs demo 0 射门威胁）。

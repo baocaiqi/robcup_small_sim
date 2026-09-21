@@ -2301,6 +2301,15 @@ static int test_coop_pass_task() {
         if (reason == 8) { wm.opp[2].x = 65; wm.opp[2].y = 120; }
         run_active(wm, 1);
         if (wm.coop_pass_task.active) { printf("FAIL: coop task not cancelled reason=%d\n", reason); return 1; }
+        const CoopOutcome expected[] = {CoopOutcome::GameState, CoopOutcome::Intercepted,
+            CoopOutcome::HighThreat, CoopOutcome::Penalty, CoopOutcome::Corner,
+            CoopOutcome::GoalDiscipline, CoopOutcome::ReceiverMarked,
+            CoopOutcome::EmergencyDefense, CoopOutcome::LaneBlocked};
+        cancel_unsafe_coop_pass(wm);
+        if (wm.coop_stats.created != 1 || wm.coop_stats.outcomes[(int)expected[reason]] != 1) {
+            printf("FAIL: coop cancellation accounting reason=%d created=%lu expected=%lu active=%d\n", reason,
+                   wm.coop_stats.created, wm.coop_stats.outcomes[(int)expected[reason]], (int)wm.coop_pass_task.active); return 1;
+        }
     }
     // 评分通过也不能提前发布：球合法，但准备点落入角区，执行必须停下。
     for (int existing = 0; existing < 2; ++existing) {
@@ -2371,6 +2380,14 @@ static int test_coop_lifecycle() {
         }
         wm.coop_pass_task.frames_left = 1; frame(wm, 75, 150);
         if (wm.coop_pass_task.active) { printf("FAIL: coop unreleased timeout\n"); return 1; }
+        cancel_unsafe_coop_pass(wm); cancel_unsafe_coop_pass(wm);
+        if (wm.coop_stats.created != 1 || wm.coop_stats.released != 0 ||
+            wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout] != 1) {
+            printf("FAIL: coop prepare timeout statistics duplicated/missing created=%lu prep=%lu recv=%lu invalid=%lu active=%d\n",
+                   wm.coop_stats.created, wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout],
+                   wm.coop_stats.outcomes[(int)CoopOutcome::ReceiveTimeout],
+                   wm.coop_stats.outcomes[(int)CoopOutcome::InvalidTarget], (int)wm.coop_pass_task.active); return 1;
+        }
     }
     // 球跟人一起移动仍是带球，必须真的和传球人分离；倒向/横向移动也不算出脚。
     for (int mode = 0; mode < 3; ++mode) {
@@ -2416,6 +2433,17 @@ static int test_coop_lifecycle() {
             }
         }
         WorldModel flight = wm;
+        if (wm.coop_stats.created != 1 || wm.coop_stats.released != 1) {
+            printf("FAIL: coop release statistics duplicated/missing\n"); return 1;
+        }
+        {
+            WorldModel expired = flight;
+            expired.coop_pass_task.frames_left = 0;
+            cancel_unsafe_coop_pass(expired); cancel_unsafe_coop_pass(expired);
+            if (expired.coop_stats.outcomes[(int)CoopOutcome::ReceiveTimeout] != 1) {
+                printf("FAIL: coop receive timeout statistics\n"); return 1;
+            }
+        }
         // 到目标而球还没到，不是接球成功。
         wm.opp[2].x = 200; wm.opp[2].y = 20;
         wm.home[receiver].x = 55; wm.home[receiver].y = 90;
@@ -2441,6 +2469,22 @@ static int test_coop_lifecycle() {
             printf("FAIL: coop reception did not hand ball to actual receiver\n"); return 1;
         }
         // 已接球后仍由接球人处理，不恢复普通分散站位；1号不抢回同一脚球。
+        if (wm.coop_stats.received != 1 || wm.coop_stats.control_entered != 1 ||
+            wm.coop_stats.outcomes[(int)CoopOutcome::Success] != 1) {
+            printf("FAIL: coop success/control statistics\n"); return 1;
+        }
+        {
+            WorldModel ended = wm;
+            ended.coop_control_end(CoopOutcome::LooseBall);
+            ended.coop_control_end(CoopOutcome::LooseBall);
+            ended.coop_finish(CoopOutcome::Intercepted);
+            unsigned long sum = 0;
+            for (auto n : ended.coop_stats.outcomes) sum += n;
+            if (sum != ended.coop_stats.created || sum != 1 ||
+                ended.coop_stats.control_exits[(int)CoopOutcome::LooseBall] != 1) {
+                printf("FAIL: coop terminal result counted twice after control loss\n"); return 1;
+            }
+        }
         RobotState expected = wm.home[receiver]; motion::position(expected, 55, 110, motion::TM_PASS);
         frame(wm, 55, 90);
         if (!wm.coop_ball_control.active || wm.coop_pass_task.active || !stopped(wm.home[1]) ||
@@ -2482,6 +2526,11 @@ static int test_coop_lifecycle() {
             if (cancelled.coop_pass_task.active || cancelled.coop_ball_control.active) {
                 printf("FAIL: coop flight not cancelled cause=%d\n", cause); return 1;
             }
+            const CoopOutcome expected[] = {CoopOutcome::Intercepted, CoopOutcome::HighThreat, CoopOutcome::ReceiveTimeout};
+            cancel_unsafe_coop_pass(cancelled);
+            if (cancelled.coop_stats.outcomes[(int)expected[cause]] != 1) {
+                printf("FAIL: coop flight accounting cause=%d\n", cause); return 1;
+            }
         }
     }
     // 飞行中停车不能冻结主攻门区总停留计时（球贴身时调度层存在攻门豁免）。
@@ -2504,6 +2553,50 @@ static int test_coop_lifecycle() {
         }
     }
     printf("coop lifecycle: OK (observed release/no release/interception/reception/receiver control/moderate threat/goal-area discipline)\n");
+    return 0;
+}
+
+// 普通 PassPlan 也必须锁定同一接球点，并复用出球/接稳/临时控球生命周期。
+static int test_ordinary_pass_task() {
+    WorldModel wm = coop_task_scene();
+    wm.role[1] = ROLE_ACTIVE; wm.role[2] = ROLE_ASSIST;
+    wm.assist_x = 55; wm.assist_y = 90;
+    PassPlan pp = plan_pass(wm, 1);
+    if (!pp.viable || pp.receiver_id < 2) { printf("FAIL: ordinary PassPlan fixture\n"); return 1; }
+    // 故意把接球人的普通站位移开；任务坐标必须仍是 PassPlan 的锁定点。
+    wm.assist_x = 130; wm.assist_y = 150;
+    auto &task = wm.coop_pass_task;
+    task = {};
+    task.active = true; task.passer_id = 1; task.receiver_id = pp.receiver_id;
+    task.rx = pp.target_x; task.ry = pp.target_y; task.frames_left = 20;
+    task.game_state = wm.game_state; task.kind = PassTaskKind::Ordinary;
+    task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
+    const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    task.push_dir_x = (task.rx - wm.ball.x) / len; task.push_dir_y = (task.ry - wm.ball.y) / len;
+    run_assist(wm, task.receiver_id);
+    RobotState expected = wm.home[task.receiver_id]; motion::position(expected, task.rx, task.ry);
+    if (fabs(wm.home[task.receiver_id].vl - expected.vl) > 1e-8 ||
+        fabs(wm.home[task.receiver_id].vr - expected.vr) > 1e-8) {
+        printf("FAIL: ordinary receiver target overwritten\n"); return 1;
+    }
+    wm.ball_last = wm.ball;
+    wm.home[1].x = wm.ball.x - task.push_dir_x * 8.0;
+    wm.home[1].y = wm.ball.y - task.push_dir_y * 8.0;
+    wm.ball.x += task.push_dir_x * 8.0; wm.ball.y += task.push_dir_y * 8.0;
+    wm.ball.vx = task.push_dir_x * 6.0; wm.ball.vy = task.push_dir_y * 6.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving || wm.shoot_push_count != 0) {
+        printf("FAIL: ordinary release/count active=%d phase=%d count=%d\n", (int)wm.coop_pass_task.active,
+               (int)wm.coop_pass_task.phase, wm.shoot_push_count); return 1;
+    }
+    wm.ball.x = task.rx; wm.ball.y = task.ry; wm.ball.vx = wm.ball.vy = 0.0; wm.we_have_ball = true;
+    wm.home[task.receiver_id].x = task.rx; wm.home[task.receiver_id].y = task.ry;
+    run_active(wm, 1); run_active(wm, 1);
+    if (wm.coop_pass_task.active || !wm.coop_ball_control.active ||
+        wm.coop_ball_control.receiver_id != pp.receiver_id) {
+        printf("FAIL: ordinary reception/control\n"); return 1;
+    }
+    printf("ordinary pass task: OK (locked target/release/no shot count/reception/control)\n");
     return 0;
 }
 
@@ -2690,6 +2783,7 @@ int main(int argc, char **argv) {
         rc = test_coop_pass();
         rc |= test_coop_pass_task();
         rc |= test_coop_lifecycle();
+        rc |= test_ordinary_pass_task();
         printf(rc ? "=== COOP PASS TEST FAILED ===\n" : "=== COOP PASS TEST PASSED ===\n");
         return rc;
     }
@@ -2705,6 +2799,7 @@ int main(int argc, char **argv) {
     rc |= test_coop_pass();
     rc |= test_coop_pass_task();
     rc |= test_coop_lifecycle();
+    rc |= test_ordinary_pass_task();
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();

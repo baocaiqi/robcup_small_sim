@@ -31,8 +31,24 @@ struct BallState {
     bool valid = false;
 };
 
-// 配合传球双方共用的跨帧接球任务；普通 PassPlan 不使用。
+// 配合传球与普通 PassPlan 共用的跨帧接球任务。
 enum class CoopPassPhase { Preparing, Receiving, Received };
+enum class PassTaskKind { Coop, Ordinary };
+
+// 只用于记账。成功是传球的主要结果，后续临时控球退出不重复算失败。
+enum class CoopOutcome {
+    Success, PrepareTimeout, ReceiveTimeout, GameState, InvalidBall, Penalty,
+    HighThreat, Corner, Intercepted, EmergencyDefense, IncomingShot,
+    InvalidTarget, GoalDiscipline, ReceiverMarked, LaneBlocked, PushForbidden,
+    DeadBall, DegenerateTarget, PrepPoint, MatchEnd, LooseBall, TeammateTakeover,
+    CarryPoint, Count
+};
+const char *coop_outcome_name(CoopOutcome result);
+struct CoopPassStats {
+    unsigned long created = 0, released = 0, received = 0, control_entered = 0;
+    unsigned long outcomes[(int)CoopOutcome::Count] = {};
+    unsigned long control_exits[(int)CoopOutcome::Count] = {};
+};
 
 struct CoopPassTask {
     bool active = false;
@@ -46,6 +62,7 @@ struct CoopPassTask {
     double push_ball_x = 0.0, push_ball_y = 0.0;
     double push_dir_x = 0.0, push_dir_y = 0.0;
     int receive_frames = 0;
+    PassTaskKind kind = PassTaskKind::Coop;
 };
 
 // 接球任务完成后的临时带球权；不改变固定角色，也不调用普通 PassPlan。
@@ -59,6 +76,14 @@ struct CoopBallControl {
 struct WorldModel {
     CoopPassTask coop_pass_task;
     CoopBallControl coop_ball_control;
+    CoopPassStats coop_stats;
+    // 默认为空；仿真器可安装只读记录器，比赛 DLL 不进行文件输出。
+    void (*coop_observer)(const WorldModel &, const char *, CoopOutcome) = nullptr;
+    void coop_created();
+    void coop_released();
+    void coop_finish(CoopOutcome result);
+    void coop_control_entered();
+    void coop_control_end(CoopOutcome reason);
     TeamContext ctx;
 
     BallState ball;          // 当前球

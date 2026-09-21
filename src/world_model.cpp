@@ -3,13 +3,48 @@
 
 namespace simuro5 {
 
+const char *coop_outcome_name(CoopOutcome result) {
+    static const char *names[] = {"success", "prepare_timeout", "receive_timeout", "game_state",
+        "invalid_ball", "penalty", "high_threat", "corner", "intercepted", "emergency_defense",
+        "incoming_shot", "invalid_target", "goal_discipline", "receiver_marked", "lane_blocked",
+        "push_forbidden", "dead_ball", "degenerate_target", "prep_point", "match_end",
+        "loose_ball", "teammate_takeover", "carry_point"};
+    static_assert(sizeof(names) / sizeof(names[0]) == (int)CoopOutcome::Count, "统计原因表不完整");
+    return names[(int)result];
+}
+void WorldModel::coop_created() {
+    ++coop_stats.created;
+    if (coop_observer) coop_observer(*this, "created", CoopOutcome::Count);
+}
+void WorldModel::coop_released() {
+    ++coop_stats.released;
+    if (coop_observer) coop_observer(*this, "released", CoopOutcome::Count);
+}
+void WorldModel::coop_finish(CoopOutcome result) {
+    if (!coop_pass_task.active) return; // 多个纪律闸门同帧触发也只结算一次。
+    ++coop_stats.outcomes[(int)result];
+    if (result == CoopOutcome::Success) ++coop_stats.received;
+    if (coop_observer) coop_observer(*this, "finished", result);
+    coop_pass_task.active = false;
+}
+void WorldModel::coop_control_entered() {
+    ++coop_stats.control_entered;
+    if (coop_observer) coop_observer(*this, "control_entered", CoopOutcome::Count);
+}
+void WorldModel::coop_control_end(CoopOutcome reason) {
+    if (!coop_ball_control.active) return;
+    ++coop_stats.control_exits[(int)reason];
+    if (coop_observer) coop_observer(*this, "control_exited", reason);
+    coop_ball_control.active = false;
+}
+
 void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
     ctx = ctx_;
     game_state_last = game_state;        // 上一帧 PlayMode（点球执行期识别用）
     game_state = (int)env->gameState;
     if (game_state != game_state_last) {
-        coop_pass_task.active = false;
-        coop_ball_control.active = false;
+        coop_finish(CoopOutcome::GameState);
+        coop_control_end(CoopOutcome::GameState);
     }
     whos_ball = env->whosBall;
     field = env->fieldBounds;
