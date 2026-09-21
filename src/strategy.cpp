@@ -21,6 +21,14 @@ namespace simuro5 {
 // ============================================================
 TUNABLE(kStateHysteresisFrames, 3);  // 滞回帧数（可调，见 docs/06）
 
+// 威胁降档滞回帧数（升快降慢，短期第1项）：
+//   威胁升档立即；降档需连续低威胁满 kThreatHoldFrames 帧才降，防止球短暂飞出
+//   危险区 / 快球短暂减速，立刻取消人盯人（对手马上回传打空档）。
+//   注意：只改变「降档时机」，threat_level 仍是离散档位（0.1/0.4/0.6/0.8/1.0），
+//   不引入连续中间值——守住「离散打底」红线，连续威胁是后续独立开关。
+//   <=0 时完全退回旧行为（即时升降），作回滚开关。
+TUNABLE(kThreatHoldFrames, 10);
+
 // 反击快攻窗口帧数（docs/13 攻击强化 方案 A）：
 //   断球瞬间起 30 帧（≈0.75s）内，assist/midfield 豁免回防条件立即前插接应，
 //   让 ACTIVE 断球后有传球选择；窗口过后恢复正常回防逻辑。
@@ -188,8 +196,21 @@ void Strategy::update_team_state(WorldModel &wm) {
         wm.team_state = TS_DEFENSE;
     wm.state_transition = (wm.team_state != prev);
 
-    // 威胁等级：由「状态 + 球位」稳定输出（不再随单帧球权抖动）
-    wm.threat_level = threat_from_state(wm);
+    // 威胁等级：由「状态 + 球位」稳定输出（不再随单帧球权抖动），
+    // 再叠加「升快降慢」滞回（见 kThreatHoldFrames 注释）：升档立即、降档需连续
+    // 低威胁满 N 帧才降，消除 danger≈6 阈值附近的档位来回跳。切换到进攻态(threat=0.1)
+    // 即时降——攻防切换本身已由状态机 3 帧滞回把关，无需再叠一层。
+    double raw_threat = threat_from_state(wm);
+    if (kThreatHoldFrames <= 0 || raw_threat >= wm.threat_level) {
+        wm.threat_level = raw_threat;             // 升档/持平：立即
+        wm.threat_hold_frames = 0;
+    } else if (wm.team_state == TS_ATTACK) {
+        wm.threat_level = raw_threat;             // 进攻态：即时（状态机已滞回）
+        wm.threat_hold_frames = 0;
+    } else if (++wm.threat_hold_frames >= kThreatHoldFrames) {
+        wm.threat_level = raw_threat;             // 降慢：连续 N 帧低威胁才降
+        wm.threat_hold_frames = 0;
+    }
 }
 
 double Strategy::threat_from_state(const WorldModel &wm) const {

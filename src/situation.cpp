@@ -140,6 +140,37 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.passive_x = (ad > 0) ? std::max(wm.passive_x, 65.0)
                                  : std::min(wm.passive_x, 155.0);
     }
+    // —— 防守堆叠纪律（短期第4项）：三台区域防守者两两最小间距，防扎堆互撞 ——
+    //   真机常出现多台防守挤成一团（互相干扰/拖球乌龙/送点球）。在锚点层做两两分离：
+    //   任意两台间距 < kDefenseMinSep → 沿连线各推一半；2 轮对称推开基本稳定。
+    //   只约束锚点层；动态目标（人盯人/二抢一/断球点）仍由各角色自由站位。
+    //   放在下方禁区纪律**之前**：分离若意外压入禁区，纪律 clamp 会在后面兜住。
+    {
+        const double kDefenseMinSep = 20.0;   // 两两最小间距(cm)
+        for (int it = 0; it < 2; ++it) {
+            double ax[3] = { wm.passive_x, wm.assist_x, wm.mid_x };
+            double ay[3] = { wm.passive_y, wm.assist_y, wm.mid_y };
+            for (int a = 0; a < 3; ++a) {
+                for (int b = a + 1; b < 3; ++b) {
+                    double dx = ax[b] - ax[a], dy = ay[b] - ay[a];
+                    double d = std::hypot(dx, dy);
+                    if (d >= kDefenseMinSep) continue;
+                    if (d < 1e-6) { dx = 0.0; dy = 1.0; d = 1.0; }   // 完全重合 → 沿 y 推开
+                    double push = (kDefenseMinSep - d) * 0.5;
+                    double ux = dx / d, uy = dy / d;
+                    ax[a] -= ux * push; ay[a] -= uy * push;
+                    ax[b] += ux * push; ay[b] += uy * push;
+                }
+            }
+            // 写回并夹场地边界（推开可能出界）
+            wm.passive_x = clamp(ax[0], 10.0, 210.0);
+            wm.passive_y = clamp(ay[0], 10.0, 170.0);
+            wm.assist_x  = clamp(ax[1], 15.0, 205.0);
+            wm.assist_y  = clamp(ay[1], 20.0, 160.0);
+            wm.mid_x     = clamp(ax[2], 15.0, 205.0);
+            wm.mid_y     = clamp(ay[2], 20.0, 160.0);
+        }
+    }
     // 己方禁区纪律：防守点/助攻点/中场点不得进入己方门区与罚球区（防堆叠送点）
     if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
         wm.passive_x = clamp(gx + ad * 55.0, 10.0, 210.0);

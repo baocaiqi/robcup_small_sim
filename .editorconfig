@@ -1,0 +1,12 @@
+# 统一源码编码与换行，防止编辑器把 UTF-8 源码误存成 UTF-16/GBK 造成乱码
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+
+[*.{cpp,hpp,h,c,cc}]
+charset = utf-8
+indent_style = space
+indent_size = 4
