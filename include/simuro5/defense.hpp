@@ -255,6 +255,14 @@ inline double mark_lead() { return 3.0; }
 //   下界 15cm 是「持球者」判定（离球 <15 视为正持球，堵射门而非传球）。
 inline double mark_pass_lane_dist() { return 40.0; }
 
+// 威胁阈值（下游角色分支读取，替代散落的魔法数字 0.3/0.6）：
+//   retreat_threat()     = 0.30：wm.threat_level >  它 → assist/midfield 回防
+//   mark_engage_threat() = 0.60：wm.threat_level >= 它 → passive 人盯人 / double_team / 站位回收
+//   当前实现为「命名常量」（返回值 = 旧魔法数字，零行为变化）；将来若做连续威胁，
+//   下游只需改这里两个函数，角色层不用动。
+inline double retreat_threat()     { return 0.30; }
+inline double mark_engage_threat() { return 0.60; }
+
 // 盯人危险门限：被盯者必须离球或离门足够近才值得贴，否则回区域防守。
 //   复盘未贴住帧里 44~48% 被盯者离球 >40cm——追不危险的对手白费体力。
 inline double mark_engage_ball_dist() { return 40.0; }

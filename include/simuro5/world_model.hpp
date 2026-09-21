@@ -115,6 +115,8 @@ struct WorldModel {
     //   内战 0:0 根因：球卡对方门区 135 秒，进攻方死球等待永不超时、门将清球不穿过）。
     int dead_ball_frames = 0;
     double threat_level = 0.0; // 威胁等级 0~1（状态机输出：状态+球位稳定计算）
+    int threat_hold_frames = 0; // 威胁降档滞回计数：连续低威胁帧数（strategy.cpp 升快降慢）
+    int goalie_opp_hold = 0;   // 门将「对手持球」滞回计数：连续未检测到才撤销（防瞬时丢标记前出，roles.cpp）
     bool we_have_ball = false; // 球权是否在我方（简版判断）
 
     // —— 攻防状态机（strategy.cpp 每帧写入）——

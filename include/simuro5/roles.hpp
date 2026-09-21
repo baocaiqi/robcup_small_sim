@@ -47,6 +47,12 @@ void run_goalie(WorldModel &wm, int id);
 // ============================================================
 bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty);
 
+// 出球方向角度打分（docs/24 第二步）：门将解围/推球时不正面直线踢，扫候选角往
+//   「队友密度高、对手密度低」的空当清。返回单位方向 (dirx,diry)（背离己门半平面内）。
+//   门球重启推球(branch 8) 与 脚下清球(clear branch) 共用。
+void gk_clear_direction(const WorldModel &wm, int id,
+                        double bx, double by, double &dirx, double &diry);
+
 // 射门助跑距离（cm）：球后多远开始冲，决定撞球瞬间的机头速度 ⇒ 决定出球速度
 // ------------------------------------------------------------
 // 常规 20cm；**罚点球 35cm**。依据（docs/06 第 57 轮，真机 09-13 rlg 帧 2292~2365）：

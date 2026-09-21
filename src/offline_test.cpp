@@ -1753,25 +1753,35 @@ static int test_goalie_clear_push() {
     }
     wm.role[0] = ROLE_GOALIE;
 
-    // ① 已对准（机头 180°）+ 球在门前静止 → 必须有推穿速度（不是蹭）
-    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = 180.0;
+    // 推球方向（与 run_goalie 同一打分）：本布局队友/对手都在正前方，侧面是空当 →
+    //   打分偏向侧面；门将须沿此方向对准才推穿。
+    double pdirx = 0.0, pdiry = 0.0;
+    gk_clear_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
+    double aim_rot = angle_to(0.0, 0.0, pdirx, pdiry);
+
+    // ① 已对准（机头=推球方向、站在球后沿推球方向）+ 球在门前静止 → 必须有推穿速度（不是蹭）
+    wm.home[0].x = wm.ball.x - pdirx * 10.0;   // 球后 10cm（沿推球方向）
+    wm.home[0].y = wm.ball.y - pdiry * 10.0;
+    wm.home[0].rot = aim_rot;
     run_goalie(wm, 0);
     double v1 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
     if (v1 < 30.0) {
         printf("FAIL: 门将对准后应直线推穿（有速度）v=%.0f\n", v1);
         return 1;
     }
-    // ② 机头偏 90°（真机实测 -100°）→ 转正，40 帧内收敛到 ±20°
-    double rot = -90.0;
+    // ② 机头偏 90°（真机实测 -100°）→ 转正，40 帧内收敛到 ±20°（面向推球方向）
+    double rot = normalize_angle(aim_rot - 90.0);
     int conv = -1;
     for (int f = 0; f < 40; ++f) {
-        wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = rot;
+        wm.home[0].x = wm.ball.x - pdirx * 10.0;
+        wm.home[0].y = wm.ball.y - pdiry * 10.0;
+        wm.home[0].rot = rot;
         run_goalie(wm, 0);
         double w = (wm.home[0].vr - wm.home[0].vl) / 10.0;              // rad/s（平台口径）
         rot = normalize_angle(rot + w * 0.025 * 180.0 / SIMURO5_PI);    // dt=1/40s
-        if (std::fabs(angle_diff(180.0, rot)) <= 20.0) { conv = f; break; }
+        if (std::fabs(angle_diff(aim_rot, rot)) <= 20.0) { conv = f; break; }
     }
-    if (conv < 0) { printf("FAIL: 门将没能转正到面向场中央（仍在死区打转）\n"); return 1; }
+    if (conv < 0) { printf("FAIL: 门将没能转正到推球方向（仍在死区打转）\n"); return 1; }
     printf("goalie clear push: OK (对准即推穿 v=%.0f / 偏 90° 时 %d 帧内转正)\n", v1, conv);
     return 0;
 }
