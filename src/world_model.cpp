@@ -8,7 +8,7 @@ const char *coop_outcome_name(CoopOutcome result) {
         "invalid_ball", "penalty", "high_threat", "corner", "intercepted", "emergency_defense",
         "incoming_shot", "invalid_target", "goal_discipline", "receiver_marked", "lane_blocked",
         "push_forbidden", "dead_ball", "degenerate_target", "prep_point", "match_end",
-        "loose_ball", "teammate_takeover", "carry_point"};
+        "loose_ball", "teammate_takeover", "carry_point", "opponent_first"};
     static_assert(sizeof(names) / sizeof(names[0]) == (int)CoopOutcome::Count, "统计原因表不完整");
     return names[(int)result];
 }

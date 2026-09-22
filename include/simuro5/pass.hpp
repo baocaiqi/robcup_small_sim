@@ -20,6 +20,14 @@ struct PassPlan {
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id);
 
+// 当前锁定接球任务的到位判断：接球人能在球到达后容差时间内赶到锁定点才放行。
+// 时间单位为帧；只读取 coop_pass_task 的 receiver_id / rx / ry，不重选人、不改点。
+bool pass_receiver_ready(const WorldModel &wm);
+
+// 出球前抢点判断：五名对手中若有人会比锁定接球人明显更早到锁点，则返回 true。
+// 只读当前统一任务，不重选接球人或接球点；Receiving 阶段始终返回 false。
+bool pass_opponent_arrives_first(const WorldModel &wm);
+
 // ============================================================
 // 配合进攻的传球方案（docs/06 第 69 轮，用户 2026-09-15 指令）
 //   规则：对每个队友算"接球后能射门的机会质量"，取最高者传给**他**；

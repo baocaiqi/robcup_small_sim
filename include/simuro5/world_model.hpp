@@ -41,7 +41,7 @@ enum class CoopOutcome {
     HighThreat, Corner, Intercepted, EmergencyDefense, IncomingShot,
     InvalidTarget, GoalDiscipline, ReceiverMarked, LaneBlocked, PushForbidden,
     DeadBall, DegenerateTarget, PrepPoint, MatchEnd, LooseBall, TeammateTakeover,
-    CarryPoint, Count
+    CarryPoint, OpponentFirst, Count
 };
 const char *coop_outcome_name(CoopOutcome result);
 struct CoopPassStats {

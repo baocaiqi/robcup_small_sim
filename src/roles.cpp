@@ -693,6 +693,11 @@ constexpr double kPassReceiveSpeed = 3.0;
 constexpr int kPassReceiveFrames = 2;
 constexpr double kPassControlDistance = 20.0;
 constexpr int kPassControlLooseFrames = 3;
+TUNABLE(kPassReceiveSlowRadius, 30.0);       // cm：球进入此距离后切换接球控制
+TUNABLE(kPassReceiveMinDriveScale, 0.25);   // 贴球时保留的最小平移比例
+TUNABLE(kPassReceiveDirMinSpeed, 0.5);      // cm/帧：低于此值不采信球速方向
+TUNABLE(kPassReceiveDirMaxSpeed, 15.0);     // cm/帧：高于此值视为异常速度
+TUNABLE(kPassReceiveAngleTol, 12.0);        // 度：面向来球的允许误差
 
 bool pass_context_safe(const WorldModel &wm) {
     if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
@@ -845,7 +850,78 @@ void cancel_unsafe_pass_task(WorldModel &wm) {
         }
         wm.coop_finish(reason);
     }
+    // 旧安全规则先结算；只有它们均未取消、且球尚未确认出脚时，才补判对手抢点。
+    if (task.active && pass_opponent_arrives_first(wm)) wm.coop_finish(CoopOutcome::OpponentFirst);
     if (wm.coop_ball_control.active && !pass_control_safe(wm)) wm.coop_control_end(CoopOutcome::InvalidTarget);
+}
+
+double pass_receive_facing(const WorldModel &wm, const CoopPassTask &task, const RobotState &receiver) {
+    const double rel_x = receiver.x - wm.ball.x, rel_y = receiver.y - wm.ball.y;
+    const double rel_d = std::hypot(rel_x, rel_y);
+    const double ball_speed = std::hypot(wm.ball.vx, wm.ball.vy);
+    const double min_speed = std::isfinite(kPassReceiveDirMinSpeed) && kPassReceiveDirMinSpeed > 1e-6
+                           ? kPassReceiveDirMinSpeed : 0.5;
+    const double max_speed = std::isfinite(kPassReceiveDirMaxSpeed) && kPassReceiveDirMaxSpeed >= min_speed
+                           ? kPassReceiveDirMaxSpeed : 15.0;
+    const double approach = std::isfinite(rel_d) && rel_d > 1e-6
+                          ? (wm.ball.vx * rel_x + wm.ball.vy * rel_y) / rel_d : 0.0;
+    if (std::isfinite(ball_speed) && ball_speed >= min_speed && ball_speed <= max_speed &&
+        std::isfinite(approach) && approach >= min_speed) {
+        return angle_to(0.0, 0.0, -wm.ball.vx, -wm.ball.vy);
+    }
+    if (std::isfinite(rel_d) && rel_d > 1e-6)
+        return angle_to(receiver.x, receiver.y, wm.ball.x, wm.ball.y);
+    const double push_len = std::hypot(task.push_dir_x, task.push_dir_y);
+    if (std::isfinite(push_len) && push_len > 1e-6)
+        return angle_to(0.0, 0.0, -task.push_dir_x, -task.push_dir_y);
+    return receiver.rot;
+}
+
+void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
+    RobotState &receiver = wm.home[id];
+    const double ball_distance = dist(receiver.x, receiver.y, wm.ball.x, wm.ball.y);
+    if (!std::isfinite(ball_distance) || !std::isfinite(kPassReceiveSlowRadius) ||
+        kPassReceiveSlowRadius <= 1e-6 || ball_distance >= kPassReceiveSlowRadius) {
+        motion::position(receiver, task.rx, task.ry);
+        return;
+    }
+
+    const double desired_rot = pass_receive_facing(wm, task, receiver);
+    const double angle_tol = std::isfinite(kPassReceiveAngleTol) && kPassReceiveAngleTol > 0.0
+                           ? kPassReceiveAngleTol : 12.0;
+    if (!std::isfinite(desired_rot) || !std::isfinite(receiver.rot)) {
+        motion::stop(receiver);
+        return;
+    }
+    const double facing_error = angle_diff(desired_rot, receiver.rot);
+    if (std::fabs(facing_error) > angle_tol) {
+        // 近球时先原地迎球；把当前位置作为目标，避免离锁点稍远时 position_aligned 退回普通赶路。
+        motion::position_aligned(receiver, receiver.x, receiver.y, desired_rot, 3.0, angle_tol);
+    } else {
+        const double target_distance = dist(receiver.x, receiver.y, task.rx, task.ry);
+        if (!std::isfinite(target_distance) || target_distance <= 3.0) {
+            motion::stop(receiver);
+        } else {
+            const double target_rot = angle_to(receiver.x, receiver.y, task.rx, task.ry);
+            const double forward_error = std::fabs(angle_diff(target_rot, desired_rot));
+            const double reverse_error = std::fabs(angle_diff(target_rot + 180.0, desired_rot));
+            // 差速车不能横移：锁点若在机头侧面就先面向球等待；前后方向一致才低速补位。
+            if (std::min(forward_error, reverse_error) <= 2.0 * angle_tol)
+                motion::position(receiver, task.rx, task.ry);
+            else
+                motion::stop(receiver);
+        }
+    }
+
+    // 只缩小共同前进量，保留左右轮差值形成的转向；所以近球会收油，但仍能转身迎球。
+    const double min_scale = std::isfinite(kPassReceiveMinDriveScale)
+                           ? clamp(kPassReceiveMinDriveScale, 0.0, 1.0) : 0.25;
+    const double drive_scale = clamp(ball_distance / kPassReceiveSlowRadius, min_scale, 1.0);
+    double drive = 0.5 * (receiver.vl + receiver.vr);
+    const double turn = 0.5 * (receiver.vr - receiver.vl);
+    drive *= drive_scale;
+    receiver.vl = clamp(drive - turn, -motion::kMaxWheel, motion::kMaxWheel);
+    receiver.vr = clamp(drive + turn, -motion::kMaxWheel, motion::kMaxWheel);
 }
 
 bool run_pass_receiver(WorldModel &wm, int id) {
@@ -853,7 +929,8 @@ bool run_pass_receiver(WorldModel &wm, int id) {
     if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) { carry_pass_ball(wm, id); return true; }
     const auto &task = wm.coop_pass_task;
     if (!task.active || task.receiver_id != id) return false;
-    motion::position(wm.home[id], task.rx, task.ry);
+    if (task.phase == CoopPassPhase::Receiving) run_receiving_receiver(wm, task, id);
+    else motion::position(wm.home[id], task.rx, task.ry);
     return true;
 }
 }
@@ -1006,6 +1083,7 @@ void run_active(WorldModel &wm, int id) {
     if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
         auto &task = wm.coop_pass_task;
         if (task.phase == CoopPassPhase::Receiving) { motion::stop(r); return; }
+        if (!pass_receiver_ready(wm)) { motion::stop(r); return; }
         double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
         if (length > 1e-6) {
             task.push_dir_x = (task.rx - wm.ball.x) / length;
@@ -1114,6 +1192,7 @@ void run_active(WorldModel &wm, int id) {
             wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
             wm.coop_pass_task.kind = PassTaskKind::Coop; wm.coop_created();
         }
+        if (coop_pass && !pass_receiver_ready(wm)) { motion::stop(r); return; }
         double db = dist(r.x, r.y, bx, by);
         double te_head = angle_diff(sp.aim_rot, r.rot);
         // 人在球的"门侧后方"：球−人 在瞄准方向上的投影 > 0 ⇔ 往前推把球送向球门
@@ -1222,6 +1301,7 @@ void run_active(WorldModel &wm, int id) {
         }
         if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
             auto &task = wm.coop_pass_task;
+            if (!pass_receiver_ready(wm)) { motion::stop(r); return; }
             double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
             if (length > 1e-6) {
                 task.push_dir_x = (task.rx - wm.ball.x) / length; task.push_dir_y = (task.ry - wm.ball.y) / length;
