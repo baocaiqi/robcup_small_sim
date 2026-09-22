@@ -13,11 +13,6 @@
 #include <algorithm>
 
 namespace simuro5 {
-
-// ============================================================
-// 可调参数（改动后记得同步 docs/06-调参记录.md）
-// ============================================================
-
 // 拦截线距球门线的距离(cm)：球门前方多远处开始断球。
 //   越近 → 站位越靠门，堵门更稳，但断球更晚、留给反应的时间更少；
 //   越远 → 断球更早，但离门远、一旦被变向绕过就回不来。
@@ -290,7 +285,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
 // ============================================================
 TUNABLE(kDoubleTeamDangerDist, 111.151);  // 持球者离门多近才夹抢(cm)
 TUNABLE(kDoubleTeamLateral, 32.5);  // 夹抢点横向偏移(cm)：与盯人者错开角度
-TUNABLE(kDoubleTeamCarryDist, 8);  // 持球者判定：离球 <此值视为正带球
+TUNABLE(kDoubleTeamCarryDist, 15);  // 持球者判定：离球 <此值视为正带球（8→15 第73轮：松球/即将接球也夹抢）
 TUNABLE(kDoubleTeamCoverDist, 53.832);  // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
 
 bool double_team_point(const WorldModel &wm, int defender_id,

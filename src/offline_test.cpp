@@ -1741,12 +1741,15 @@ static int test_placement_semantics() {
 //   真机 09-13 09:59 场：门球卡 7.6 秒球不动，门将机头 -100°（该 180°）→
 //   position 落进 (85°,95°) 纯自转死区 ⇒ 只蹭不推。断言两条：
 //   ① 已对准 → 必须"直线推穿"（有速度）；② 机头偏 90° → 必须转正且 40 帧内收敛到 ±20°。
+//   ⚠️ 第 72 轮起：球距门 <20cm 的贴门线静止球改走「直线推出」硬钳位（见
+//      test_goalie_straight_clear），本测试把球摆在 30cm（20~45cm 侧面开球区），
+//      继续覆盖侧面开球的"先转正再推穿"死区修复。
 // ============================================================
 static int test_goalie_clear_push() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
     wm.ball.valid = true;
-    wm.ball.x = 205.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.ball.x = 190.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
     for (int i = 0; i < 5; ++i) {
         wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
         wm.role[i] = ROLE_PASSIVE;
@@ -1783,6 +1786,153 @@ static int test_goalie_clear_push() {
     }
     if (conv < 0) { printf("FAIL: 门将没能转正到推球方向（仍在死区打转）\n"); return 1; }
     printf("goalie clear push: OK (对准即推穿 v=%.0f / 偏 90° 时 %d 帧内转正)\n", v1, conv);
+    return 0;
+}
+
+// ============================================================
+// 第 72 轮：贴门线静止球「直线推出」硬钳位（修 Q1 丢球③震荡 + 丢球①绕行竞速）
+//   球距门 <20cm（贴门线）或 对手 <40cm 正抢 → 门将站球门侧推出。
+//   第 72 轮用户指令（问题2/3）：门球(无人逼抢)不再正前方直线踢（喂中路对手），改往
+//   侧面空当推；对手正抢(<40cm)时仍直线远离己门（抢时间，丢球①不回退）。
+//   断言三条：① 门球+门侧对齐 → 沿【侧面】方向推穿(有速度，且方向带 y 分量)；
+//   ② 被抢球+门侧 → 直线推出(有速度)；③ 被抢球+机头垂直(-90°) → 先转正到 180° 再直线推穿。
+// ============================================================
+static int test_goalie_straight_clear() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+
+    // ① 贴门线(15cm) + 对手远(105cm，不抢) → 应往【侧面】踢（出球方向必须带明显 y 分量）
+    wm.ball.x = 205.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    double pdirx = 0.0, pdiry = 0.0;
+    gk_clear_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
+    if (std::fabs(pdiry) < 0.3) {
+        printf("FAIL: 门球出球方向应是侧面(带 y 分量)，实际 dir=(%.2f,%.2f) 仍直线\n", pdirx, pdiry);
+        return 1;
+    }
+    // 门将沿侧面方向站球后对准 → 应推穿（有速度）
+    wm.home[0].x = wm.ball.x - pdirx * 10.0;
+    wm.home[0].y = wm.ball.y - pdiry * 10.0;
+    wm.home[0].rot = angle_to(0.0, 0.0, pdirx, pdiry);
+    run_goalie(wm, 0);
+    double v1 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v1 < 30.0) {
+        printf("FAIL: 门球侧面方向对准后应推穿(有速度) v=%.0f\n", v1);
+        return 1;
+    }
+
+    // ② 对手正抢(<40cm) + 球 39cm(非贴门线) + 门将门侧 → 直线推出(抢得过对手)
+    wm.ball.x = 181.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 150.0; wm.opp[0].y = 89.7;                              // 对手距球 31cm < 40
+    wm.home[0].x = 215.0; wm.home[0].y = 89.7; wm.home[0].rot = 180.0;   // 门侧，距球 34cm
+    run_goalie(wm, 0);
+    double v2 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v2 < 30.0) {
+        printf("FAIL: 被抢球门侧应直线推出(抢得过对手) v=%.0f\n", v2);
+        return 1;
+    }
+
+    // ③ 被抢球 + 机头垂直(-90°，真机 09-22 场门球开局残留) → 先转正到 180° 再直线推穿。
+    //    复现 f491：球 (205.4,89.7) 静止，门将 (214.8,90.3) 机头 -90°。旧代码直接
+    //    motion::position 到球前 30cm，目标恰在机头 90° 后方 → 落进 (85°,95°) 死区自转，
+    //    再被「推穿↔先到球后8cm」翻转来回拽成画弧振荡，球一动不动。对手距球 <40cm 走直线，
+    //    验证转正兜底在直线分支仍有效（门球无人逼抢时走侧面，无此死区）。
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 100; wm.opp[i].y = 90; }   // 先重置
+    wm.opp[0].x = 180.0; wm.opp[0].y = 89.7;                              // 对手距球 ~25cm < 40
+    wm.ball.x = 205.4; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 214.8; wm.home[0].y = 90.3; wm.home[0].rot = -90.0;
+    double rot3 = -90.0;
+    int conv3 = -1;
+    for (int f = 0; f < 40; ++f) {
+        wm.home[0].x = 214.8; wm.home[0].y = 90.3;
+        wm.home[0].rot = rot3;
+        run_goalie(wm, 0);
+        double w = (wm.home[0].vr - wm.home[0].vl) / 10.0;              // rad/s（平台口径）
+        rot3 = normalize_angle(rot3 + w * 0.025 * 180.0 / SIMURO5_PI);    // dt=1/40s
+        if (std::fabs(angle_diff(180.0, rot3)) <= 20.0) { conv3 = f; break; }
+    }
+    if (conv3 < 0) {
+        printf("FAIL: 被抢球+机头垂直(-90°)时门将没转正到 180°（仍在死区画弧）\n");
+        return 1;
+    }
+    // 转正后下一帧应直线推穿（有速度）
+    wm.home[0].x = 214.8; wm.home[0].y = 90.3; wm.home[0].rot = 180.0;
+    run_goalie(wm, 0);
+    double v3 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v3 < 30.0) {
+        printf("FAIL: 被抢球转正后应直线推穿 v=%.0f\n", v3);
+        return 1;
+    }
+    printf("goalie straight clear: OK (门球侧面推穿 v1=%.0f / 被抢球直线 v2=%.0f v3=%.0f 转正%df)\n",
+           v1, v2, v3, conv3);
+    return 0;
+}
+
+// ============================================================
+// 第 73 轮（问题1 · A）：对方门口盘带 → 门将上前封角度，而非锁门线倒退
+//   复现 0:4 复盘：对方门口 (x≈190) 从容盘带，门将退回门线 (x≈210) = 1v1 门洞大开。
+//   断言：球离门 28cm、对手贴球 2cm、门将站门线外 13cm(离球 15cm)时，run_goalie 应
+//   产生「前进(朝球, -x)」的速度（v>0），而非「倒退(回门线, +x)」（v<0）。
+//   ⚠️ 断言用速度方向区分：门将 rot=180°(面向场)，前进=-x、倒退=+x。
+// ============================================================
+static int test_goalie_challenge() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+    wm.ball.x = 192.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;  // 离门 28cm
+    wm.opp[0].x = 194.0; wm.opp[0].y = 89.7;                                  // 距球 2cm → 持球
+    wm.home[0].x = 207.0; wm.home[0].y = 89.7; wm.home[0].rot = 180.0;        // 离球 15cm、门线外 13cm
+    run_goalie(wm, 0);
+    double v = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v <= 0.0) {
+        printf("FAIL: 门口盘带门将应上前封角度(-x 前进)，实际 v=%.0f(倒退回门线)\n", v);
+        return 1;
+    }
+    printf("goalie challenge: OK (门口盘带门将上前封角度 v=%.0f)\n", v);
+    return 0;
+}
+
+// ============================================================
+// 第 73 轮（问题1 · B）：松球/即将接球也夹抢——持球判定 8→15cm
+//   复现：防守时对方离球 9~15cm（松球/将接）无人上前，全队绕球走。
+//   断言：离球 12cm 的对手（松球）压门前应触发夹抢（8→15 放行）；离球 20cm（真散球）不夹抢。
+// ============================================================
+static int test_doubleteam_loose_ball() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队，己方门 x=220
+    wm.ball.valid = true;
+    wm.threat_level = 0.9;
+    wm.sweeper_id = -1;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 60; wm.opp[i].y = 90; wm.opp_vx[i] = 0; wm.opp_vy[i] = 0;
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.role[i] = ROLE_ASSIST;
+    }
+    wm.role[2] = ROLE_MIDFIELD;
+    // 持球者压到门前 40cm（<111 危险距、<53.8 禁区协防距），但离球 12cm（松球）
+    wm.ball.x = 180; wm.ball.y = 90;
+    wm.opp[0].x = 180; wm.opp[0].y = 102;          // 离球 12cm（旧门槛 8 会拒，15 放行）
+    double dx = 0, dy = 0;
+    if (!double_team_point(wm, 1, dx, dy)) {
+        printf("FAIL: 松球(离球12cm)对手压门前应夹抢（持球判定应 8→15 放行）\n");
+        return 1;
+    }
+    // 离球 20cm（真散球）→ 仍不夹抢
+    wm.opp[0].y = 110;                             // 离球 20cm
+    if (double_team_point(wm, 1, dx, dy)) {
+        printf("FAIL: 真散球(离球20cm)不该夹抢\n");
+        return 1;
+    }
+    printf("doubleteam loose ball: OK (松球12cm夹抢 / 散球20cm不夹抢)\n");
     return 0;
 }
 
@@ -2814,6 +2964,9 @@ int main(int argc, char **argv) {
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
+    rc |= test_goalie_straight_clear();
+    rc |= test_goalie_challenge();
+    rc |= test_doubleteam_loose_ball();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
