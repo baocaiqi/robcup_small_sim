@@ -147,6 +147,14 @@ def status_line(win_hwnd, out_dir, tag):
 
 
 def main():
+    # GBK 控制台（Windows 中文）打印 emoji 会 UnicodeEncodeError 直接崩（09-22 场就是
+    #   探测期结束那一刻崩在 "✅ 在走"，导致 200s 正式跑阶段被跳过）。
+    #   重配 stdout 为 utf-8 + errors=replace，避免整场白跑。
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default=r"C:\Strategy\SimuroSot5.exe")
     ap.add_argument("--run-seconds", type=int, default=200, help="探测通过后再跑多久")
