@@ -24,6 +24,12 @@ TUNABLE(BLOCK_THRESHOLD, 7.4329);  // 传球线路阻挡阈值 cm
 TUNABLE(OFFSET_BASE, 10.1);  // 接应点向前的领球偏移 cm
 TUNABLE(THREAT_RADIUS, 34.1917);  // 接应点周围敌方威胁半径 cm
 TUNABLE(FIELD_MARGIN, 6.0);  // 接应点离边线的最小距离 cm
+TUNABLE(RECEIVER_READY_SPEED, 2.0);  // 接球人固定估计速度 cm/帧
+TUNABLE(PASS_BALL_SPEED, 6.0);       // 传球固定球速 cm/帧
+TUNABLE(RECEIVER_READY_TOLERANCE, 5.0); // 接球人允许晚到的容差（帧）
+TUNABLE(OPPONENT_REACH_SPEED, 2.0);   // 对手短期外推后采用的固定跑速 cm/帧
+TUNABLE(OPPONENT_MOTION_HORIZON, 3.0); // 沿对手当前速度方向外推的帧数
+TUNABLE(OPPONENT_FIRST_MARGIN, 3.0);  // 对手至少领先这些帧才取消
 
 // 路线 (sx,sy)->(tx,ty) 是否被某个对手机器人挡住
 bool route_blocked(const WorldModel &wm, double sx, double sy, double tx, double ty) {
@@ -133,6 +139,55 @@ double speed_threat(const WorldModel &wm, double x, double y) {
 
 
 }  // anonymous namespace
+
+bool pass_receiver_ready(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+        RECEIVER_READY_SPEED <= 1e-6 || PASS_BALL_SPEED <= 1e-6) return false;
+
+    const RobotState &receiver = wm.home[task.receiver_id];
+    const double t_receiver = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double t_ball = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
+    return t_receiver <= t_ball + RECEIVER_READY_TOLERANCE;
+}
+
+bool pass_opponent_arrives_first(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.phase != CoopPassPhase::Preparing ||
+        task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+        !std::isfinite(RECEIVER_READY_SPEED) || !std::isfinite(OPPONENT_REACH_SPEED) ||
+        !std::isfinite(OPPONENT_MOTION_HORIZON) || !std::isfinite(OPPONENT_FIRST_MARGIN) ||
+        RECEIVER_READY_SPEED <= 1e-6 || OPPONENT_REACH_SPEED <= 1e-6 ||
+        OPPONENT_MOTION_HORIZON < 0.0 || OPPONENT_FIRST_MARGIN < 0.0) return false;
+
+    const RobotState &receiver = wm.home[task.receiver_id];
+    if (!std::isfinite(receiver.x) || !std::isfinite(receiver.y)) return false;
+    const double receiver_time = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    double opponent_time = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        const double dx = task.rx - wm.opp[i].x, dy = task.ry - wm.opp[i].y;
+        const double distance = std::hypot(dx, dy);
+        if (!std::isfinite(distance)) continue;
+
+        double approach = 0.0;
+        if (wm.opp_vel_ready && distance > 1e-6 &&
+            std::isfinite(wm.opp_vx[i]) && std::isfinite(wm.opp_vy[i])) {
+            approach = (wm.opp_vx[i] * dx + wm.opp_vy[i] * dy) / distance;
+            if (!std::isfinite(approach)) approach = 0.0;
+        }
+        double eta = 0.0;
+        if (approach > 1e-6 && distance / approach <= OPPONENT_MOTION_HORIZON) {
+            eta = distance / approach;
+        } else {
+            const double remaining = std::max(0.0, distance - approach * OPPONENT_MOTION_HORIZON);
+            eta = OPPONENT_MOTION_HORIZON + remaining / OPPONENT_REACH_SPEED;
+        }
+        opponent_time = std::min(opponent_time, eta);
+    }
+    return opponent_time + OPPONENT_FIRST_MARGIN < receiver_time;
+}
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     PassPlan plan{};

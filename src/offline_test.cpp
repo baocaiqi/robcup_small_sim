@@ -10,6 +10,7 @@
 #include <math.h>
 #include <cstdint>
 #include <chrono>
+#include <limits>
 #include "simuro5/simuro_interface.hpp"
 #include "simuro5/formation.hpp"
 #include "simuro5/team.hpp"
@@ -2390,6 +2391,8 @@ static int test_coop_pass_task() {
         if (!cp.viable || cp.receiver_id != receiver || cp.score <= sp.quality + 0.15) {
             printf("FAIL: coop task fixture receiver=%d actual=%d pass=%.3f shot=%.3f\n", receiver, cp.receiver_id, cp.score, sp.quality); return 1;
         }
+        // 本段验证出球执行；接球人先放到锁点，避免 readiness gate 把场景正确判成 WAIT。
+        wm.home[receiver].x = cp.rx; wm.home[receiver].y = cp.ry;
         // 已达到射门上限，球速足够触发原射门计次：配合传球仍须推球且不计射门。
         const int limit = (int)ceil(get_param("roles.kMaxShootPushes", 1.0));
         wm.shoot_push_count = limit;
@@ -2497,7 +2500,10 @@ static int test_coop_pass_task() {
     }
     // 真实调度会刷新普通站位，但应保留任务并先执行主攻再执行接球人。
     {
-        WorldModel wm = scene(); run_active(wm, 1);
+        WorldModel wm = scene();
+        CoopPass scheduled = plan_coop_pass(wm, 1);
+        wm.home[scheduled.receiver_id].x = scheduled.rx; wm.home[scheduled.receiver_id].y = scheduled.ry;
+        run_active(wm, 1);
         CoopPassTask saved = wm.coop_pass_task;
         RobotState expected = wm.home[2]; motion::position(expected, saved.rx, saved.ry);
         Strategy strategy; strategy.run(wm);
@@ -2526,6 +2532,7 @@ static int test_coop_lifecycle() {
     auto start = [&](int receiver) {
         WorldModel wm = coop_task_scene();
         if (receiver == 3) { wm.assist_x = 130; wm.assist_y = 140; wm.mid_x = 55; wm.mid_y = 90; }
+        wm.home[receiver].x = 55; wm.home[receiver].y = 90;
         frame(wm, 75, 150);
         return wm;
     };
@@ -2760,6 +2767,316 @@ static int test_ordinary_pass_task() {
     return 0;
 }
 
+// 普通 PassPlan 与 CoopPass 共用同一 readiness gate：未到位只等，不改锁点、不开始观察出球。
+static int test_pass_readiness_gate() {
+    auto stopped = [](const RobotState &r) { return r.vl == 0.0 && r.vr == 0.0; };
+
+    // 公式边界：阈值内 1e-6cm 放行，再远 0.1cm 就等待（避开浮点等号脆弱性）。
+    {
+        WorldModel wm = coop_task_scene();
+        auto &task = wm.coop_pass_task;
+        task.active = true; task.receiver_id = 2; task.rx = 100; task.ry = 90;
+        wm.ball.x = 40; wm.ball.y = 90;
+        const double receiver_speed = get_param("pass.RECEIVER_READY_SPEED", 2.0);
+        const double ball_speed = get_param("pass.PASS_BALL_SPEED", 6.0);
+        const double tolerance = get_param("pass.RECEIVER_READY_TOLERANCE", 5.0);
+        const double limit = receiver_speed * (60.0 / ball_speed + tolerance);
+        wm.home[2].x = task.rx + limit - 1e-6; wm.home[2].y = task.ry;
+        if (!pass_receiver_ready(wm)) { printf("FAIL: pass readiness inside boundary rejected\n"); return 1; }
+        wm.home[2].x += 0.1;
+        if (pass_receiver_ready(wm)) { printf("FAIL: pass readiness over boundary accepted\n"); return 1; }
+    }
+
+    for (PassTaskKind kind : {PassTaskKind::Ordinary, PassTaskKind::Coop}) {
+        WorldModel wm = coop_task_scene();
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.opp[i].x = 210; wm.opp[i].y = 10 + 40 * i;
+        }
+        auto &task = wm.coop_pass_task;
+        task = {};
+        task.active = true; task.passer_id = 1; task.receiver_id = 2;
+        task.rx = 55; task.ry = 90; task.frames_left = 20;
+        task.game_state = wm.game_state; task.kind = kind;
+        const int receiver = task.receiver_id;
+        const double locked_x = task.rx, locked_y = task.ry;
+
+        if (pass_receiver_ready(wm)) {
+            printf("FAIL: pass readiness far receiver accepted kind=%d\n", (int)kind); return 1;
+        }
+        RobotState expected_receiver = wm.home[receiver];
+        motion::position(expected_receiver, locked_x, locked_y);
+        run_active(wm, 1);
+        run_assist(wm, receiver);
+        if (!task.active || task.receiver_id != receiver || task.rx != locked_x || task.ry != locked_y ||
+            task.observing_push || !stopped(wm.home[1]) ||
+            fabs(wm.home[receiver].vl - expected_receiver.vl) > 1e-8 ||
+            fabs(wm.home[receiver].vr - expected_receiver.vr) > 1e-8) {
+            printf("FAIL: pass readiness WAIT mutated/pushed kind=%d active=%d observing=%d\n",
+                   (int)kind, (int)task.active, (int)task.observing_push); return 1;
+        }
+
+        wm.home[receiver].x = locked_x; wm.home[receiver].y = locked_y;
+        if (!pass_receiver_ready(wm)) {
+            printf("FAIL: pass readiness arrived receiver rejected kind=%d\n", (int)kind); return 1;
+        }
+        run_active(wm, 1);
+        if (!task.active || !task.observing_push) {
+            printf("FAIL: pass readiness READY did not release kind=%d\n", (int)kind); return 1;
+        }
+    }
+
+    // 安全取消仍先于 WAIT：高威胁必须直接取消，不能因接球人未到位而保留任务。
+    WorldModel danger = coop_task_scene();
+    auto &task = danger.coop_pass_task;
+    task.active = true; task.passer_id = 1; task.receiver_id = 2;
+    task.rx = 55; task.ry = 90; task.frames_left = 20;
+    task.game_state = danger.game_state; task.kind = PassTaskKind::Coop;
+    danger.threat_level = 0.6;
+    run_active(danger, 1);
+    if (task.active || danger.coop_stats.outcomes[(int)CoopOutcome::HighThreat] != 1) {
+        printf("FAIL: pass readiness WAIT outranked safety cancellation\n"); return 1;
+    }
+    printf("pass readiness gate: OK (shared WAIT/READY/locked task/safety priority)\n");
+    return 0;
+}
+
+// 等待接球人时，如果对手会明显更早占住锁点，就取消；球出脚后不再套用此规则。
+static int test_pass_opponent_first_cancel() {
+    auto scene = [](PassTaskKind kind) {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.ball.valid = true; wm.ball.x = 60; wm.ball.y = 90;
+        wm.we_have_ball = true; wm.threat_level = 0.1;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.home[i].x = 180; wm.home[i].y = 30 + 25 * i;
+            wm.opp[i].x = 200; wm.opp[i].y = 15 + 35 * i;
+            wm.opp_vx[i] = wm.opp_vy[i] = 0.0;
+        }
+        wm.home[1].x = 55; wm.home[1].y = 90;
+        auto &task = wm.coop_pass_task;
+        task.active = true; task.passer_id = 1; task.receiver_id = 2;
+        task.rx = 120; task.ry = 90; task.frames_left = 40;
+        task.game_state = wm.game_state; task.kind = kind;
+        wm.opp[0].x = 120; wm.opp[0].y = 120; // 离锁点 30cm，且不挡球到锁点的线路。
+        wm.opp_vel_ready = true;
+        return wm;
+    };
+
+    // 普通传球和配合传球必须走同一取消入口。
+    for (PassTaskKind kind : {PassTaskKind::Ordinary, PassTaskKind::Coop}) {
+        WorldModel wm = scene(kind);
+        wm.home[2].x = 120; wm.home[2].y = 170; // 接球人还需 80cm，对手明显先到。
+        cancel_unsafe_coop_pass(wm);
+        if (wm.coop_pass_task.active || wm.coop_stats.outcomes[(int)CoopOutcome::OpponentFirst] != 1) {
+            printf("FAIL: obvious opponent-first pass kept kind=%d\n", (int)kind); return 1;
+        }
+    }
+
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 130; wm.home[2].y = 90; // 接球人只差 10cm。
+        cancel_unsafe_coop_pass(wm);
+        if (!wm.coop_pass_task.active) { printf("FAIL: receiver-first pass cancelled\n"); return 1; }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 120; wm.home[2].y = 128; // 两者预计时间接近，安全余量应保留任务。
+        cancel_unsafe_coop_pass(wm);
+        if (!wm.coop_pass_task.active) { printf("FAIL: near-tie pass cancelled\n"); return 1; }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 120; wm.home[2].y = 140;
+        wm.opp_vy[0] = 5.0; // 目标在下方，对手高速向上远离。
+        cancel_unsafe_coop_pass(wm);
+        if (!wm.coop_pass_task.active) { printf("FAIL: fast-away opponent caused cancel\n"); return 1; }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 120; wm.home[2].y = 140;
+        wm.opp[0].y = 130; wm.opp_vy[0] = 5.0;
+        for (int frame = 0; frame < 3; ++frame) {
+            run_active(wm, 1); // 真实走三帧 readiness WAIT；远离期间应保持同一任务。
+            if (!wm.coop_pass_task.active) {
+                printf("FAIL: waiting pass cancelled before opponent turned frame=%d\n", frame); return 1;
+            }
+        }
+        wm.opp_vy[0] = -5.0; // 第四帧转向锁点，变成明显先到。
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || wm.coop_stats.outcomes[(int)CoopOutcome::OpponentFirst] != 1) {
+            printf("FAIL: waiting pass ignored approaching opponent\n"); return 1;
+        }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 120; wm.home[2].y = 170;
+        wm.coop_pass_task.phase = CoopPassPhase::Receiving;
+        cancel_unsafe_coop_pass(wm);
+        if (!wm.coop_pass_task.active) { printf("FAIL: Receiving pass cancelled by opponent-first rule\n"); return 1; }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = std::numeric_limits<double>::infinity();
+        if (pass_opponent_arrives_first(wm)) { printf("FAIL: non-finite receiver triggered opponent-first\n"); return 1; }
+    }
+    {
+        WorldModel wm = scene(PassTaskKind::Coop);
+        wm.home[2].x = 120; wm.home[2].y = 128;
+        wm.opp_vy[0] = -std::numeric_limits<double>::infinity();
+        if (pass_opponent_arrives_first(wm)) { printf("FAIL: non-finite opponent velocity triggered opponent-first\n"); return 1; }
+    }
+    printf("pass opponent-first: OK (shared/cushion/direction/wait transition/Receiving guard)\n");
+    return 0;
+}
+
+// 出球后接球人近球减速并面向来球；Preparing 与远距 Receiving 保持原赶路行为。
+static int test_pass_receive_control() {
+    auto scene = [](PassTaskKind kind, CoopPassPhase phase) {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.ball.valid = true; wm.ball.x = 80; wm.ball.y = 90;
+        wm.we_have_ball = true; wm.threat_level = 0.1;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.home[i].x = 140; wm.home[i].y = 20 + 30 * i;
+            wm.opp[i].x = 210; wm.opp[i].y = 15 + 35 * i;
+        }
+        wm.home[1].x = 70; wm.home[1].y = 90;
+        wm.home[2].x = 60; wm.home[2].y = 90; wm.home[2].rot = 0;
+        auto &task = wm.coop_pass_task;
+        task.active = true; task.passer_id = 1; task.receiver_id = 2;
+        task.rx = 100; task.ry = 90; task.frames_left = 40;
+        task.game_state = wm.game_state; task.kind = kind; task.phase = phase;
+        task.push_dir_x = 1.0; task.push_dir_y = 0.0;
+        return wm;
+    };
+    auto same_wheels = [](const RobotState &a, const RobotState &b) {
+        return fabs(a.vl - b.vl) < 1e-8 && fabs(a.vr - b.vr) < 1e-8;
+    };
+    auto finite_wheels = [](const RobotState &r) { return std::isfinite(r.vl) && std::isfinite(r.vr); };
+
+    // Preparing 必须逐轮保持原 motion::position，不得提前减速或转向迎球。
+    {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Preparing);
+        RobotState expected = wm.home[2]; motion::position(expected, 100, 90);
+        run_assist(wm, 2);
+        if (!wm.coop_pass_task.active || !same_wheels(wm.home[2], expected)) {
+            printf("FAIL: receive control changed Preparing movement\n"); return 1;
+        }
+    }
+    // Receiving 但球还远：继续正常赶锁点，命令必须与原行为完全相同。
+    {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        wm.ball.x = 160; wm.ball.vx = -4;
+        RobotState expected = wm.home[2]; motion::position(expected, 100, 90);
+        run_assist(wm, 2);
+        if (!wm.coop_pass_task.active || !same_wheels(wm.home[2], expected)) {
+            printf("FAIL: receive control slowed distant ball approach\n"); return 1;
+        }
+    }
+    // 正面来球：保持正确朝向，但近球时共同前进速度应明显低于原锁点赶路。
+    {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        wm.home[2].x = 90; wm.home[2].rot = 0;
+        wm.ball.x = 110; wm.ball.y = 90; wm.ball.vx = -4; wm.ball.vy = 0;
+        RobotState full = wm.home[2]; motion::position(full, 100, 90);
+        run_assist(wm, 2);
+        double old_drive = fabs((full.vl + full.vr) * 0.5);
+        double new_drive = fabs((wm.home[2].vl + wm.home[2].vr) * 0.5);
+        if (!(new_drive < old_drive * 0.7) || fabs(wm.home[2].vr - wm.home[2].vl) > 1e-8) {
+            printf("FAIL: frontal receive did not slow cleanly old=%.2f new=%.2f vl=%.2f vr=%.2f\n",
+                   old_drive, new_drive, wm.home[2].vl, wm.home[2].vr); return 1;
+        }
+        WorldModel closer = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        closer.home[2].x = 90; closer.home[2].rot = 0;
+        closer.ball.x = 100; closer.ball.y = 90; closer.ball.vx = -4; closer.ball.vy = 0;
+        run_assist(closer, 2);
+        double closer_drive = fabs((closer.home[2].vl + closer.home[2].vr) * 0.5);
+        if (!(closer_drive < new_drive)) {
+            printf("FAIL: receive slowdown is not progressive near=%.2f closer=%.2f\n",
+                   new_drive, closer_drive); return 1;
+        }
+    }
+    // 侧面来球：到锁点后应原地转向球的来向，而不是横着停车等撞。
+    {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        wm.home[2].x = 100; wm.home[2].rot = 0;
+        wm.ball.x = 100; wm.ball.y = 110; wm.ball.vx = 0; wm.ball.vy = -4;
+        run_assist(wm, 2);
+        if (!(wm.home[2].vl < 0 && wm.home[2].vr > 0)) {
+            printf("FAIL: side receive did not turn toward incoming ball vl=%.2f vr=%.2f\n",
+                   wm.home[2].vl, wm.home[2].vr); return 1;
+        }
+        WorldModel off_target = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        off_target.home[2].x = 80; off_target.home[2].rot = 0; // 离锁点 20cm，超过 motion 内部近距线。
+        off_target.ball.x = 80; off_target.ball.y = 110;
+        off_target.ball.vx = 0; off_target.ball.vy = -4;
+        run_assist(off_target, 2);
+        if (!(off_target.home[2].vl < 0 && off_target.home[2].vr > 0)) {
+            printf("FAIL: off-target side receive kept chasing lock point vl=%.2f vr=%.2f\n",
+                   off_target.home[2].vl, off_target.home[2].vr); return 1;
+        }
+    }
+    // 球速过小或异常时用球的相对位置兜底，不能按噪声方向乱转或输出 NaN/Inf。
+    for (int abnormal = 0; abnormal < 2; ++abnormal) {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        wm.home[2].x = 100; wm.home[2].rot = 180;
+        wm.ball.x = 80; wm.ball.y = 90;
+        if (abnormal == 0) { wm.ball.vx = -1e-9; wm.ball.vy = 0; }
+        else { wm.ball.vx = std::numeric_limits<double>::quiet_NaN(); wm.ball.vy = std::numeric_limits<double>::infinity(); }
+        run_assist(wm, 2);
+        if (!wm.coop_pass_task.active || !finite_wheels(wm.home[2]) ||
+            fabs(wm.home[2].vl) > 1e-8 || fabs(wm.home[2].vr) > 1e-8) {
+            printf("FAIL: receive direction fallback abnormal=%d vl=%.2f vr=%.2f active=%d\n",
+                   abnormal, wm.home[2].vl, wm.home[2].vr, (int)wm.coop_pass_task.active); return 1;
+        }
+    }
+    for (int fallback = 0; fallback < 2; ++fallback) {
+        WorldModel wm = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        wm.home[2].x = 100; wm.home[2].rot = 180;
+        wm.ball.x = 80; wm.ball.y = 90;
+        wm.ball.vx = fallback == 0 ? -100.0 : -4.0; // 异常高速或可信但正在远离。
+        wm.ball.vy = 0;
+        run_assist(wm, 2);
+        if (!wm.coop_pass_task.active || !finite_wheels(wm.home[2]) ||
+            fabs(wm.home[2].vl) > 1e-8 || fabs(wm.home[2].vr) > 1e-8) {
+            printf("FAIL: receive high/away fallback=%d vl=%.2f vr=%.2f\n",
+                   fallback, wm.home[2].vl, wm.home[2].vr); return 1;
+        }
+    }
+    // Ordinary 与 Coop 必须得到完全相同的近球接应命令。
+    {
+        WorldModel ordinary = scene(PassTaskKind::Ordinary, CoopPassPhase::Receiving);
+        ordinary.home[2].x = 100; ordinary.ball.x = 100; ordinary.ball.y = 110;
+        ordinary.ball.vx = 0; ordinary.ball.vy = -4;
+        WorldModel coop = ordinary; coop.coop_pass_task.kind = PassTaskKind::Coop;
+        run_assist(ordinary, 2); run_assist(coop, 2);
+        if (!same_wheels(ordinary.home[2], coop.home[2])) {
+            printf("FAIL: Ordinary/Coop receive control diverged\n"); return 1;
+        }
+    }
+    // 接稳和超时仍沿用原生命周期，不因动作层变化而改判据。
+    {
+        WorldModel received = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        received.home[2].x = 100; received.ball.x = 105; received.ball.y = 90;
+        received.ball.vx = received.ball.vy = 0; received.coop_pass_task.receive_frames = 1;
+        run_active(received, 1);
+        if (received.coop_pass_task.active || received.coop_pass_task.phase != CoopPassPhase::Received ||
+            !received.coop_ball_control.active || received.coop_ball_control.receiver_id != 2) {
+            printf("FAIL: receive control broke Received/control handoff\n"); return 1;
+        }
+        WorldModel expired = scene(PassTaskKind::Coop, CoopPassPhase::Receiving);
+        expired.coop_pass_task.frames_left = 1; run_active(expired, 1);
+        if (expired.coop_pass_task.active ||
+            expired.coop_stats.outcomes[(int)CoopOutcome::ReceiveTimeout] != 1) {
+            printf("FAIL: receive control broke Receiving timeout\n"); return 1;
+        }
+    }
+    printf("pass receive control: OK (Preparing/far/slow/facing/fallback/shared/lifecycle)\n");
+    return 0;
+}
+
 static int test_no_reverse_through_ball() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                 // 蓝队攻 x=0（对方门在左）
@@ -2944,6 +3261,9 @@ int main(int argc, char **argv) {
         rc |= test_coop_pass_task();
         rc |= test_coop_lifecycle();
         rc |= test_ordinary_pass_task();
+        rc |= test_pass_readiness_gate();
+        rc |= test_pass_opponent_first_cancel();
+        rc |= test_pass_receive_control();
         printf(rc ? "=== COOP PASS TEST FAILED ===\n" : "=== COOP PASS TEST PASSED ===\n");
         return rc;
     }
@@ -2960,6 +3280,9 @@ int main(int argc, char **argv) {
     rc |= test_coop_pass_task();
     rc |= test_coop_lifecycle();
     rc |= test_ordinary_pass_task();
+    rc |= test_pass_readiness_gate();
+    rc |= test_pass_opponent_first_cancel();
+    rc |= test_pass_receive_control();
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
