@@ -1921,6 +1921,46 @@ static int test_passive_front_sweep() {
 }
 
 // ============================================================
+// 第 75 轮（2026-09-23 真机复盘）：球贴门线时"球外侧禁推"护栏被 6.76cm 门槛放过
+//   真机 f726（14:40 场丢球1，黑匣子逐帧还原）：球 (218.99,75.44) 离门线 1.01cm、
+//   门将 (214.85,71.31) 在场侧 5.9cm、球只比门将靠门 4.14cm < kGkBehindMargin 6.76
+//   ⇒ 护栏判定"球还没明显越过门将（齐平）"而放弃 → 落到"照常清球"分支 → 门将冲球
+//   ⇒ 球速 +0.33→+1.33 cm/帧（翻 4 倍）滚进自家门。同一局另 2 球、08:23 那局 3 球同型。
+//   断言：① 贴门线 1cm + 门将在场侧 → 护栏必须拦下（返回 true，命令让开）；
+//         ② 球贴门线但门将已在球门侧 → 护栏不拦（返回 false，保留合法清球能力）。
+// ============================================================
+static int test_gk_on_line_no_push() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+
+    // ① 真机 f726 原样复现（黑匣子数值，不做任何近似）
+    wm.ball.x = 218.99; wm.ball.y = 75.44; wm.ball.vx = 0.328; wm.ball.vy = -2.021;
+    wm.home[0].x = 214.85; wm.home[0].y = 71.31; wm.home[0].rot = -50.8;
+    double tx = 0.0, ty = 0.0;
+    if (!gk_side_step_point(wm, 0, tx, ty)) {
+        printf("FAIL: 球离门线1cm且门将在场侧，'球外侧禁推'护栏没拦下（门将会把球顶进自家门）\n");
+        return 1;
+    }
+
+    // ② 球同样贴门线，但门将已在球的门侧 → 护栏不拦，保留合法清球能力
+    wm.ball.x = 212.0; wm.ball.y = 91.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[0].x = 219.0; wm.home[0].y = 91.0;
+    if (gk_side_step_point(wm, 0, tx, ty)) {
+        printf("FAIL: 门将已在球门侧时不该被让开护栏拦下（会丢掉合法清球能力）\n");
+        return 1;
+    }
+
+    printf("gk on-line no push: OK (贴门线1cm必让开 / 门将已在门侧仍可清球)\n");
+    return 0;
+}
+
+// ============================================================
 // 第 73 轮（问题1 · A）：对方门口盘带 → 门将上前封角度，而非锁门线倒退
 //   复现 0:4 复盘：对方门口 (x≈190) 从容盘带，门将退回门线 (x≈210) = 1v1 门洞大开。
 //   断言：球离门 28cm、对手贴球 2cm、门将站门线外 13cm(离球 15cm)时，run_goalie 应
@@ -3335,6 +3375,7 @@ int main(int argc, char **argv) {
     rc |= test_goalie_clear_push();
     rc |= test_goalie_straight_clear();
     rc |= test_passive_front_sweep();
+    rc |= test_gk_on_line_no_push();
     rc |= test_goalie_challenge();
     rc |= test_doubleteam_loose_ball();
     rc |= test_goalie_line_cover();

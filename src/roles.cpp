@@ -143,7 +143,16 @@ bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty) {
     double bx = wm.ball.x, by = wm.ball.y;
     if (ctx.dist_our_goal(bx) >= kGkNoPushDist) return false;   // 球还远：按常规防
     double gside = (ctx.our_goal_x() > bx) ? 1.0 : -1.0;        // 球门在球的哪一侧
-    if ((bx - r.x) * gside <= kGkBehindMargin) return false;    // 没明显越过（齐平/门侧）→ 照常清球
+    // —— 第 75 轮（2026-09-23 真机复盘）：球贴门线时门槛降到 0 ——
+    //   真机 f726 铁证（14:40 场丢球1，黑匣子逐帧）：球离门线 1.01cm、门将在场侧 5.9cm，
+    //   球只比门将靠门 4.14cm，而 kGkBehindMargin=6.76cm ⇒ 4.14 ≤ 6.76 成立
+    //   ⇒ 本条护栏判定"球还没明显越过门将、齐平"而**放弃让开**，落到下面"照常清球"分支，
+    //   门将遂朝球推进：球速 +0.33 → +1.33 cm/帧（翻 4 倍）滚进自家门。
+    //   同一局另外 2 球同型（门将 8.0/8.6cm、场侧、球速 +0.57→+1.69、+0.33→+1.03）。
+    //   改法：球离门线 <12cm 时门槛取 0 —— 只要球比门将更靠己门（场侧）就**必须让开**，
+    //   绝不"照常清球"；门将已在球门侧（含齐平）时门槛仍为负值域，合法清球动作不受影响。
+    double behind_margin = (ctx.dist_our_goal(bx) < 12.0) ? 0.0 : kGkBehindMargin;
+    if ((bx - r.x) * gside <= behind_margin) return false;      // 没明显越过（齐平/门侧）→ 照常清球
     if (std::fabs(r.y - by) >= kGkSideClear) return false;      // 已让开：允许绕到球的门侧
     double side = (r.y >= by) ? 1.0 : -1.0;
     tx = bx - gside * kGkBackOff;                               // 球后 10cm（场侧）
