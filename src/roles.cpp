@@ -1500,13 +1500,29 @@ void run_passive(WorldModel &wm, int id) {
             if (d < opp_dmin) opp_dmin = d;
         }
         if (opp_dmin < 100.0) {
+            // —— 门前清道夫：**已在球门侧**时就把球真正清出去（第 74 轮，2026-09-23 真机复盘）——
+            //   真机证据（09-23 两局 + 18 局汇总）：球停在自家门前 3~4cm 达 113 帧（2.8s）无人
+            //   能清；26 个丢球里 23 个（88%）是"我方最后触球"；5 个丢球中 4 个门将都站在
+            //   "球与门之间"的场侧 8~10cm。根因是**三条"防乌龙"规则叠加出门口无人区**：
+            //     ① 球在门区不逼抢（交给门将）；② 只从球门侧贴球（场侧不追）；
+            //     ③ 球贴门线时本角色"停轮站定、绝不碰球"（下方第 37 轮规则）。
+            //   三条各自都对，合起来 = 谁都不碰球 → 球自己慢慢滚进门。
+            //   这里只开一条**双向安全**的通道：仅当本角色比球更靠己门（已在球门侧）时才出手，
+            //   朝球推过去（TM_PASS 不刹车）——从门侧推，球只会被顶向场内（-x），不可能乌龙；
+            //   球在场侧时一律保持原护栏（绝不直撞，交给让位/站位封线兜底）。
+            double dbp = dist(wm.ball.x, wm.ball.y, wm.home[id].x, wm.home[id].y);
+            if (wm.ctx.dist_our_goal(wm.ball.x) < 25.0 &&
+                wm.ctx.dist_our_goal(wm.home[id].x) < wm.ctx.dist_our_goal(wm.ball.x)) {
+                motion::chase_ball(wm.home[id], chase_target(wm));   // 门侧推球：只会推离己门
+                return;
+            }
             // —— 门线球站定防乌龙（docs/06 第37轮）——
             // 真机 2 乌龙铁证（9/7 23:40 场 @124.8 门角 y35、@138.6 门线中央）：
             //   B4 护门点站位每帧随威胁 position 微调，而 B4 贴球(6-9cm) → 移动
             //   时把球拖着走（球 y110→101 随 B4 y106→96 = 拖进门内）。
             // 对策：球贴我方门线(<15cm)且本角色贴球(<14cm) → 停轮站定，用身体
             //   封 demo 推射角，绝不碰球不拖动（demo 推球用身体挡，不主动清）。
-            double dbp = dist(wm.ball.x, wm.ball.y, wm.home[id].x, wm.home[id].y);
+            //   ⚠️ 此规则只在**场侧**生效（球门侧已被上面清道夫接管，见第 74 轮）。
             if (wm.ctx.dist_our_goal(wm.ball.x) < 15.0 && dbp < 14.0) {
                 wm.home[id].vl = 0.0;
                 wm.home[id].vr = 0.0;

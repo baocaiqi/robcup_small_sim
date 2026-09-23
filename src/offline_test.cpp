@@ -1875,6 +1875,52 @@ static int test_goalie_straight_clear() {
 }
 
 // ============================================================
+// 第 74 轮（2026-09-23 真机复盘）：门前清道夫 —— 治"门口无人区"
+//   真机证据：球停在自家门前 3~4cm 达 113 帧（2.8s）没人清；18 局 26 个丢球里
+//   23 个（88%）是"我方最后触球"。根因是三条防乌龙规则叠加：
+//     ① 球在门区不逼抢（交给门将）；② 只从球门侧贴球（场侧不追）；
+//     ③ 球贴门线时 B4"停轮站定、绝不碰球" —— 合起来 = 谁都不碰球，球自己滚进门。
+//   新增通道只在**双向安全**的前提下出手：仅当 B4 比球更靠己门（已在球门侧）时
+//   朝球推过去（从门侧推 ⇒ 球只会被顶离己门）。
+//   断言（rot=180 面向 -x = 场内；前进为正）：
+//     ① B4 在球门侧 → 必须主动清球（v>0）；
+//     ② B4 在场侧   → 仍绝不直撞（保持原"停轮站定"，v≈0），不新增乌龙通道。
+// ============================================================
+static int test_passive_front_sweep() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90;
+        wm.opp[i].x = 200; wm.opp[i].y = 91;       // 对手逼近(<100cm)，满足门前协防触发条件
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[4] = ROLE_PASSIVE;
+    wm.ball.x = 212.0; wm.ball.y = 91.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;   // 离门线 8cm、静止
+
+    // ① 球门侧（离门更近）→ 应主动推球清出去（rot=180 时前进 = -x = 远离己门）
+    wm.home[4].x = 219.0; wm.home[4].y = 91.0; wm.home[4].rot = 180.0;
+    run_passive(wm, 4);
+    double v1 = 0.5 * (wm.home[4].vl + wm.home[4].vr);
+    if (v1 < 10.0) {
+        printf("FAIL: 门前清道夫没出手（球门侧 v=%.0f，应 >10 朝 -x 把球顶离己门）\n", v1);
+        return 1;
+    }
+
+    // ② 场侧（离门更远）→ 绝不直撞球（保留"停轮站定"，否则就是历史乌龙通道）
+    wm.home[4].x = 205.0; wm.home[4].y = 91.0; wm.home[4].rot = 0.0;
+    run_passive(wm, 4);
+    double v2 = 0.5 * (wm.home[4].vl + wm.home[4].vr);
+    if (std::fabs(v2) > 5.0) {
+        printf("FAIL: 场侧不该直撞球（v=%.0f，应 ≈0 停轮站定）\n", v2);
+        return 1;
+    }
+
+    printf("passive front sweep: OK (球门侧主动清球 v1=%.0f / 场侧停轮不撞 v2=%.0f)\n", v1, v2);
+    return 0;
+}
+
+// ============================================================
 // 第 73 轮（问题1 · A）：对方门口盘带 → 门将上前封角度，而非锁门线倒退
 //   复现 0:4 复盘：对方门口 (x≈190) 从容盘带，门将退回门线 (x≈210) = 1v1 门洞大开。
 //   断言：球离门 28cm、对手贴球 2cm、门将站门线外 13cm(离球 15cm)时，run_goalie 应
@@ -3288,6 +3334,7 @@ int main(int argc, char **argv) {
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
     rc |= test_goalie_straight_clear();
+    rc |= test_passive_front_sweep();
     rc |= test_goalie_challenge();
     rc |= test_doubleteam_loose_ball();
     rc |= test_goalie_line_cover();
