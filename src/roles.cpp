@@ -21,6 +21,10 @@ namespace {
 //   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
 TUNABLE(kRouteInflate, 10.0);
 
+// Pass task coordination is opt-in until it can complete passes reliably.
+// Waiting for a receiver can interrupt the active player's direct attack.
+TUNABLE(kPassTasksEnabled, 0.0);
+
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
 //   目标被障碍吞 / 无通路 → 回退直线（plan_route found=false）。
@@ -1000,6 +1004,7 @@ void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
 }
 
 bool run_pass_receiver(WorldModel &wm, int id) {
+    if (kPassTasksEnabled <= 0.5) return false;
     cancel_unsafe_pass_task(wm);
     if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) { carry_pass_ball(wm, id); return true; }
     const auto &task = wm.coop_pass_task;
@@ -1188,17 +1193,18 @@ void run_active(WorldModel &wm, int id) {
     //   队友接球后的射门机会比我自己高 0.15 以上、且他能**安全接到** → 传给他（只向前传）。
     //   安全性（线路无遮挡/接球点 20cm 内无对手/距离≤120cm）在 pass.cpp 里判定；点球执行期不传。
     CoopPass cp;
-    if (wm.coop_pass_task.active) {
+    if (kPassTasksEnabled > 0.5 && wm.coop_pass_task.active) {
         const auto &task = wm.coop_pass_task;
         cp.viable = true; cp.receiver_id = task.receiver_id; cp.rx = task.rx; cp.ry = task.ry;
         double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
         cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
-    } else if (!had_pass_task && pass_context_safe(wm)) {
+    } else if (kPassTasksEnabled > 0.5 && !had_pass_task && pass_context_safe(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
     }
-    const bool existing_coop_task = wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
+    const bool existing_coop_task = kPassTasksEnabled > 0.5 &&
+        wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
     const bool coop_preferred = existing_coop_task ||
         (cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15);
     const bool coop_pass = coop_preferred &&
@@ -1366,7 +1372,7 @@ void run_active(WorldModel &wm, int id) {
     }
 
     PassPlan pp = plan_pass(wm, id);
-    if (pp.viable && !coop_preferred) {
+    if (pp.viable && !coop_preferred && kPassTasksEnabled > 0.5) {
         if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
             wm.coop_pass_task = {};
             wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
