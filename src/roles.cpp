@@ -21,9 +21,20 @@ namespace {
 //   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
 TUNABLE(kRouteInflate, 10.0);
 
-// Pass task coordination is opt-in until it can complete passes reliably.
-// Waiting for a receiver can interrupt the active player's direct attack.
-TUNABLE(kPassTasksEnabled, 0.0);
+// 传球任务总开关：1.0 = 协作传球 + 接应跑位全开（当前默认），0.0 = 全关。
+//
+// ⚠️ 默认值 = 1.0（开启），这是**真机实测**定的，不是引擎 A/B 定的：
+//   · 2026-09-25 真机（对手官方 demo，我方蓝位）实测：置 0.0 后「一点传球都没有」，
+//     越过球、跑到球前方的接应人数从 1.78 → 1.24（−30%），≤30cm 贴身占比 49.0% → 44.8%，
+//     官方比分 黄 5 : 2 蓝（同对手下 传球开 的两场为 黄 4:4 / 黄 3:2）。
+//   · 而 magic farm 引擎侧配对 A/B（19400 局）当时判定「关闭更好」（控球份额 +23.8pp）
+//     ⇒ **该引擎结论不能在真机照搬**：引擎对手是我们自己的 baseline、不是官方 demo，
+//     且引擎缺官方平台的接触/判罚细节。真机才是 oracle。
+//   · 0.0 会同时关掉两件事：① 接应者跑向接球点（run_pass_receiver 直接 return）；
+//     ② 主攻手的一切出球（plan_pass / coop 任务被 gate）。要只去掉「主攻手等接球人」
+//     这一项代价，应拆成「发起侧 / 接应侧」两个独立开关单独验证，别直接关总开关。
+//   · 详见 docs/03-开发进度跟踪.md（2026-09-25 反证条目）与 docs/work/交接-传球任务AB-vs模式-20260925.md §0。
+TUNABLE(kPassTasksEnabled, 1.0);
 
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
