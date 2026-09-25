@@ -21,21 +21,6 @@ namespace {
 //   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
 TUNABLE(kRouteInflate, 10.0);
 
-// 传球任务总开关：1.0 = 协作传球 + 接应跑位全开（当前默认），0.0 = 全关。
-//
-// ⚠️ 默认值 = 1.0（开启），这是**真机实测**定的，不是引擎 A/B 定的：
-//   · 2026-09-25 真机（对手官方 demo，我方蓝位）实测：置 0.0 后「一点传球都没有」，
-//     越过球、跑到球前方的接应人数从 1.78 → 1.24（−30%），≤30cm 贴身占比 49.0% → 44.8%，
-//     官方比分 黄 5 : 2 蓝（同对手下 传球开 的两场为 黄 4:4 / 黄 3:2）。
-//   · 而 magic farm 引擎侧配对 A/B（19400 局）当时判定「关闭更好」（控球份额 +23.8pp）
-//     ⇒ **该引擎结论不能在真机照搬**：引擎对手是我们自己的 baseline、不是官方 demo，
-//     且引擎缺官方平台的接触/判罚细节。真机才是 oracle。
-//   · 0.0 会同时关掉两件事：① 接应者跑向接球点（run_pass_receiver 直接 return）；
-//     ② 主攻手的一切出球（plan_pass / coop 任务被 gate）。要只去掉「主攻手等接球人」
-//     这一项代价，应拆成「发起侧 / 接应侧」两个独立开关单独验证，别直接关总开关。
-//   · 详见 docs/03-开发进度跟踪.md（2026-09-25 反证条目）与 docs/work/交接-传球任务AB-vs模式-20260925.md §0。
-TUNABLE(kPassTasksEnabled, 1.0);
-
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
 //   目标被障碍吞 / 无通路 → 回退直线（plan_route found=false）。
@@ -1015,7 +1000,6 @@ void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
 }
 
 bool run_pass_receiver(WorldModel &wm, int id) {
-    if (kPassTasksEnabled <= 0.5) return false;
     cancel_unsafe_pass_task(wm);
     if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) { carry_pass_ball(wm, id); return true; }
     const auto &task = wm.coop_pass_task;
@@ -1204,18 +1188,17 @@ void run_active(WorldModel &wm, int id) {
     //   队友接球后的射门机会比我自己高 0.15 以上、且他能**安全接到** → 传给他（只向前传）。
     //   安全性（线路无遮挡/接球点 20cm 内无对手/距离≤120cm）在 pass.cpp 里判定；点球执行期不传。
     CoopPass cp;
-    if (kPassTasksEnabled > 0.5 && wm.coop_pass_task.active) {
+    if (wm.coop_pass_task.active) {
         const auto &task = wm.coop_pass_task;
         cp.viable = true; cp.receiver_id = task.receiver_id; cp.rx = task.rx; cp.ry = task.ry;
         double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
         cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
-    } else if (kPassTasksEnabled > 0.5 && !had_pass_task && pass_context_safe(wm)) {
+    } else if (!had_pass_task && pass_context_safe(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
     }
-    const bool existing_coop_task = kPassTasksEnabled > 0.5 &&
-        wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
+    const bool existing_coop_task = wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
     const bool coop_preferred = existing_coop_task ||
         (cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15);
     const bool coop_pass = coop_preferred &&
@@ -1383,7 +1366,7 @@ void run_active(WorldModel &wm, int id) {
     }
 
     PassPlan pp = plan_pass(wm, id);
-    if (pp.viable && !coop_preferred && kPassTasksEnabled > 0.5) {
+    if (pp.viable && !coop_preferred) {
         if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
             wm.coop_pass_task = {};
             wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;

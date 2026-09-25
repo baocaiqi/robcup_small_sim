@@ -3331,9 +3331,6 @@ static int test_goalie_line_cover() {
 int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
-    // Strategy default keeps experimental cooperation disabled; pass-specific
-    // unit tests explicitly opt in because they validate that subsystem.
-    simuro5::set_param("roles.kPassTasksEnabled", 1.0);
     // --params <文件>：注入参数后再跑全部测试。
     // 这是"自动调参的行为护栏"：搜索时对每个候选跑一遍本程序，
     // 跑不过就直接判死（防止优化器靠"关掉防守行为/借墙射门"刷分，见 docs/06 轮次 77）。
