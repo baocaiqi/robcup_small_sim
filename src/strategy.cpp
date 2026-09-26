@@ -164,6 +164,9 @@ void Strategy::run(WorldModel &wm) {
 //   与角色无关：无论谁（后卫锚点压线、主攻追球回家…）只要在里面，当场顶到门区前缘外 8cm。
 //   ⚠️ 门将豁免（只有它可以在门区内）；球在门区里也照样顶出（门将负责处理门区内的球）。
 // ============================================================
+TUNABLE(kRuleBoxMarginX, 8.0);   // 裁判门区向场内余量 cm（抗惯性过冲）
+TUNABLE(kRuleBoxMarginY, 6.0);   // 裁判门区向两侧余量 cm
+
 void enforce_own_goal_area(WorldModel &wm) {
     if (!wm.ball.valid) return;
     const double hold_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 58.0;  // 50 + 8 余量
@@ -171,6 +174,13 @@ void enforce_own_goal_area(WorldModel &wm) {
         RobotState &r = wm.home[i];
         if (in_goal_area(wm.ctx, r.x, r.y)) {
             motion::position(r, hold_x, clamp(r.y, 72.5, 107.5), motion::TM_PASS);
+            continue;
+        }
+        // 裁判口径门区（浅而宽，见 in_goal_area_rule）：带余量提前顶出，沿 x 直出、y 保持
+        //   （旧 in_goal_area 只管 y∈[75,105]，漏掉 y∈[65,75)∪(105,115] 的门柱两侧 → 点球主因）
+        if (in_goal_area_rule(wm.ctx, r.x, r.y, kRuleBoxMarginX, kRuleBoxMarginY)) {
+            double out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * (15.0 + kRuleBoxMarginX + 6.0);
+            motion::position(r, out_x, r.y, motion::TM_PASS);
         }
     }
 }

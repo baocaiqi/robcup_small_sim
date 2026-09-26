@@ -76,10 +76,11 @@ TUNABLE(kBankCornerFull, 40.0);  // 反弹点离对方门线多远算满分（�
 TUNABLE(kBankCornerMin, 12.0);  // 反弹点离门线近于此 → 直接否决
 TUNABLE(kBankAngleFull, 18.0);  // 借墙的开口满分角（与直线同口径）
 TUNABLE(kBankMinSlope, 0.25);  // 入射"陡度"下限 |法向|/|切向|：太低=贴墙扫，不可靠
-TUNABLE(kBankMinQ, 0.522055);  // 借墙放行阈值
+TUNABLE(kBankMinQ, 0.42);  // 借墙放行阈值
 TUNABLE(kBankMargin, 0.144751);  // 必须比直线好这么多才换（不打平就换）
 TUNABLE(kBankDirectWeak, 0.471292);  // 直线 quality 低于此才算"没戏"，才考虑借墙
 TUNABLE(kBankPrepDist, 17.2849);  // 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
+TUNABLE(kBankCarryMax, 160.0);  // 蜂群推进者的借墙射程（docs/06 第 79 轮）：离门更远也能借墙送球
 TUNABLE(kBankPrepMargin, 7.94513);  // 准备点离场边余量
 TUNABLE(kBankWOpen, 0.274509);
 TUNABLE(kBankWDist, 0.25);
@@ -204,7 +205,7 @@ ShootPlan build_direct(const WorldModel &wm) {
 //       ⇒ rx = (c1·bx − c2·ogx) / (c1 − c2)
 //   （镜面做法就是把 kRest/kFric 都当 1，本平台会系统性打偏 → 所以必须按实测系数解）
 // ============================================================
-ShootPlan build_bank(const WorldModel &wm) {
+ShootPlan build_bank(const WorldModel &wm, double max_shot) {
     ShootPlan none;
     const TeamContext &ctx = wm.ctx;
     const double bx = wm.ball.x, by = wm.ball.y;
@@ -215,7 +216,6 @@ ShootPlan build_bank(const WorldModel &wm) {
 
     // 点球不借墙（白送的直线机会）；射程沿用同一闸门，不趁机放宽
     if (none.penalty) return none;
-    const double max_shot = kFarShotEnabled ? kMaxShotFar : kMaxShotNormal;
     if (dgoal > max_shot || dgoal < kMinShot) return none;
 
     double gky = 90.0;
@@ -346,7 +346,7 @@ ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
     // 直线能射且不算差 → 不换（借墙天生更远更慢，只在直线没戏时换角度）
     if (direct.viable && direct.quality >= kBankDirectWeak) { g_bank_prev = false; return direct; }
 
-    ShootPlan bank = build_bank(wm);
+    ShootPlan bank = build_bank(wm, kFarShotEnabled ? kMaxShotFar : kMaxShotNormal);
     if (bank.viable && bank.bank_quality >= kBankMinQ &&
         bank.bank_quality >= direct.quality + kBankMargin) {
         ++g_bank_frames;                          // 统计：本帧采纳了借墙方案
@@ -356,6 +356,11 @@ ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
     }
     g_bank_prev = false;
     return direct;
+}
+
+ShootPlan plan_bank_carry(const WorldModel &wm) {
+    if (!kBankEnabled) return ShootPlan{};
+    return build_bank(wm, kBankCarryMax);
 }
 
 // 统计接口（声明见 shoot.hpp）

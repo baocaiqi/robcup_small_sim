@@ -1521,6 +1521,7 @@ void run_passive(WorldModel &wm, int id) {
             //   球在场侧时一律保持原护栏（绝不直撞，交给让位/站位封线兜底）。
             double dbp = dist(wm.ball.x, wm.ball.y, wm.home[id].x, wm.home[id].y);
             if (wm.ctx.dist_our_goal(wm.ball.x) < 25.0 &&
+                !in_goal_area_rule(wm.ctx, wm.ball.x, wm.ball.y, 5.0, 5.0) &&   // 球在裁判门区：交门将（进去即计点球）
                 wm.ctx.dist_our_goal(wm.home[id].x) < wm.ctx.dist_our_goal(wm.ball.x)) {
                 motion::chase_ball(wm.home[id], chase_target(wm));   // 门侧推球：只会推离己门
                 return;
@@ -1614,8 +1615,130 @@ void run_passive(WorldModel &wm, int id) {
     motion::position(wm.home[id], dp.target_x, dp.target_y);
 }
 
+// ============================================================
+// 分道压迫进攻（docs/06 第 79 轮，用户真机指令："采用官方的进攻思路 + 借墙射门"）
+// ------------------------------------------------------------
+// 官方 demo 能赢我们靠的是"人多往球上压"：球到哪一侧，那一侧就有人去拱球，另一侧的人
+//   跟在后面等二点。这里按我们自己的框架重写成三件事：
+//   ① 分道：ASSIST 管上半道（y>90）、MIDFIELD 管下半道；中路 ±kLaneShare 两人共管。
+//   ② 从球后拱：推进方向 = 射门方案（含借墙）→ 借墙推进方案 → 门心，依次取第一个可用的；
+//      人在球前面时先横绕到球侧、再落到球后——绝不从球前面往回顶（乌龙的主要来源）。
+//   ③ 让位护送：已有队友在球后顶住球时，不去挤同一个球，站它侧后方接二点。
+// 纪律：不进对方门区（2+ 人判点球）；角区/死球期不推；球离我方门太近交回原防守逻辑。
+// 回滚：kSwarmEnabled 置 false 即恢复第 78 轮行为。
+// ============================================================
+namespace {
+constexpr bool kSwarmEnabled = true;
+TUNABLE(kSwarmOwnGuard, 60.0);  // 球离我方门线近于此（cm）→ 不压迫，交回防守
+TUNABLE(kLaneShare, 18.0);  // 中路共管带半宽（cm）
+TUNABLE(kHerdBack, 11.0);  // 球后落位距离（cm）
+TUNABLE(kHerdLatTol, 6.5);  // 横向偏差在此内视为对准 → 推穿（cm）
+TUNABLE(kHerdThrough, 22.0);  // 推穿目标在球前方的距离（cm）
+TUNABLE(kHerdSide, 17.0);  // 人在球前时横向绕行距离（cm）
+TUNABLE(kWeakBack, 22.0);  // 弱侧跟进：落后球的距离（cm）
+TUNABLE(kWeakLaneY, 42.0);  // 弱侧跟进：离中线的距离（cm）
+TUNABLE(kEscortBack, 16.0);  // 护送：落后球的距离（cm）
+TUNABLE(kEscortSide, 22.0);  // 护送：横向错开（cm）
+TUNABLE(kOppBoxMargin, 10.0);  // 对方门区外扩余量（cm）
+
+bool near_opp_box(const TeamContext &ctx, double x, double y) {
+    return ctx.dist_opp_goal(x) < 50.0 + kOppBoxMargin &&
+           std::fabs(y - 90.0) < 27.5 + kOppBoxMargin;
+}
+
+// 推进方向（单位向量）：射门方案（plan_shoot 已含直线/借墙择优）→ 借墙推进 → 门心
+void herd_direction(const WorldModel &wm, int id, double &ux, double &uy) {
+    ShootPlan sp = plan_shoot(wm, id);
+    if (sp.viable) { ux = sp.dir_x; uy = sp.dir_y; return; }
+    ShootPlan bk = plan_bank_carry(wm);
+    if (bk.viable) { ux = bk.dir_x; uy = bk.dir_y; return; }
+    double dx = wm.ctx.opp_goal_x() - wm.ball.x, dy = 90.0 - wm.ball.y;
+    double len = std::hypot(dx, dy);
+    if (len < 1e-6) { ux = wm.ctx.attack_dir(); uy = 0.0; return; }
+    ux = dx / len; uy = dy / len;
+}
+
+// 队员 i 是否已在球后顶住球（沿推进方向在球后 18cm 内、横向偏差 <9cm）
+bool holds_ball(const WorldModel &wm, int i, double ux, double uy) {
+    double ox = wm.home[i].x - wm.ball.x, oy = wm.home[i].y - wm.ball.y;
+    double behind = -(ox * ux + oy * uy);
+    double side = std::fabs(ox * -uy + oy * ux);
+    return behind > 0.0 && behind < 18.0 && side < 9.0;
+}
+
+void swarm_move(WorldModel &wm, int id, double tx, double ty) {
+    const TeamContext &ctx = wm.ctx;
+    tx = clamp(tx, 4.0, TeamContext::FIELD_LENGTH - 4.0);
+    ty = clamp(ty, 4.0, TeamContext::FIELD_WIDTH - 4.0);
+    if (near_opp_box(ctx, tx, ty))
+        tx = ctx.opp_goal_x() - ctx.attack_dir() * (58.0 + kOppBoxMargin);
+    motion::position(wm.home[id], tx, ty, motion::TM_PASS);
+}
+
+// lane：+1 = 上半道（y>90），-1 = 下半道。返回 false → 本帧不压迫，调用方走原逻辑。
+bool run_swarm(WorldModel &wm, int id, double lane) {
+    if (!kSwarmEnabled) return false;
+    const TeamContext &ctx = wm.ctx;
+    if (wm.game_state != PM_PlayOn || wm.in_penalty_exec) return false;
+    if (wm.coop_pass_task.active &&
+        (id == wm.coop_pass_task.passer_id || id == wm.coop_pass_task.receiver_id)) return false;
+    if (wm.coop_ball_control.active && id == wm.coop_ball_control.receiver_id) return false;
+    if (id == wm.sweeper_id || !push_allowed(wm)) return false;
+    const double bx = wm.ball.x, by = wm.ball.y, ad = ctx.attack_dir();
+    if (ctx.dist_our_goal(bx) < kSwarmOwnGuard) return false;
+
+    // 球在对方门区附近：门口交给 ACTIVE，自己在门区外沿本道等二点
+    if (near_opp_box(ctx, bx, by)) {
+        swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);
+        return true;
+    }
+    // 球不在本道：弱侧跟进（落后球一段、贴本道）
+    if ((by - 90.0) * lane < -kLaneShare) {
+        swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);
+        return true;
+    }
+
+    double ux = 0.0, uy = 0.0;
+    herd_direction(wm, id, ux, uy);
+    const double nx = -uy, ny = ux;
+    const RobotState &r = wm.home[id];
+    const double ox = r.x - bx, oy = r.y - by;
+    const double behind = -(ox * ux + oy * uy);        // >0：人在球后（推进方向的反侧）
+    const double side_off = ox * nx + oy * ny;          // 人在推进线哪一侧、偏多少
+    const double side = (side_off >= 0.0) ? 1.0 : -1.0;
+
+    // 让位护送：别的队友已顶住球 → 站它侧后方（本人也顶住时照常推）
+    if (!holds_ball(wm, id, ux, uy)) {
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            if (i == id || wm.role[i] == ROLE_GOALIE) continue;
+            if (!holds_ball(wm, i, ux, uy)) continue;
+            swarm_move(wm, id, bx - ux * kEscortBack + nx * side * kEscortSide,
+                       by - uy * kEscortBack + ny * side * kEscortSide);
+            return true;
+        }
+    }
+
+    if (behind > 0.0 && std::fabs(side_off) < kHerdLatTol) {
+        // 对准了：沿推进方向推穿
+        swarm_move(wm, id, bx + ux * kHerdThrough, by + uy * kHerdThrough);
+    } else if (behind > -3.0) {
+        // 在球侧后方：落到球后（偏得越多退得越远，免得斜插时蹭到球）
+        double back = kHerdBack + 0.5 * std::fabs(side_off);
+        double px = bx - ux * back, py = by - uy * back;
+        if (!prep_point_ok(px, py)) return false;
+        swarm_move(wm, id, px, py);
+    } else {
+        // 人在球前面：先横绕到球侧，绝不直线穿过球
+        swarm_move(wm, id, bx - ux * 4.0 + nx * side * kHerdSide,
+                   by - uy * 4.0 + ny * side * kHerdSide);
+    }
+    return true;
+}
+}  // anonymous namespace
+
 void run_assist(WorldModel &wm, int id) {
     if (run_pass_receiver(wm, id)) return;
+    if (run_swarm(wm, id, +1.0)) return;
     // 威胁高：回防但分散站位（封上侧射门线，不与 passive 挤一点）
     // 反击快攻窗口（docs/13 方案 A）：断球后 counter_attack_frames>0 时豁免回防、立即前插接应，
     //   让 ACTIVE 断球有传球选择（治反击前场真空，真实 9/2 vs demo 0 射门威胁）。
@@ -1683,6 +1806,7 @@ void run_assist(WorldModel &wm, int id) {
 
 void run_midfield(WorldModel &wm, int id) {
     if (run_pass_receiver(wm, id)) return;
+    if (run_swarm(wm, id, -1.0)) return;
     // 威胁高：回防但分散站位（封下侧射门线）
     // 反击快攻窗口（docs/13 方案 A）：断球后 counter_attack_frames>0 时豁免回防、立即前插接应，
     //   让 ACTIVE 断球有传球选择（治反击前场真空，真实 9/2 vs demo 0 射门威胁）。

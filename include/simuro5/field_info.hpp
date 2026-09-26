@@ -41,6 +41,19 @@ inline bool in_goal_area(const TeamContext &ctx, double x, double y) {
     return in_rect(x, y, x_lo, x_hi, 75.0, 105.0);
 }
 
+// 我方门区的**裁判口径**（官方 Referee Judge_PENALTY_KICK，magic_rob/engine/src/referee.cpp 逐行移植）：
+//   门线内 15cm × y∈[65,115]，外加球门里 x 在门线后 15cm × y∈[70,110]。
+//   ⚠️ 与上面 in_goal_area（50×30，策略自用口径）不同：裁判的门区**浅而宽**。
+//   非门将踩进来即计数，且计数**离开不清零**（球留在我方 80cm 区内一直累计）→ 满 20 帧判点球；
+//   2 人同时在内当场判。margin_x / margin_y = 向场内 / 向两侧外扩的防过冲余量。
+inline bool in_goal_area_rule(const TeamContext &ctx, double x, double y,
+                              double margin_x = 0.0, double margin_y = 0.0) {
+    double d = (x - ctx.our_goal_x()) * ctx.attack_dir();    // 离门线距离（场内为正，门后为负）
+    if (d < -15.0 || d > 15.0 + margin_x) return false;
+    double half = (d < 0.0) ? 20.0 : 25.0;
+    return std::fabs(y - 90.0) <= half + margin_y;
+}
+
 // 罚球区（大禁区 A+B）：球门前 80×35
 inline bool in_penalty_area(const TeamContext &ctx, double x, double y) {
     double gx = ctx.our_goal_x();

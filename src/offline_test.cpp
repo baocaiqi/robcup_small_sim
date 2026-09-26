@@ -235,11 +235,13 @@ static int test_goal_cover() {
     }
 
     // 分区3：球贴门（<45cm）→ 站「球与门之间」球前 8cm 堵推射线（demo 中卫球门侧思想）
-    //   球 (205,90) 距门 15cm → 护门点 x=213, y=90（球与门之间，不是球后）
+    //   但 2026-09-26 起：护门点落进**裁判门区**（门线内 15cm，+8 余量）→ 退到门线前 29cm，
+    //   门口球交给门将（非门将进门区计数离开不清零，满 20 帧判点球；见 in_goal_area_rule）。
+    //   球 (205,90) 距门 15cm → 原护门点 213 在门区内 → (191,90)
     wm.ball.x = 205; wm.ball.y = 90;
     if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: 贴门球应返回 true\n"); return 1; }
-    if (fabs(cx - 213.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
-        printf("FAIL: 贴门护门点 (%.1f,%.1f) 应 (213,90)\n", cx, cy); return 1;
+    if (fabs(cx - 191.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
+        printf("FAIL: 贴门护门点 (%.1f,%.1f) 应 (191,90)（不进裁判门区）\n", cx, cy); return 1;
     }
 
     // 斜向：球 (150,130) 距门 ~72.1cm（中近分区）→ 门前 50 线 x=170, y=130 夹回 107.5
@@ -249,11 +251,11 @@ static int test_goal_cover() {
         printf("FAIL: 斜向护门点 (%.1f,%.1f) 应 (170,107.5)\n", cx, cy); return 1;
     }
 
-    // 贴门但不越过门线：球 (218,90) 距门 2cm → 球前 8cm 会越线，应 clamp 到门前 3cm (217)
+    // 极贴门：球 (218,90) 距门 2cm → 原 clamp 到 217 仍在裁判门区 → 同样退到 (191,90)
     wm.ball.x = 218; wm.ball.y = 90;
     if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: 极贴门球应返回 true\n"); return 1; }
-    if (fabs(cx - 217.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
-        printf("FAIL: 极贴门护门点 (%.1f,%.1f) 应 (217,90)\n", cx, cy); return 1;
+    if (fabs(cx - 191.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
+        printf("FAIL: 极贴门护门点 (%.1f,%.1f) 应 (191,90)（不进裁判门区）\n", cx, cy); return 1;
     }
 
     printf("goal cover: OK (远球连线/中近拦截/贴门堵射/斜向clamp)\n");
@@ -507,6 +509,7 @@ static int test_roles_spread() {
     WorldModel wm;
     wm.ctx = ctx;
     wm.threat_level = 0.1;               // <=0.3 走进攻分支
+    wm.game_state = PM_PlaceKick_Blue;   // 死球期：第 79 轮分道压迫不接管，这里只测站位微调
 
     // 把无关对手放到远处（离站位点 > 威胁半径 30cm），避免干扰最近敌人判断
     auto scatter = [&]() {
@@ -658,7 +661,8 @@ static int test_shoot_plan() {
     for (int i = 1; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     {
         ShootPlan p4 = plan_shoot(wm, 1);
-        if (p4.viable) {
+        // 第 79 轮放宽借墙闸门后：直线远射仍须被拒，但允许借墙方案接管
+        if (p4.viable && !p4.bank) {
             printf("FAIL: GK 封死时 100cm 远射应被拒 (open=%.1f)\n", p4.open_angle);
             return 1;
         }
@@ -1896,14 +1900,25 @@ static int test_passive_front_sweep() {
         wm.role[i] = ROLE_PASSIVE;
     }
     wm.role[4] = ROLE_PASSIVE;
-    wm.ball.x = 212.0; wm.ball.y = 91.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;   // 离门线 8cm、静止
 
     // ① 球门侧（离门更近）→ 应主动推球清出去（rot=180 时前进 = -x = 远离己门）
-    wm.home[4].x = 219.0; wm.home[4].y = 91.0; wm.home[4].rot = 180.0;
+    //   2026-09-26：球须在裁判门区外（门线 22cm），门区内的球交给门将（见 ①b）
+    wm.ball.x = 198.0; wm.ball.y = 91.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[4].x = 203.0; wm.home[4].y = 91.0; wm.home[4].rot = 180.0;
     run_passive(wm, 4);
     double v1 = 0.5 * (wm.home[4].vl + wm.home[4].vr);
     if (v1 < 10.0) {
         printf("FAIL: 门前清道夫没出手（球门侧 v=%.0f，应 >10 朝 -x 把球顶离己门）\n", v1);
+        return 1;
+    }
+
+    // ①b 球在裁判门区内（离门线 8cm）→ 即使在球门侧也不进去清（非门将进门区=计点球）
+    wm.ball.x = 212.0; wm.ball.y = 91.0;
+    wm.home[4].x = 219.0; wm.home[4].y = 91.0; wm.home[4].rot = 180.0;
+    run_passive(wm, 4);
+    double v1b = 0.5 * (wm.home[4].vl + wm.home[4].vr);
+    if (std::fabs(v1b) > 5.0) {
+        printf("FAIL: 球在裁判门区内清道夫不该出手（v=%.0f，应 ≈0，交门将）\n", v1b);
         return 1;
     }
 
@@ -2454,6 +2469,7 @@ static WorldModel coop_task_scene() {
         // 门将留门前，另一对手封主攻射门线但不封向助攻的传球线。
         wm.opp[0].x = 0; wm.opp[0].y = 90;
         wm.opp[1].x = 50; wm.opp[1].y = 134;
+        wm.opp[2].x = 67; wm.opp[2].y = 165;     // 第三人封顶墙借墙线（第 79 轮借墙闸门放宽后）
         wm.home[1].x = wm.ball.x + 20.0 / len * 5.0;
         wm.home[1].y = wm.ball.y + 60.0 / len * 5.0;
         wm.home[1].rot = angle_to(75, 150, 55, 90);
@@ -3279,6 +3295,129 @@ static int test_own_goalarea_guard() {
 }
 
 // ============================================================
+// 2026-09-26：裁判口径门区（官方 Judge_PENALTY_KICK：门线内 15cm × y∈[65,115]）
+//   旧 in_goal_area（50×30，y∈[75,105]）漏掉门柱两侧 y∈[65,75)∪(105,115]，
+//   而裁判计数离开不清零 → magic_rob vs demo 场均 14 个点球的主因。
+// ============================================================
+static int test_rule_goal_area() {
+    TeamContext b{true}, y{false};
+    // 几何：蓝队门线 x=220
+    if (!in_goal_area_rule(b, 210, 112)) { printf("FAIL: (210,112) 应在裁判门区（门柱外侧）\n"); return 1; }
+    if (in_goal_area_rule(b, 204, 90))   { printf("FAIL: (204,90) 离门线 16cm 不在裁判门区\n"); return 1; }
+    if (in_goal_area_rule(b, 210, 116))  { printf("FAIL: (210,116) y 超 115 不在裁判门区\n"); return 1; }
+    if (!in_goal_area_rule(b, 225, 108)) { printf("FAIL: (225,108) 球门里应计入\n"); return 1; }
+    if (in_goal_area_rule(b, 225, 112))  { printf("FAIL: (225,112) 球门里 y 超 110 不计\n"); return 1; }
+    if (!in_goal_area_rule(b, 200, 90, 8.0, 0.0)) { printf("FAIL: 余量 8cm 时 (200,90) 应命中\n"); return 1; }
+    if (!in_goal_area_rule(y, 10, 68))   { printf("FAIL: 黄队镜像 (10,68) 应在裁判门区\n"); return 1; }
+
+    // 硬闸：非门将站在门柱外侧 (210,112)（旧门区漏判处）→ 必须被顶出去（朝 −x）
+    WorldModel wm;
+    wm.ctx = b;
+    wm.ball.valid = true; wm.ball.x = 150; wm.ball.y = 90;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 120; wm.home[i].y = 90; wm.home[i].rot = 180.0; wm.home[i].vl = wm.home[i].vr = 0; }
+    wm.home[3].x = 210; wm.home[3].y = 112;
+    enforce_own_goal_area(wm);
+    if (wm.home[3].vl + wm.home[3].vr <= 1.0) {
+        printf("FAIL: 门柱外侧(裁判门区)的队员应被顶向场内，实际 vl=%.1f vr=%.1f\n",
+               wm.home[3].vl, wm.home[3].vr);
+        return 1;
+    }
+    printf("rule goal area: OK (裁判门区几何/球门内/余量/黄队镜像/门柱外侧被顶出)\n");
+    return 0;
+}
+
+// ============================================================
+// docs/06 第 79 轮：分道压迫进攻（run_assist / run_midfield 前置的 run_swarm）
+//   推进方向与 roles.cpp 同口径：射门方案 → 借墙推进方案 → 门心。
+//   用 motion::position 对期望目标点算出的轮速做比对（目标点对了轮速就逐位相等）。
+// ============================================================
+static int test_swarm_attack() {
+    auto scene = [](double bx, double by) {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};                   // 蓝队：攻向 x=0
+        wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.ball.valid = true; wm.ball.x = bx; wm.ball.y = by;
+        wm.threat_level = 0.1;
+        const int roles[5] = {ROLE_GOALIE, ROLE_ACTIVE, ROLE_ASSIST, ROLE_MIDFIELD, ROLE_PASSIVE};
+        for (int i = 0; i < 5; ++i) wm.role[i] = roles[i];
+        for (int i = 0; i < 5; ++i) {
+            wm.home[i].x = 170; wm.home[i].y = 20 + 35 * i; wm.home[i].rot = 180;
+            wm.opp[i].x = 200; wm.opp[i].y = 20 + 30 * i;
+        }
+        wm.opp[0].x = 2; wm.opp[0].y = 90;            // 对方门将
+        return wm;
+    };
+    auto herd_dir = [](const WorldModel &wm, double &ux, double &uy) {
+        ShootPlan sp = plan_shoot(wm, 2);
+        if (sp.viable) { ux = sp.dir_x; uy = sp.dir_y; return; }
+        ShootPlan bk = plan_bank_carry(wm);
+        if (bk.viable) { ux = bk.dir_x; uy = bk.dir_y; return; }
+        double dx = 0.0 - wm.ball.x, dy = 90.0 - wm.ball.y, len = hypot(dx, dy);
+        ux = dx / len; uy = dy / len;
+    };
+    auto expect = [](const WorldModel &wm, int id, double tx, double ty, const char *what) {
+        RobotState e = wm.home[id];
+        motion::position(e, tx, ty, motion::TM_PASS);
+        if (fabs(e.vl - wm.home[id].vl) > 1e-6 || fabs(e.vr - wm.home[id].vr) > 1e-6) {
+            printf("FAIL: swarm %s 目标不对 (vl=%.1f/%.1f vr=%.1f/%.1f)\n", what,
+                   wm.home[id].vl, e.vl, wm.home[id].vr, e.vr);
+            return false;
+        }
+        return true;
+    };
+    // ① 人在球后且对准 → 沿推进方向推穿
+    {
+        WorldModel wm = scene(100, 120);
+        double ux, uy; herd_dir(wm, ux, uy);
+        wm.home[2].x = 100 - ux * 8; wm.home[2].y = 120 - uy * 8; wm.home[2].rot = angle_to(0, 0, ux, uy);
+        run_assist(wm, 2);
+        if (!expect(wm, 2, 100 + ux * 22.0, 120 + uy * 22.0, "推穿")) return 1;
+    }
+    // ② 人在球前面（推进线上）→ 横绕到球侧，绝不直冲球（防往回顶）
+    {
+        WorldModel wm = scene(100, 120);
+        double ux, uy; herd_dir(wm, ux, uy);
+        wm.home[2].x = 100 + ux * 30; wm.home[2].y = 120 + uy * 30;
+        run_assist(wm, 2);
+        if (!expect(wm, 2, 100 - ux * 4 - uy * 17.0, 120 - uy * 4 + ux * 17.0, "横绕")) return 1;
+    }
+    // ③ 球在下半道 → ASSIST（上半道）弱侧跟进：落后球 22cm、y=90+42
+    {
+        WorldModel wm = scene(100, 40);
+        run_assist(wm, 2);
+        if (!expect(wm, 2, 122, 132, "弱侧跟进")) return 1;
+    }
+    // ④ 球在对方门区附近 → 两人都在门区外沿等二点，不进门区
+    {
+        WorldModel wm = scene(30, 95);
+        run_assist(wm, 2); run_midfield(wm, 3);
+        if (!expect(wm, 2, 68, 122, "门外等二点(上)") || !expect(wm, 3, 68, 58, "门外等二点(下)")) return 1;
+    }
+    // ⑤ 队友已顶住球 → 不挤同一个球，站侧后方护送
+    {
+        WorldModel wm = scene(100, 95);
+        double ux, uy; herd_dir(wm, ux, uy);
+        wm.home[1].x = 100 - ux * 8; wm.home[1].y = 95 - uy * 8;
+        wm.home[2].x = 120; wm.home[2].y = 130;
+        double side = ((120 - 100) * -uy + (130 - 95) * ux) >= 0 ? 1.0 : -1.0;
+        run_assist(wm, 2);
+        if (!expect(wm, 2, 100 - ux * 16 - uy * side * 22, 95 - uy * 16 + ux * side * 22, "护送")) return 1;
+    }
+    // ⑥ 球离我方门 <60cm → 不接管（交回原防守逻辑）：目标不能是推穿/落位点
+    {
+        WorldModel wm = scene(175, 100);
+        wm.threat_level = 0.9;
+        WorldModel dead = wm; dead.game_state = PM_PlaceKick_Blue;   // 死球期 = 不接管的参照
+        run_assist(wm, 2); run_assist(dead, 2);
+        if (fabs(wm.home[2].vl - dead.home[2].vl) > 1e-6 || fabs(wm.home[2].vr - dead.home[2].vr) > 1e-6) {
+            printf("FAIL: swarm 球近我方门时不应接管\n"); return 1;
+        }
+    }
+    printf("swarm attack: OK (推穿/横绕不回顶/弱侧跟进/门外等二点/让位护送/近门交回防守)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 55 轮：门将「门线封堵」单测（真机 15:29 场两个丢球的病因）
 //   球已在门框内轨迹上、马上到线 → 必须抢门线预测落点（贴线 3cm + 预测落点 y）。
 //   其余情形一律让位：背离门 / 会偏出 / 还太远 / 太慢 / 门将已贴球（清球优先）。
@@ -3360,6 +3499,8 @@ int main(int argc, char **argv) {
     rc |= test_penalty_shot_prep();
     rc |= test_penalty_aim_offcenter();
     rc |= test_own_goalarea_guard();
+    rc |= test_rule_goal_area();
+    rc |= test_swarm_attack();
     rc |= test_no_reverse_through_ball();
     rc |= test_opp_kick_predict();
     rc |= test_coop_pass();

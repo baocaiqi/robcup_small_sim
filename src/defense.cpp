@@ -195,6 +195,12 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
         double lo = std::min(bx, door_x), hi = std::max(bx, door_x);
         out_x = clamp(out_x, lo, hi);
         if (bx > door_x) out_x = door_x;
+        // 裁判门区（门线内 15cm）非门将一进就累计、离开不清零 → 满 20 帧判点球。
+        //   护门点落在里面时退到门区外缘 +14cm（门口球交给门将），y 不变。
+        if (in_goal_area_rule(ctx, out_x, out_y, 8.0, 6.0)) {
+            out_x = ctx.our_goal_x() + ctx.attack_dir() * 29.0;
+            return true;
+        }
         // 注意：不能走末尾的 kMaxX clamp——kMaxX=208 是断球点约束（防守者不深入
         //   门区），而贴门护门点必须站到球与门之间（x 可到 213+），会被截断。
         out_x = clamp(out_x, kMinX, TeamContext::FIELD_LENGTH);

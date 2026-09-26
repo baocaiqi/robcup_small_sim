@@ -36,6 +36,10 @@ struct ShootPlan {
 // 计算 4 号前锋的最佳射门方案
 ShootPlan plan_shoot(const WorldModel &wm, int shooter_id);
 
+// 蜂群推进用的借墙方案（docs/06 第 79 轮）：只算借墙，射程放宽到 kBankCarryMax，
+//   不与直线比较、不计统计；推进者据此决定"往哪面墙推"。viable=false → 没有可用反弹线。
+ShootPlan plan_bank_carry(const WorldModel &wm);
+
 // 借墙方案统计（纯统计：sim 汇总/复盘用；不影响任何决策）
 long bank_plan_count();    // 机会次数（连续采纳算 1 次）
 long bank_frame_count();   // 采纳帧数
