@@ -89,6 +89,9 @@ void Strategy::run(WorldModel &wm) {
     // 4.5 清道夫指派（球在防守三区拉边时，抽一个区域防守者钉中路封远门柱/横传）
     update_sweeper(wm);
 
+    // 4.6 前场散球逼抢者指派（球在前场且静止/周围没对方时，抽进攻球员就近抢散球）
+    update_presser(wm);
+
     // 5. 按角色执行（薄壳调度）
     //    冷却期门区禁令（docs/13 方案 C 扩展）：撤出刚触发 30 帧内，本角色若还在
     //    对方门区（且非攻门作业/点球执行），直接指令门外、**跳过角色函数**——
@@ -96,6 +99,7 @@ void Strategy::run(WorldModel &wm) {
     //    原地抖振卡在门区（实测蓝1 滞留 45 帧的根因）。
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
+        if (i == wm.presser_id) { run_press(wm, i); continue; }   // 前场散球逼抢者 override 原角色
         if (wm.ga_cooldown[i] > 0) {
             --wm.ga_cooldown[i];
             bool in_ga = in_opp_goal_area(wm.ctx, wm.home[i].x, wm.home[i].y);
@@ -273,6 +277,65 @@ void Strategy::update_sweeper(WorldModel &wm) {
     //   y=90 封中路与远门柱；x=85 尊重「非门将不进己方罚球区」纪律(见 situation.cpp)。
     wm.sweeper_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
     wm.sweeper_y = 90.0;
+}
+
+// ============================================================
+// 前场散球逼抢者指派（docs/06 第 83 轮，用户指令）
+//   球在前场（对方半场）且「静止 或 周围没有对方球员」时，从进攻三人组
+//   （ACTIVE/ASSIST/MIDFIELD，排除门将和中卫）里打分选一个去抢散球：
+//   打破「只有 ACTIVE 追球」的固定分工——离球最近的助攻/中场也能就地抢回球权。
+//   打分（越小越好）：score = 到球距离 - kForwardBonus * 球在球员前方程度；
+//   现任者减 kPressHysteresis 防每帧换人（写法仿 defense.cpp::pick_mark_target）。
+// ============================================================
+TUNABLE(kPressEnabled, 1.0);        // 总开关：<=0 关闭本功能（回滚开关）
+TUNABLE(kPressMaxDist, 250.0);      // 候选离球最远距离(cm)，超过不抢
+TUNABLE(kPressOppClearDist, 40.0);  // 「球周围没对方」阈值：最近对手离球 > 此值
+TUNABLE(kPressStillSpeed, 1.0);     // 球静止阈值(cm/帧)
+TUNABLE(kForwardBonus, 0.6);        // 球在球员前方(球员在球后)的加分系数
+TUNABLE(kForwardMax, 60.0);         // 前方加分的 forward 上限(cm)
+TUNABLE(kPressHysteresis, 15.0);    // 换人滞回(cm)：新人要比现任好超过此值才换
+
+void Strategy::update_presser(WorldModel &wm) {
+    int cur = wm.presser_id;   // 上帧逼抢者（滞回用）
+    wm.presser_id = -1;        // 默认清空，下面满足触发才重新选
+
+    if (kPressEnabled <= 0.0) return;
+    if (!wm.ball.valid) return;
+    if (wm.game_state != PM_PlayOn) return;   // 死球期有专门逻辑，别抢
+    if (wm.we_have_ball) return;              // 球已在我方脚下，不「抢」
+
+    const TeamContext &ctx = wm.ctx;
+    double bx = wm.ball.x, by = wm.ball.y;
+
+    // 前场（对方半场）
+    bool front = (ctx.attack_dir() > 0) ? (bx > 110.0) : (bx < 110.0);
+    if (!front) return;
+
+    // 球静止 或 球周围没有对方球员（两者满足其一即可）
+    bool still = std::hypot(wm.ball.vx, wm.ball.vy) < kPressStillSpeed;
+    if (!still) {
+        double opp_min = 1e9;
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j)
+            opp_min = std::min(opp_min, dist(bx, by, wm.opp[j].x, wm.opp[j].y));
+        if (opp_min <= kPressOppClearDist) return;   // 球周围有对方，不是安全散球
+    }
+
+    // 打分选人（进攻三人组，越小越好）
+    double ad = ctx.attack_dir();
+    int best = -1;
+    double best_score = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        int rl = wm.role[i];
+        if (rl != ROLE_ACTIVE && rl != ROLE_ASSIST && rl != ROLE_MIDFIELD) continue;
+        double d = dist(bx, by, wm.home[i].x, wm.home[i].y);
+        if (d > kPressMaxDist) continue;
+        // 球在球员进攻方向前方（球员在球后，抢到能顺势朝门推）的程度
+        double forward = clamp(ad * (bx - wm.home[i].x), 0.0, kForwardMax);
+        double score = d - kForwardBonus * forward;
+        if (i == cur) score -= kPressHysteresis;   // 现任粘性：防每帧换人
+        if (score < best_score) { best_score = score; best = i; }
+    }
+    wm.presser_id = best;
 }
 
 }  // namespace simuro5

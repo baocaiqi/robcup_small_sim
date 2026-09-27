@@ -172,7 +172,12 @@ void formation_set_ball(const TeamContext &c, PlayMode gs, Vector3D *pBall) {
     if ((gs == PM_GoalKick_Blue && c.is_blue) ||
         (gs == PM_GoalKick_Yellow && !c.is_blue)) {
         pBall->x = c.our_goal_x() + c.attack_dir() * 10.0;
-        pBall->y = 90.0;
+        // 门球落点偏下角（参考官方 demo 摆下角思想、自研落点）。y 取 72（第 84 轮从 75
+        //   改到 72，更侧面）：门球开出后球若走中路(y≈90)，对手断球即正对球门、射门角度
+        //   最正，容易被直接进球；落点越靠边，球开出后越走边路，对手断球后射门角度越偏、
+        //   越难进。下限是门柱线 y=70（demo 摆 y=70 球卡门柱、平台反复重发，docs/06 第 48
+        //   轮真机实测一场连续 8 次卡死），故留 2cm 余量取 72。
+        pBall->y = 72.0;
         pBall->z = 0.0;
     }
 }

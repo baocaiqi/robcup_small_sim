@@ -2073,6 +2073,83 @@ static int test_possession_source() {
 }
 
 // ============================================================
+// 第 83 轮：前场散球逼抢——谁近谁去 + 球在球员前方加分
+//   断言：① 前场静止散球选离球最近且球在其前方的进攻球员；
+//         ② 球在动且球周围有对方 → 不触发；
+//         ③ 中卫离球最近也不选（只进攻三人组）。
+// ============================================================
+static int test_presser() {
+    Strategy strat;
+
+    // —— ① 前场静止散球：助攻(编号2)离球 20cm 且球在其前方 → 选助攻 ——
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};            // 蓝队，对方门 x=0，前场 x<110
+        wm.ball.valid = true;
+        wm.ball.x = 50; wm.ball.y = 90;        // 前场
+        wm.ball.vx = 0; wm.ball.vy = 0;        // 静止
+        wm.game_state = PM_PlayOn;
+        wm.home[0].x = 210; wm.home[0].y = 90; // 门将
+        wm.home[1].x = 150; wm.home[1].y = 90; // ACTIVE 离球 100
+        wm.home[2].x = 70;  wm.home[2].y = 90; // ASSIST 离球 20，球在助攻前方(50<70)
+        wm.home[3].x = 100; wm.home[3].y = 90; // MID 离球 50
+        wm.home[4].x = 120; wm.home[4].y = 90; // PASSIVE 离球 70
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 90; }
+        strat.run(wm);
+        if (wm.presser_id != 2) {
+            printf("FAIL: 前场静止散球应选离球最近的助攻(编号2)，got %d\n", wm.presser_id);
+            return 1;
+        }
+    }
+
+    // —— ② 球在动 且 球周围有对方(30cm) → 不触发 ——
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.ball.valid = true;
+        wm.ball.x = 50; wm.ball.y = 90;
+        wm.ball.vx = 2.0; wm.ball.vy = 0;       // 球在动
+        wm.game_state = PM_PlayOn;
+        wm.home[0].x = 210; wm.home[0].y = 90;
+        wm.home[1].x = 150; wm.home[1].y = 90;
+        wm.home[2].x = 70;  wm.home[2].y = 90;
+        wm.home[3].x = 100; wm.home[3].y = 90;
+        wm.home[4].x = 120; wm.home[4].y = 90;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 90; }
+        wm.opp[0].x = 80; wm.opp[0].y = 90;     // 对手离球 30cm（<40 阈值）
+        strat.run(wm);
+        if (wm.presser_id != -1) {
+            printf("FAIL: 球在动且周围有对方，不应触发逼抢，got %d\n", wm.presser_id);
+            return 1;
+        }
+    }
+
+    // —— ③ 中卫(编号4)离球最近(25cm)，但被排除，选进攻三人组里的助攻(30cm) ——
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.ball.valid = true;
+        wm.ball.x = 50; wm.ball.y = 90;
+        wm.ball.vx = 0; wm.ball.vy = 0;
+        wm.game_state = PM_PlayOn;
+        wm.home[0].x = 210; wm.home[0].y = 90;
+        wm.home[1].x = 150; wm.home[1].y = 90; // ACTIVE 离球 100
+        wm.home[2].x = 80;  wm.home[2].y = 90; // ASSIST 离球 30
+        wm.home[3].x = 100; wm.home[3].y = 90; // MID 离球 50
+        wm.home[4].x = 75;  wm.home[4].y = 90; // PASSIVE 离球 25（最近但应排除）
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 90; }
+        strat.run(wm);
+        if (wm.presser_id == 4 || wm.presser_id == -1) {
+            printf("FAIL: 中卫离球最近也不该被选，应选进攻球员，got %d\n", wm.presser_id);
+            return 1;
+        }
+    }
+
+    printf("presser: OK (最近进攻球员/球周围有对方不触发/中卫不选)\n");
+    return 0;
+}
+
+// ============================================================
 // 2026-09-14：抢反弹位三合一升级 + 二抢一封推进方向 单测
 // ============================================================
 static int test_rebound_and_doubleteam() {
@@ -3519,6 +3596,7 @@ int main(int argc, char **argv) {
     rc |= test_gk_on_line_no_push();
     rc |= test_goalie_challenge();
     rc |= test_doubleteam_loose_ball();
+    rc |= test_presser();
     rc |= test_goalie_line_cover();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
