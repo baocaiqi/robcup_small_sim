@@ -2039,8 +2039,9 @@ static int test_doubleteam_loose_ball() {
 }
 
 // ============================================================
-// 球权来源单测（2026-09-13 用户指令：先用平台给的 whosBall 字段）
-//   平台字段有效(≠0) → 以它为准；未知(0) → 退回"最近的人且 <20cm"自算。
+// 球权来源单测（2026-09-28 改：兜底不再信平台 whosBall）
+//   判定纯距离自算：明确我方/对方（20cm 内且比对方近 5cm）→ 否则 by_distance（最近<20cm）。
+//   whosBall 只作标定诊断计数（whos_mismatch），不参与 we_have_ball。
 // ============================================================
 static int test_possession_source() {
     WorldModel wm;
@@ -2063,12 +2064,13 @@ static int test_possession_source() {
     Situation s3 = sitm.analyze(wm);
     if (!s3.we_have_ball) { printf("FAIL: 明确控球时不该被平台字段覆盖\n"); return 1; }
     if (!s3.whos_mismatch) { printf("FAIL: 应记录 平台 vs 自算 不一致\n"); return 1; }
-    // ④ 不明确（双方都 30cm 外）→ 听平台的
+    // ④ 不明确（双方都 30cm 外）→ 不再听平台（whosBall 不可靠），按距离自算：相等 → 判非我方
     wm.home[1].x = 140; wm.opp[1].x = 140; wm.whos_ball = 1;
-    if (!sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时 whos=1 应判我方\n"); return 1; }
-    wm.whos_ball = 2;
-    if (sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时 whos=2 应判对方\n"); return 1; }
-    printf("possession source: OK (平台优先/未知退回自算/whos=1我方/whos=2对方)\n");
+    if (sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时 whos=1 不再该信平台\n"); return 1; }
+    // ④b 不明确但距离上我方更近（<20cm）→ 自算判我方，即使平台报 2=对方
+    wm.home[1].x = 128; wm.opp[1].x = 150; wm.whos_ball = 2;
+    if (!sitm.analyze(wm).we_have_ball) { printf("FAIL: 散球时我方更近应自算判我方\n"); return 1; }
+    printf("possession source: OK (距离自算/明确控球不覆盖/散球不信平台)\n");
     return 0;
 }
 
