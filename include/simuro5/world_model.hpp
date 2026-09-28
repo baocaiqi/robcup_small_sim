@@ -160,6 +160,10 @@ struct WorldModel {
     //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。
     int sweeper_id = -1;
     double sweeper_x = 0, sweeper_y = 90;
+    // 前场散球逼抢者（docs/06 第 83 轮）：球在前场且「静止或周围没对方」时，
+    //   strategy.cpp 打分选出离球最近、球在其前方的进攻球员，override 原角色去抢球。
+    //   -1=无逼抢者（正常角色行为）。
+    int presser_id = -1;
     // 路径执行状态（docs/15 P0：motion::follow_route 用，按机器人索引）
     //   每帧角色层算出 RoutePlan 后从 wm.route_wp_next[i]=0 起推进；
     //   跨帧保留段索引防抖（沿用旧 waypoint），路径重算后由角色层重置。
