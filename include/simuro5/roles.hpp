@@ -77,5 +77,8 @@ void run_assist(WorldModel &wm, int id);
 // 中场衔接：站中场参考点
 void run_midfield(WorldModel &wm, int id);
 
+// 前场散球逼抢（docs/06 第 83 轮）：strategy 选出的逼抢者跑过去抢散球
+void run_press(WorldModel &wm, int id);
+
 }  // namespace simuro5
 #endif

@@ -114,11 +114,15 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         plan.target_y = clamp(wm.ball.y, 75.0, 105.0);
     }
 
-    // 兑底（本地第4轮）：防守点若落入己方大禁区则推出（防堆叠送点球）
-    if (in_penalty_area(ctx, plan.target_x, plan.target_y)) {
-        plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
-        plan.target_y = 90.0;
-    }
+    // 兑底（本地第4轮）：防守点若落入己方大禁区则推出（防堆叠送点球）。
+    //   下方"防推球"里"推球点被推回罚球区"也复用此推出，统一成局部 lambda。
+    auto push_out_of_penalty = [&](double &tx, double &ty) {
+        if (in_penalty_area(ctx, tx, ty)) {
+            tx = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
+            ty = 90.0;
+        }
+    };
+    push_out_of_penalty(plan.target_x, plan.target_y);
     // 防推球犯规（本地第7轮）：防守点距球保持 >= 8cm（球周围不挤球不推球）
     double db = dist(plan.target_x, plan.target_y, wm.ball.x, wm.ball.y);
     if (db < 8.0) {
@@ -126,10 +130,7 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         plan.target_x = wm.ball.x - 8.0 * cos(ang);
         plan.target_y = wm.ball.y - 8.0 * sin(ang);
         // 推球点可能又被推回罚球区（球贴罚球区前缘时），再夹一次防送点球
-        if (in_penalty_area(ctx, plan.target_x, plan.target_y)) {
-            plan.target_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
-            plan.target_y = 90.0;
-        }
+        push_out_of_penalty(plan.target_x, plan.target_y);
     }
     // 禁区纪律（对方门区）：防守点也不得落入对方门区（FIRA：门区 2+ 人 → 罚点球）。
     //   球被压到对方门前/门角时，球-门连线兜底锚点会把防守者带到对方门区边线上，
@@ -236,12 +237,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
     double danger = ball_danger_speed(wm);   // 球朝己方门速度（持球突破威胁用）
 
     // 持球者 = 离球最近的对方球员
-    int dribbler = -1;
-    double dmin = 1e9;
-    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
-        if (d < dmin) { dmin = d; dribbler = i; }
-    }
+    int dribbler = nearest_opp_to_ball(wm);
 
     // 逐人打分取 argmax
     int best = -1;
@@ -300,12 +296,8 @@ bool double_team_point(const WorldModel &wm, int defender_id,
     if (wm.threat_level < 0.6) return false;
 
     // 门槛②：有明确持球者（离球最近且足够近）
-    int dribbler = -1;
     double dmin = 1e9;
-    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
-        if (d < dmin) { dmin = d; dribbler = i; }
-    }
+    int dribbler = nearest_opp_to_ball(wm, &dmin);
     if (dribbler < 0 || dmin >= kDoubleTeamCarryDist) return false;
 
     // 门槛③：球已在己方罚球区 → 原「禁区纪律」直接 return false（门前只剩门将 1v1，

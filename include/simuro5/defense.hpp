@@ -123,6 +123,43 @@ inline bool shot_on_target(const WorldModel &wm) {
     return y_at_goal >= 90.0 - half && y_at_goal <= 90.0 + half;
 }
 
+// ============================================================
+// 防守/守门共用小工具（去重复：原先散在 run_goalie / pick_mark_target /
+//   double_team_point / run_passive 里的同一段扫描/侧向判断提出来共用）
+// ============================================================
+
+// 找离球最近的对方球员下标（0~4），并回填其到球距离（dmin 可为空）。
+//   run_goalie 的持球者判定、pick_mark_target / double_team_point 的 dribbler 都复用。
+inline int nearest_opp_to_ball(const WorldModel &wm, double *dmin = nullptr) {
+    int best = -1;
+    double bd = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
+        if (d < bd) { bd = d; best = i; }
+    }
+    if (dmin) *dmin = bd;
+    return best;
+}
+
+// 最近对方球员离球的距离（cm）。run_goalie 的 opp_dmin_door、run_passive 的 opp_dmin 复用。
+inline double opp_clear_dist(const WorldModel &wm) {
+    double dmin = 1e9;
+    nearest_opp_to_ball(wm, &dmin);
+    return dmin;
+}
+
+// 球门在球的哪一侧：+1 = 球门在球的 +x 侧，-1 = 球门在球的 -x 侧。
+//   用于"门将相对球站在门侧还是场侧"的判断（贴门线防乌龙 / 门球重启 / 解围绕行）。
+inline double ball_goal_side(const TeamContext &ctx, double bx) {
+    return (ctx.our_goal_x() > bx) ? 1.0 : -1.0;
+}
+
+// 门将封角度深度（cm）：站到球-门连线上、球前 12cm 处，深度夹在 [guard_dist, 40]。
+//   run_goalie 里「对方持球门口封角度」「压门封角度」「慢速盘带压门」三处共用此公式。
+inline double goalie_block_depth(const TeamContext &ctx, double bx, double guard_dist) {
+    return std::min(40.0, std::max(guard_dist, ctx.dist_our_goal(bx) - 12.0));
+}
+
 // 门前抢反弹位：对方射门在门框内时，站位到罚球区前缘、预测入球点 y 上下两侧，
 //   准备抢门将扑出/挡出的二次球（防补射）。
 //   y_side：+30 上侧 / -30 下侧（与 assist/midfield 的 ±30 分散一致）。
@@ -254,14 +291,6 @@ inline double mark_lead() { return 3.0; }
 //   传球随时发生，marker 从 goal-side 换到「球→被盯者」连线，掐断传球。
 //   下界 15cm 是「持球者」判定（离球 <15 视为正持球，堵射门而非传球）。
 inline double mark_pass_lane_dist() { return 40.0; }
-
-// 威胁阈值（下游角色分支读取，替代散落的魔法数字 0.3/0.6）：
-//   retreat_threat()     = 0.30：wm.threat_level >  它 → assist/midfield 回防
-//   mark_engage_threat() = 0.60：wm.threat_level >= 它 → passive 人盯人 / double_team / 站位回收
-//   当前实现为「命名常量」（返回值 = 旧魔法数字，零行为变化）；将来若做连续威胁，
-//   下游只需改这里两个函数，角色层不用动。
-inline double retreat_threat()     { return 0.30; }
-inline double mark_engage_threat() { return 0.60; }
 
 // 盯人危险门限：被盯者必须离球或离门足够近才值得贴，否则回区域防守。
 //   复盘未贴住帧里 44~48% 被盯者离球 >40cm——追不危险的对手白费体力。
