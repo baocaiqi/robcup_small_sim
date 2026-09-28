@@ -133,10 +133,32 @@ struct SimState {
 #include <algorithm>
 static std::map<std::string, long> g_hes_by_line, g_all_by_line;
 static long g_hes_n = 0, g_con_n = 0;
+static long g_loose_n = 0, g_loose_hes = 0;
+static std::map<std::string, long> g_loose_all, g_loose_hes_by;
 static void hes_sample(const WorldModel &wm, const SimState &s) {
     const double kHesSpeed = 40.0;
     double od = 1e9;
     for (int j = 0; j < 5; ++j) od = std::min(od, std::hypot(s.yellow[j].x - s.bx, s.yellow[j].y - s.by));
+    {   // 无主球：双方最近者都 >15cm，记我方最近场上队员的分支与朝球指令速度
+        int bi = -1; double bdd = 1e9;
+        for (int i = 1; i < 5; ++i) {
+            double d = std::hypot(wm.home[i].x - s.bx, wm.home[i].y - s.by);
+            if (d < bdd) { bdd = d; bi = i; }
+        }
+        if (bi >= 0 && bdd > 15.0 && od > 15.0 && bdd < 100.0) {
+            const RobotState &r = wm.home[bi];
+            double a2 = std::atan2(s.by - r.y, s.bx - r.x) - r.rot * 3.14159265358979 / 180.0;
+            double v2 = 0.5 * (r.vl + r.vr) * std::cos(a2);
+            const trace::Mark *m = trace::find(&r);
+            std::string key = "R" + std::to_string(wm.role[bi]) + " ";
+            if (m && m->file) {
+                const char *f = std::strrchr(m->file, '\\'); if (!f) f = std::strrchr(m->file, '/');
+                key += std::string(f ? f + 1 : m->file) + ":" + std::to_string(m->line);
+            } else key += "(unmarked)";
+            ++g_loose_n; ++g_loose_all[key];
+            if (v2 < kHesSpeed) { ++g_loose_hes; ++g_loose_hes_by[key]; }
+        }
+    }
     if (od > 20.0) return;
     int best = -1; double bd = 1e9;
     for (int i = 1; i < 5; ++i) {
@@ -157,6 +179,15 @@ static void hes_sample(const WorldModel &wm, const SimState &s) {
     if (v < kHesSpeed) { ++g_hes_n; ++g_hes_by_line[key]; }
 }
 static void hes_report() {
+    printf("\n[无主球追踪] 帧 %ld，最近者不朝球 %ld（%.1f%%）\n", g_loose_n, g_loose_hes, 100.0 * g_loose_hes / std::max(1L, g_loose_n));
+    {
+        std::vector<std::pair<long, std::string>> v;
+        for (auto &kv : g_loose_all) v.push_back({g_loose_hes_by[kv.first], kv.first});
+        std::sort(v.rbegin(), v.rend());
+        for (size_t i = 0; i < v.size() && i < 25; ++i)
+            printf("  %-28s 不朝球 %6ld / 帧 %6ld  (%.0f%%)\n", v[i].second.c_str(), v[i].first,
+                   g_loose_all[v[i].second], 100.0 * v[i].first / std::max(1L, g_loose_all[v[i].second]));
+    }
     printf("\n[犹豫追踪] 争抢帧 %ld，犹豫 %ld（%.1f%%）\n", g_con_n, g_hes_n, 100.0 * g_hes_n / std::max(1L, g_con_n));
     std::vector<std::pair<long, std::string>> v;
     for (auto &kv : g_all_by_line) v.push_back({g_hes_by_line[kv.first], kv.first});

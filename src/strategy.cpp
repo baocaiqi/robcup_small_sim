@@ -107,7 +107,7 @@ void Strategy::run(WorldModel &wm) {
             if (in_ga && !shooting_work && !penalty) {
                 if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
                     wm.coop_finish(CoopOutcome::GoalDiscipline);
-                if (wm.coop_ball_control.active && (i == 1 || i == wm.coop_ball_control.receiver_id))
+                if (wm.coop_ball_control.active && (i == wm.active_id || i == wm.coop_ball_control.receiver_id))
                     wm.coop_control_end(CoopOutcome::GoalDiscipline);
                 double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
                 motion::position(wm.home[i], ogx - ad * 70.0, clamp(wm.home[i].y, 72.5, 107.5));
@@ -141,7 +141,7 @@ void Strategy::run(WorldModel &wm) {
             if (!shooting_work && ++wm.ga_overstay[i] > 15) {
                 if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
                     wm.coop_finish(CoopOutcome::GoalDiscipline);
-                if (wm.coop_ball_control.active && (i == 1 || i == wm.coop_ball_control.receiver_id))
+                if (wm.coop_ball_control.active && (i == wm.active_id || i == wm.coop_ball_control.receiver_id))
                     wm.coop_control_end(CoopOutcome::GoalDiscipline);
                 wm.ga_overstay[i] = 0;
                 wm.ga_cooldown[i] = 30;

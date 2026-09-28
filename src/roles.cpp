@@ -713,7 +713,7 @@ bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
 
 bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
-    return pass_context_safe(wm) && id >= 2 && id <= 4 &&
+    return pass_context_safe(wm) && id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
         wm.coop_ball_control.game_state == wm.game_state && wm.ga_cooldown[id] <= 0 &&
         wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
@@ -721,7 +721,8 @@ bool pass_control_safe(const WorldModel &wm) {
 
 void observe_pass_lifecycle(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
-    if (task.active && task.passer_id == 1 && task.receiver_id >= 2 && task.receiver_id <= 4 &&
+    if (task.active && task.passer_id == wm.active_id && task.receiver_id >= 1 && task.receiver_id <= 4 &&
+        task.receiver_id != task.passer_id &&
         task.frames_left > 0 && task.game_state == wm.game_state && pass_context_safe(wm)) {
         if (task.phase == CoopPassPhase::Preparing && task.observing_push) {
             const RobotState &passer = wm.home[task.passer_id];
@@ -1288,9 +1289,8 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
-    // 普通传球只在球已在我脚下时才做：plan_pass 的目标是**队友的接球点**，
-    //   球不在脚下时开过去 = 丢下球去接自己的传球（第 81 轮 sim 追踪：争抢帧里 ACTIVE
-    //   最大的犹豫来源）。此时落到下面的追球。
+    // 普通传球：plan_pass 的目标是**队友的接球点**（第 81/82 轮试过"球不在脚下不去接球点"与
+    //   "穿过球推向接球点"，sim 300 局均净胜下降，保留原行为）。
     double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
     // 找离球最近的对方防守者（含守门员）：决定带球开口侧 + 判断球权是否在我
     double opp_d = 1e9, opp_y = 90.0;

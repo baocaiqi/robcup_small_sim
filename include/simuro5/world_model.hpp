@@ -135,6 +135,9 @@ struct WorldModel {
 
     // 角色分配结果（由 RoleAssignment 填写）
     int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举
+    // 动态主攻（第 82 轮，role_assignment.cpp）：当前 ACTIVE 的机器人下标 + 换人滞回状态
+    int active_id = 1;
+    int active_cand = -1, active_cand_frames = 0, active_hold = 0;
     // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
 
