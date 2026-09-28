@@ -35,6 +35,10 @@ constexpr bool kNoPushGuardEnabled = false;
 // ============================================================
 bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty);
 
+// 门将对准球的直线提前堵（第 87 轮）：慢球朝门滚 → 站到"球→进门点"直线上、门前 kGkGuardDist；
+//   球沿门线滚向门口 → 站到球的滚动路径上、球前方（门口内侧）。返回 false = 不触发。
+bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty);
+
 // 守门员：站球门前跟球 y；球逼近时出击
 void run_goalie(WorldModel &wm, int id);
 

@@ -3546,6 +3546,58 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 第 87 轮：对准球的直线提前堵（场景取自 09-28 真机黑匣子）
+static int test_goalie_line_block() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90; }
+    double tx = 0.0, ty = 0.0;
+
+    // ① 中路慢球（0.47cm/帧，y 微降）、门将在门前 → 站直线上门前 10cm
+    wm.ball.x = 197; wm.ball.y = 88.5; wm.ball.vx = 0.47; wm.ball.vy = -0.04;
+    wm.home[0].x = 209; wm.home[0].y = 80; wm.home[0].rot = -110;
+    if (!gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 中路慢球应对线\n"); return 1; }
+    double y_line = 88.5 - 0.04 * (210.0 - 197.0) / 0.47;
+    if (fabs(tx - 210.0) > 0.5 || fabs(ty - y_line) > 0.5) {
+        printf("FAIL: 对线目标应为 (210,%.1f)，实际 (%.1f,%.1f)\n", y_line, tx, ty); return 1;
+    }
+    // ② 对方贴球带 → 不接管（交给持球硬锁）
+    wm.opp[0].x = 190; wm.opp[0].y = 88.5;
+    if (gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 对方贴球不应对线\n"); return 1; }
+    wm.opp[0].x = 100; wm.opp[0].y = 90;
+    // ③ 快球 → 不接管（门线封堵/前压封角处理）
+    wm.ball.vx = 4.0; wm.ball.vy = 0.0;
+    if (gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 快球不应走对线\n"); return 1; }
+    // ④ 会偏出的慢球 → 不接管
+    wm.ball.x = 197; wm.ball.y = 130; wm.ball.vx = 0.5; wm.ball.vy = 0.0;
+    if (gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 偏出的慢球不应对线\n"); return 1; }
+    // ⑤ 贴门线从上往下滚向门口（x=217.5, y=140, vy=-1）→ 站路径 x 上、门口上沿内侧
+    wm.ball.x = 217.5; wm.ball.y = 140; wm.ball.vx = 0.0; wm.ball.vy = -1.0;
+    wm.home[0].x = 209; wm.home[0].y = 104;
+    if (!gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 贴门线滚球应堵路径\n"); return 1; }
+    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 106.0) > 0.5) {
+        printf("FAIL: 贴门线堵点应为 (217,106)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
+    }
+    // ⑥ 贴门线从下往上滚、已进门口带（y=80, vy=+2）→ 球前方 12cm
+    wm.ball.y = 80; wm.ball.vy = 2.0;
+    if (!gk_line_block_point(wm, 0, tx, ty) || fabs(ty - 92.0) > 0.5) {
+        printf("FAIL: 门口内贴线滚球应堵在球前 (y=92)，实际 %.1f\n", ty); return 1;
+    }
+    // ⑦ 贴门线但背离门口滚（y=40 往下）→ 不接管
+    wm.ball.y = 40; wm.ball.vy = -2.0;
+    if (gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 背离门口的贴线球不应接管\n"); return 1; }
+    // ⑧ 黄队镜像：中路慢球朝 x=0
+    wm.ctx = TeamContext{false};
+    wm.ball.x = 23; wm.ball.y = 90; wm.ball.vx = -0.5; wm.ball.vy = 0.0;
+    wm.home[0].x = 11; wm.home[0].y = 80;
+    if (!gk_line_block_point(wm, 0, tx, ty) || fabs(tx - 10.0) > 0.5 || fabs(ty - 90.0) > 0.5) {
+        printf("FAIL: 黄队镜像对线目标应为 (10,90)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
+    }
+    printf("goalie line block: OK (慢球对线/贴球-快球-偏出不接管/贴门线堵路径/黄队镜像)\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
@@ -3600,6 +3652,7 @@ int main(int argc, char **argv) {
     rc |= test_doubleteam_loose_ball();
     rc |= test_presser();
     rc |= test_goalie_line_cover();
+    rc |= test_goalie_line_block();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

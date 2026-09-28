@@ -193,6 +193,60 @@ bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty) {
     return true;
 }
 
+// 对准球的直线提前堵（第 87 轮，用户真机反馈「慢球进门，门将还往旁边挪」）：
+//   09-28 真机逐帧：① 中路慢球（0.47cm/帧、落点 86.8）门将本在线上，脚下清球分支让它
+//   转身冲向球后 30cm，差速车画大弧跑到 y=61，球慢慢滚进空门；② 4 个球贴门线
+//   （x≈217.5）滚向门口，门将停在 x≈207~210 的场侧，离滚动路径 7~10cm，球从身边滚进。
+//   改法：A 慢速朝门球 → 站在"球→进门点"直线上、门前 kGkLbDepth（不冲、不绕）；
+//         B 贴门线滚向门口 → 站到滚动路径 x 上、球前方 kGkLbAhead（门框内侧），迎球挡死。
+TUNABLE(kGkLineBlock, 1.0);      // 总开关（0 = 回滚）
+TUNABLE(kGkLbMinSpeed, 0.2);     // cm/帧：朝门速度下限（更慢交给门前静止球推出）
+TUNABLE(kGkLbMaxSpeed, 2.5);     // cm/帧：A 只管慢球，快球仍由门线封堵/前压封角处理
+TUNABLE(kGkLbRange, 100.0);      // cm：A 球离门线多近才对线
+TUNABLE(kGkLbDepth, 10.0);       // cm：A 站位离门线（=常规站位深度）
+TUNABLE(kGkLbFreeDist, 15.0);    // cm：A 最近对手离球要大于此（对方带球交给持球硬锁）
+TUNABLE(kGkLbLineBand, 12.0);    // cm：B 球离门线多近算"贴门线滚"
+TUNABLE(kGkLbRollSpeed, 0.3);    // cm/帧：B 沿门线速度下限
+TUNABLE(kGkLbAhead, 12.0);       // cm：B 站在球前方多远
+
+bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty) {
+    if (kGkLineBlock < 0.5) return false;
+    const TeamContext &ctx = wm.ctx;
+    const RobotState &r = wm.home[id];
+    const double bx = wm.ball.x, by = wm.ball.y, vx = wm.ball.vx, vy = wm.ball.vy;
+    const double ball_goal = ctx.dist_our_goal(bx);
+    const double danger = ball_danger_speed(wm);
+    double y_at_goal = 0.0;
+    // A：慢球朝门、进门点在门框内、球没越过门将、对方没贴球
+    if (danger > kGkLbMinSpeed && danger <= kGkLbMaxSpeed && ball_goal < kGkLbRange &&
+        ball_goal >= ctx.dist_our_goal(r.x) - 2.0 && opp_clear_dist(wm) > kGkLbFreeDist &&
+        predict_y_at_x(bx, by, vx, vy, ctx.our_goal_x(), y_at_goal) &&
+        y_at_goal >= goal_y_low() - 2.0 && y_at_goal <= goal_y_high() + 2.0) {
+        // 从 kGkLbDepth 往门线收，取第一个直线 y 仍在门将活动范围内的深度（斜线球贴门站）
+        double depth = std::max(3.0, std::min(kGkLbDepth, ball_goal - 8.0));
+        for (; depth > 3.0; depth -= 1.0) {
+            double y = 0.0;
+            if (predict_y_at_x(bx, by, vx, vy, ctx.our_goal_x() + ctx.attack_dir() * depth, y) &&
+                y >= kGkYLo && y <= kGkYHi) break;
+        }
+        tx = ctx.our_goal_x() + ctx.attack_dir() * depth;
+        if (!predict_y_at_x(bx, by, vx, vy, tx, ty)) ty = y_at_goal;
+        ty = clamp(ty, kGkYLo, kGkYHi);
+        clamp_goalie_area(ctx, tx, ty);
+        return true;
+    }
+    // B：球贴门线、沿 y 滚向门口（或已在门口前）
+    if (ball_goal < kGkLbLineBand && std::fabs(vy) > kGkLbRollSpeed &&
+        ((by - 90.0) * vy < 0.0 || std::fabs(by - 90.0) < 20.0)) {
+        // 门将中心与球同一 x（略深 1cm，站在球的门侧，不触发"球已越过门将"让开）
+        tx = ctx.our_goal_x() + ctx.attack_dir() * clamp(ball_goal - 1.0, 3.0, kGkLbLineBand);
+        ty = clamp(by + (vy > 0.0 ? 1.0 : -1.0) * kGkLbAhead, kGkYLo, kGkYHi);
+        clamp_goalie_area(ctx, tx, ty);
+        return true;
+    }
+    return false;
+}
+
 // gk_clear_direction 出球方向打分的 6 个旋钮（原函数内局部 const，提为 TUNABLE 便于调参）：
 TUNABLE(kClearAngleStep, 10.0);    // 扫候选角步长(度)
 TUNABLE(kClearSectorSigma, 30.0);  // 队友/对手方向的高斯衰减宽度(度)
@@ -386,6 +440,19 @@ bool gk_rule_ball_behind(WorldModel &wm, int id, const GkView &v) {
         return true;
     }
     motion::position(r, cx, cy, motion::TM_PASS);
+    return true;
+}
+
+// 对准球的直线提前堵（见 gk_line_block_point）。去目标的路线会擦到在门口前的球时
+//   （从场侧把球顶进门）不接，交给"球被甩到身后"/侧步让开。
+bool gk_rule_line_block(WorldModel &wm, int id, const GkView &v) {
+    double tx = 0.0, ty = 0.0;
+    if (!gk_line_block_point(wm, id, tx, ty)) return false;
+    RobotState &r = wm.home[id];
+    if (std::fabs(v.by - 90.0) < 20.0 && gk_path_hits_ball(r, v, tx, ty) &&
+        dist(r.x, r.y, tx, ty) > 4.0) return false;
+    double dd = std::hypot(tx - r.x, ty - r.y);
+    motion::position(r, tx, ty, (dd > 15.0) ? motion::TM_PASS : motion::TM_STOP);
     return true;
 }
 
@@ -592,7 +659,8 @@ const GkRule kGoalieRules[] = {
 void run_goalie(WorldModel &wm, int id) {
     GkView v = gk_view(wm, id);
     // 点球和"球被甩到身后"排在对方持球滞回更新之前：命中的帧不推进滞回计数。
-    if (gk_rule_penalty(wm, id, v) || gk_rule_ball_behind(wm, id, v)) return;
+    if (gk_rule_penalty(wm, id, v) || gk_rule_line_block(wm, id, v) ||
+        gk_rule_ball_behind(wm, id, v)) return;
     gk_update_opp_hold(wm, v);
     for (GkRule rule : kGoalieRules) {
         if (rule(wm, id, v)) return;
