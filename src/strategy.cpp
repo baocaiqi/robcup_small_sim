@@ -6,6 +6,7 @@
 #define TUNABLE_PREFIX "strategy."
 #include "simuro5/tunable.hpp"
 #include <cmath>
+#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后（诊断构建才生效）
 
 namespace simuro5 {
 

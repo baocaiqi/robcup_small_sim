@@ -122,6 +122,51 @@ struct SimState {
 
 #include "coop_observer.hpp"
 
+#ifdef SIMURO5_BRANCH_TRACE
+// ============================================================
+// 争抢犹豫追踪（sim_trace 诊断构建）：对方贴球(≤20cm)时，我方离球最近的非门将
+//   (8~60cm) 若"朝球方向的指令速度"< kHesSpeed → 记一次犹豫，归到下指令的源码行。
+// ============================================================
+#define SIMURO5_TRACE_NO_MACROS
+#include "simuro5/branch_trace.hpp"
+#include <map>
+#include <algorithm>
+static std::map<std::string, long> g_hes_by_line, g_all_by_line;
+static long g_hes_n = 0, g_con_n = 0;
+static void hes_sample(const WorldModel &wm, const SimState &s) {
+    const double kHesSpeed = 40.0;
+    double od = 1e9;
+    for (int j = 0; j < 5; ++j) od = std::min(od, std::hypot(s.yellow[j].x - s.bx, s.yellow[j].y - s.by));
+    if (od > 20.0) return;
+    int best = -1; double bd = 1e9;
+    for (int i = 1; i < 5; ++i) {
+        double d = std::hypot(wm.home[i].x - s.bx, wm.home[i].y - s.by);
+        if (d < bd) { bd = d; best = i; }
+    }
+    if (best < 0 || bd < 8.0 || bd > 60.0) return;
+    const RobotState &r = wm.home[best];
+    double a = std::atan2(s.by - r.y, s.bx - r.x) - r.rot * 3.14159265358979 / 180.0;
+    double v = 0.5 * (r.vl + r.vr) * std::cos(a);
+    const trace::Mark *m = trace::find(&r);
+    std::string key = "R" + std::to_string(wm.role[best]) + " ";
+    if (m && m->file) {
+        const char *f = std::strrchr(m->file, '\\'); if (!f) f = std::strrchr(m->file, '/');
+        key += std::string(f ? f + 1 : m->file) + ":" + std::to_string(m->line);
+    } else key += "(unmarked)";
+    ++g_con_n; ++g_all_by_line[key];
+    if (v < kHesSpeed) { ++g_hes_n; ++g_hes_by_line[key]; }
+}
+static void hes_report() {
+    printf("\n[犹豫追踪] 争抢帧 %ld，犹豫 %ld（%.1f%%）\n", g_con_n, g_hes_n, 100.0 * g_hes_n / std::max(1L, g_con_n));
+    std::vector<std::pair<long, std::string>> v;
+    for (auto &kv : g_all_by_line) v.push_back({g_hes_by_line[kv.first], kv.first});
+    std::sort(v.rbegin(), v.rend());
+    for (size_t i = 0; i < v.size() && i < 80; ++i)
+        printf("  %-28s 犹豫 %6ld / 争抢 %6ld  (%.0f%%)\n", v[i].second.c_str(), v[i].first,
+               g_all_by_line[v[i].second], 100.0 * v[i].first / std::max(1L, g_all_by_line[v[i].second]));
+}
+#endif
+
 static double deg2rad(double d) { return d * 3.14159265358979 / 180.0; }
 
 // ============================================================
@@ -553,7 +598,13 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         } else {
             fill_env(env_b, s, true);
             wm_b.update(&env_b, ctx_blue);
+#ifdef SIMURO5_BRANCH_TRACE
+            trace::reset();
+#endif
             strat_b.run(wm_b);
+#ifdef SIMURO5_BRANCH_TRACE
+            hes_sample(wm_b, s);
+#endif
             coop_sample(wm_b);
             for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
         }
@@ -830,5 +881,8 @@ int main(int argc, char **argv) {
            games, (double)(t_blue - t_yellow) / games, (double)t_blue / games, (double)t_yellow / games,
            t_poss / games, (double)t_shots / games, (double)t_ga / games, (double)t_fb / games, sec);
     if (g_coop) fclose(g_coop);
+#ifdef SIMURO5_BRANCH_TRACE
+    hes_report();
+#endif
     return 0;
 }

@@ -77,4 +77,13 @@ if(BUILD_TEST)
     target_compile_options(sim_bench PRIVATE /W3 /utf-8)
     set_property(TARGET sim_bench PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   endif()
+
+  # ---- 诊断构建：sim_bench + 决策分支追踪（include/simuro5/branch_trace.hpp）----
+  add_executable(sim_trace tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
+  target_include_directories(sim_trace PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_definitions(sim_trace PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_BRANCH_TRACE)
+  if(MSVC)
+    target_compile_options(sim_trace PRIVATE /W3 /utf-8)
+    set_property(TARGET sim_trace PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
 endif()

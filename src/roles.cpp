@@ -9,6 +9,7 @@
 #define TUNABLE_PREFIX "roles."
 #include "simuro5/tunable.hpp"
 #include <cmath>
+#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后（诊断构建才生效）
 
 namespace simuro5 {
 
@@ -233,7 +234,11 @@ constexpr double kGkKickThrough      = 30.0;   // 穿球目标：球前 cm（越
 constexpr double kGkBallBehindMargin = 6.0;    // 球比门将靠门超过此值 → 强制回门
 constexpr double kGkBallGoalSide     = 15.0;   // 强制回门：回到球的门侧 cm
 constexpr double kGkBallRetreatLat   = 30.0;   // 强制回门：绕球侧移 cm
-constexpr int    kGkOppHoldFrames    = 3;      // 对方持球滞回帧数（防视觉闪断一帧就冲出去）
+constexpr double kGkNoRoom           = 9.0;    // 强制回门：球离门线小于此值 → 门侧站不下车身，不绕
+constexpr double kGkPathClear        = 10.0;   // 强制回门：路线离球的最小净空（半对角 5.3 + 球半径 2.1 + 余量）
+constexpr int    kGkBehindHorizon    = 10;     // 强制回门：滚动球外推帧数
+constexpr double kGkBehindBackOff    = 10.0;   // 强制回门走不了时：停在球的场侧 cm
+constexpr int    kGkOppHoldFrames    = 3;     // 对方持球滞回帧数（防视觉闪断一帧就冲出去）
 
 // 门将每帧的感知量：所有规则读同一份，规则之间不再各算各的。
 struct GkView {
@@ -338,17 +343,43 @@ bool gk_rule_penalty(WorldModel &wm, int id, const GkView &) {
     return false;
 }
 
-// 球被甩到门将身后：继续前压/推球只会把球顶向自家门 → 绕球侧向回撤到球的门侧
+// 线段 (x0,y0)→(x1,y1) 到点 (px,py) 的最近距离
+double seg_point_dist(double x0, double y0, double x1, double y1, double px, double py) {
+    double dx = x1 - x0, dy = y1 - y0;
+    double len2 = dx * dx + dy * dy;
+    double t = (len2 < 1e-9) ? 0.0 : clamp(((px - x0) * dx + (py - y0) * dy) / len2, 0.0, 1.0);
+    return std::hypot(x0 + t * dx - px, y0 + t * dy - py);
+}
+
+// 回门路线是否会碰球：球按当前速度外推 kGkBehindHorizon 帧，逐点查到路线的净空
+bool gk_path_hits_ball(const RobotState &r, const GkView &v, double tx, double ty) {
+    for (int k = 0; k <= kGkBehindHorizon; k += 2) {
+        if (seg_point_dist(r.x, r.y, tx, ty, v.bx + v.vx * k, v.by + v.vy * k) < kGkPathClear)
+            return true;
+    }
+    return false;
+}
+
+// 球被甩到门将身后：绕到球的门侧。但门口没有门侧空间（球离门线 < kGkNoRoom）、
+//   或直线回门会擦到球（含滚动外推）时，从场侧直开门线就是把球推进自家门
+//   （2026-09-28 真机 3 个乌龙全是这样）→ 只在球的场侧横移让开，不碰球。
 bool gk_rule_ball_behind(WorldModel &wm, int id, const GkView &v) {
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
-    if (v.ball_goal < ctx.dist_our_goal(r.x) - kGkBallBehindMargin) {
-        double side = (r.y >= v.by) ? 1.0 : -1.0;               // 往自己那侧绕，少掉头
-        gk_goto(ctx, r, v.bx + v.gside * kGkBallGoalSide, v.by + side * kGkBallRetreatLat,
-                motion::TM_PASS);
+    if (!(v.ball_goal < ctx.dist_our_goal(r.x) - kGkBallBehindMargin)) return false;
+    double side = (r.y >= v.by) ? 1.0 : -1.0;                   // 往自己那侧绕，少掉头
+    double gx = v.bx + v.gside * kGkBallGoalSide;
+    double gy = v.by + side * kGkBallRetreatLat;
+    double cx = gx, cy = clamp(gy, 74.0, 106.0);
+    clamp_goalie_area(ctx, cx, cy);
+    if (v.ball_goal < kGkNoRoom || gk_path_hits_ball(r, v, cx, cy)) {
+        double tx = v.bx - v.gside * kGkBehindBackOff, ty = gy;  // 球的场侧，y 只夹罚球区
+        clamp_goalie_area(ctx, tx, ty);
+        motion::position(r, tx, ty, motion::TM_STOP);
         return true;
     }
-    return false;
+    motion::position(r, cx, cy, motion::TM_PASS);
+    return true;
 }
 
 // 死球期 / 球在角区：推球即犯规 → 只回门前站位，不触球
@@ -615,6 +646,17 @@ TUNABLE(kPrepAngTol, 13.1809);
 TUNABLE(kShootAlignTimeout, 54.7289);
 // 带球推进的机头对准容差（度）：比射门(10°)略松，但远紧于旧的 40°
 TUNABLE(kDribAngTol, 31.423);
+// 争抢态（第 81 轮，见 run_active）：对手离球 < kContestOppDist 且我离球 < kContestReach
+constexpr bool kContestEnabled = true;   // 回滚开关
+TUNABLE(kContestOppDist, 20.0);
+TUNABLE(kContestReach, 60.0);
+TUNABLE(kContestLead, 8.0);
+// 子开关（消融用，1=开）：不等接球人 / 球后直接推穿。
+// 曾试第三项"无球不去接球点"：200 局 scripted −2.4、yellow −1.1、self −1.4 → 已删。
+TUNABLE(kContestNoWait, 1.0);
+TUNABLE(kContestPush, 1.0);
+TUNABLE(kPassivePress, 1.0);   // PASSIVE 争抢时从球门侧上抢（run_passive 末尾）
+TUNABLE(kPassivePressDepth, 130.0);   // 深度扫 110/130/150/170/全场：130 为拐点（净胜 +4~5，单人滞留不增）
 TUNABLE(kActiveGaLimit, 8);
 TUNABLE(kActiveGaTotal, 18);  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
@@ -980,6 +1022,19 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
+    // 争抢态（第 81 轮）：对手已贴球、我在够得着的距离 → 一切"等"的动作让位于上抢：
+    //   不原地转正、不等接球人就位、不去队友的接球点。sim 分支追踪：争抢帧里 ACTIVE
+    //   72% 在犹豫，前三名正是这三类"等"（去接球点 / 原地转正 / 停车等接球人）。
+    double opp_ball = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        opp_ball = std::min(opp_ball, dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y));
+    // 我已明显先到（比对手近 kContestLead 以上）= 控球而非争抢，照常组织传球
+    const double my_ball = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+    const bool contested = kContestEnabled && !wm.in_penalty_exec &&
+                           opp_ball < kContestOppDist && my_ball < kContestReach &&
+                           my_ball > opp_ball - kContestLead;
+    if (contested && kContestNoWait > 0.5 && wm.coop_pass_task.active && !pass_receiver_ready(wm))
+        wm.coop_finish(CoopOutcome::OpponentFirst);
     // 角区救球（治"FreeBall 13 次/场"：球卡四角无人救 → 判争球）——
     // ⚠️ docs/06 第 49 轮修订：**只在球离角足够远时才救**，且避开"绕到球后"这个动作。
     //   旧版只判球距角 <22cm 就算"深角不救"，实测仍吃 5 次 "No pushing" 犯规
@@ -1128,7 +1183,10 @@ void run_active(WorldModel &wm, int id) {
             wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
             wm.coop_pass_task.kind = PassTaskKind::Coop; wm.coop_created();
         }
-        if (coop_pass && !pass_receiver_ready(wm)) { motion::stop(r); return; }
+        if (coop_pass && !pass_receiver_ready(wm)) {
+            if (!contested || kContestNoWait < 0.5) { motion::stop(r); return; }
+            wm.coop_finish(CoopOutcome::OpponentFirst);   // 争抢态：不停车等人，照原方向推出去
+        }
         double db = dist(r.x, r.y, bx, by);
         double te_head = angle_diff(sp.aim_rot, r.rot);
         // 人在球的"门侧后方"：球−人 在瞄准方向上的投影 > 0 ⇔ 往前推把球送向球门
@@ -1170,6 +1228,10 @@ void run_active(WorldModel &wm, int id) {
                 motion::position_aligned(r, px, py, sp.aim_rot, kPrepPosTol, kPrepAngTol);
                 return;
             }
+        } else if (contested && behind && kContestPush > 0.5) {
+            // 争抢态：已在球后就直接推穿，不原地转正、不绕准备点（转正的 1 秒里球已被抢走）
+            wm.shoot_align_frames = 0;
+            ready = true;
         } else if (behind && near) {
             // ①a 已在球后方且够得着 → **就地转正**（不后退、不丢球权）
             //   教训：先前要求"退到球后 20cm 准备点"才对准，插桩实测射门分支一场进
@@ -1226,6 +1288,17 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
+    // 普通传球只在球已在我脚下时才做：plan_pass 的目标是**队友的接球点**，
+    //   球不在脚下时开过去 = 丢下球去接自己的传球（第 81 轮 sim 追踪：争抢帧里 ACTIVE
+    //   最大的犹豫来源）。此时落到下面的追球。
+    double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+    // 找离球最近的对方防守者（含守门员）：决定带球开口侧 + 判断球权是否在我
+    double opp_d = 1e9, opp_y = 90.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
+        if (d < opp_d) { opp_d = d; opp_y = wm.opp[i].y; }
+    }
+    const bool own_ball = db < 15.0 && db < opp_d;
     PassPlan pp = plan_pass(wm, id);
     if (pp.viable && !coop_preferred) {
         if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
@@ -1237,7 +1310,10 @@ void run_active(WorldModel &wm, int id) {
         }
         if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
             auto &task = wm.coop_pass_task;
-            if (!pass_receiver_ready(wm)) { motion::stop(r); return; }
+            if (!pass_receiver_ready(wm)) {
+                if (!contested || kContestNoWait < 0.5) { motion::stop(r); return; }
+                wm.coop_finish(CoopOutcome::OpponentFirst);   // 争抢态：不停车等人
+            }
             double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
             if (length > 1e-6) {
                 task.push_dir_x = (task.rx - wm.ball.x) / length; task.push_dir_y = (task.ry - wm.ball.y) / length;
@@ -1250,15 +1326,7 @@ void run_active(WorldModel &wm, int id) {
         return;
     }
 
-    double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
-    // 找离球最近的对方防守者（含守门员）：决定带球开口侧 + 判断球权是否在我
-    double opp_d = 1e9, opp_y = 90.0;
-    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
-        if (d < opp_d) { opp_d = d; opp_y = wm.opp[i].y; }
-    }
-
-    if (db < 15.0 && db < opp_d) {
+    if (own_ball) {
         // —— 围困检测（治"带球有进无退"）——
         // 球周围 25cm 内 ≥2 个 demo，或最近 demo <12cm → 不硬带：
         //   优先回传/横传（此时 assist 已在禁区外沿近端接应），无传球选择则带球离场。
@@ -1395,6 +1463,7 @@ void run_passive(WorldModel &wm, int id) {
             //   封 demo 推射角，绝不碰球不拖动（demo 推球用身体挡，不主动清）。
             //   ⚠️ 此规则只在**场侧**生效（球门侧已被上面清道夫接管，见第 74 轮）。
             if (wm.ctx.dist_our_goal(wm.ball.x) < 15.0 && dbp < 14.0) {
+                TRACE_MARK(wm.home[id]);
                 wm.home[id].vl = 0.0;
                 wm.home[id].vr = 0.0;
                 return;
@@ -1469,6 +1538,26 @@ void run_passive(WorldModel &wm, int id) {
             // 对方门区禁入（docs/13 方案 A）：盯人站位不得进入对方门区（防 2+ 人违规判点球）
             clamp_out_opp_goal_area(wm.ctx, mx, my);
             motion::position(wm.home[id], mx, my);
+            return;
+        }
+    }
+    // 争抢上抢（第 81 轮）：威胁分 < 0.6 时原本回防区点站着；sim 分支追踪显示这是全队
+    //   最大的犹豫源——对手贴球、PASSIVE 是离球最近的己方场上队员，却在防区点上等。
+    //   只在球门侧、球不在罚球区时出手（保留第 73 轮"只从门侧贴球"防乌龙护栏）。
+    //   限离己门 kPassivePressDepth 内：放到全场时 sim 对方门区 2+ 人 761→1176 帧/场、
+    //   单人滞留 23→30 次/场（真机罚点球源）。
+    if (kPassivePress > 0.5 && !in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y) &&
+        wm.ctx.dist_our_goal(wm.ball.x) < kPassivePressDepth) {
+        const RobotState &me = wm.home[id];
+        double my_d = dist(me.x, me.y, wm.ball.x, wm.ball.y), opp_d = 1e9, mate_d = 1e9;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            opp_d = std::min(opp_d, dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y));
+            if (i != id && wm.role[i] != ROLE_GOALIE)
+                mate_d = std::min(mate_d, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
+        }
+        if (opp_d < kContestOppDist && my_d < kContestReach && my_d < mate_d &&
+            wm.ctx.dist_our_goal(me.x) < wm.ctx.dist_our_goal(wm.ball.x)) {
+            motion::chase_ball(wm.home[id], chase_target(wm));
             return;
         }
     }
@@ -1550,12 +1639,12 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
 
     // 球在对方门区附近：门口交给 ACTIVE，自己在门区外沿本道等二点
     if (near_opp_box(ctx, bx, by)) {
-        swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);
+        swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);  TRACE_MARK(wm.home[id]);
         return true;
     }
     // 球不在本道：弱侧跟进（落后球一段、贴本道）
     if ((by - 90.0) * lane < -kLaneShare) {
-        swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);
+        swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);  TRACE_MARK(wm.home[id]);
         return true;
     }
 
@@ -1574,24 +1663,24 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
             if (i == id || wm.role[i] == ROLE_GOALIE) continue;
             if (!holds_ball(wm, i, ux, uy)) continue;
             swarm_move(wm, id, bx - ux * kEscortBack + nx * side * kEscortSide,
-                       by - uy * kEscortBack + ny * side * kEscortSide);
+                       by - uy * kEscortBack + ny * side * kEscortSide);  TRACE_MARK(wm.home[id]);
             return true;
         }
     }
 
     if (behind > 0.0 && std::fabs(side_off) < kHerdLatTol) {
         // 对准了：沿推进方向推穿
-        swarm_move(wm, id, bx + ux * kHerdThrough, by + uy * kHerdThrough);
+        swarm_move(wm, id, bx + ux * kHerdThrough, by + uy * kHerdThrough);  TRACE_MARK(wm.home[id]);
     } else if (behind > -3.0) {
         // 在球侧后方：落到球后（偏得越多退得越远，免得斜插时蹭到球）
         double back = kHerdBack + 0.5 * std::fabs(side_off);
         double px = bx - ux * back, py = by - uy * back;
         if (!prep_point_ok(px, py)) return false;
-        swarm_move(wm, id, px, py);
+        swarm_move(wm, id, px, py);  TRACE_MARK(wm.home[id]);
     } else {
         // 人在球前面：先横绕到球侧，绝不直线穿过球
         swarm_move(wm, id, bx - ux * 4.0 + nx * side * kHerdSide,
-                   by - uy * 4.0 + ny * side * kHerdSide);
+                   by - uy * 4.0 + ny * side * kHerdSide);  TRACE_MARK(wm.home[id]);
     }
     return true;
 }
