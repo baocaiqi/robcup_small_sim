@@ -36,6 +36,10 @@ TUNABLE(kThreatHoldFrames, 10);
 //   30 帧约等于 demo 就地反抢到位所需时间——窗口内把球传/带过半场即成功。
 TUNABLE(kCounterWindowFrames, 30);
 
+// 第 91 轮：官方式分区防守（见 roles.cpp run_zone）。活球期 PASSIVE/ASSIST/MIDFIELD 一律 run_zone，
+//   不再走逼抢者/清道夫/回防等分支；死球摆位期与点球执行期照旧。=0 回滚到第 90 轮。
+TUNABLE(kZoneMode, 1.0);
+
 // 罚球点几何（真机 rlg 实测，2026-09-12 两场共 14 次摆球）
 TUNABLE(kPenaltySpotDist, 39.4);  // 罚球点到门线距离 cm
 TUNABLE(kPenaltySpotTol, 1.5);  // 容差 cm
@@ -116,6 +120,9 @@ void Strategy::run(WorldModel &wm) {
                 motion::position(wm.home[i], ogx - ad * 70.0, clamp(wm.home[i].y, 72.5, 107.5));
                 continue;   // 冷却期禁令：跳过角色函数
             }
+        }
+        if (kZoneMode > 0.5 && wm.live_play && !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
+            run_zone(wm, i); continue;
         }
         // 第 89 轮：逼抢者也要守门区冷却禁令（原先排在冷却检查之前，被撤出后又冲回门区）
         if (i == wm.presser_id) { run_press(wm, i); continue; }   // 前场散球逼抢者 override 原角色

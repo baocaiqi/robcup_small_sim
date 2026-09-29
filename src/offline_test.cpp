@@ -3574,6 +3574,43 @@ static int test_contest_charge() {
 
 // 第 90 轮：近球不减速/不原地转正/不等对准（官方式）。在球后、朝向偏 60°、无争抢：
 //   旧（kNoAlignWait=0）原地转正（前进分量≈0），新（=1）直接前冲穿球。
+// 第 91 轮：官方式分区。① 中卫在球后 → 直冲穿球；② 己方门前站在球的进攻侧 → 侧绕不穿球；
+//   ③ 上翼（ASSIST）球在下路 → 站 (球fx-8, y=120)。期望动作与直接调 motion 同目标逐位一致。
+static int test_zone_mode() {
+    auto base = [](WorldModel &wm, double bx, double by) {
+        TeamContext ctx{true};               // 蓝队：己方门 x=220，攻向 -x
+        wm = WorldModel(); wm.ctx = ctx; wm.ball.valid = true; wm.ball_pred.valid = true;
+        wm.ball.x = wm.ball_pred.x = bx; wm.ball.y = wm.ball_pred.y = by;
+        for (int i = 0; i < 5; ++i) { wm.home[i].x = 110; wm.home[i].y = 10 + i * 5; wm.opp[i].x = 20; wm.opp[i].y = 20 + i * 30; }
+        wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE; wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    };
+    auto same = [](const RobotState &a, const RobotState &b) { return std::fabs(a.vl - b.vl) < 1e-6 && std::fabs(a.vr - b.vr) < 1e-6; };
+    WorldModel wm;
+    // ① 球 (150,90)，中卫在球后 (170,90) 朝 -x → 目标 = 球前 20cm (130,90)
+    base(wm, 150, 90); wm.home[4].x = 170; wm.home[4].y = 90; wm.home[4].rot = 180;
+    RobotState e = wm.home[4]; motion::position(e, 130, 90, motion::TM_PASS);
+    run_zone(wm, 4);
+    if (!same(wm.home[4], e) || wm.home[4].vl < 50) { printf("FAIL: 中卫应直冲穿球 vl=%.1f vr=%.1f\n", wm.home[4].vl, wm.home[4].vr); return 1; }
+    // ② 球 (180,90) 离己门 40cm，中卫在 (160,95)（球的进攻侧）→ 侧绕 (185,112)，不往自家门撞
+    base(wm, 180, 90); wm.home[4].x = 160; wm.home[4].y = 95; wm.home[4].rot = 0;
+    e = wm.home[4]; motion::position(e, 185, 112, motion::TM_PASS);
+    run_zone(wm, 4);
+    if (!same(wm.home[4], e)) { printf("FAIL: 己方门前站错侧应侧绕\n"); return 1; }
+    // ③ 球 (150,40)：上翼 ASSIST 不追，站 fx=70-8=62 → (158,120)
+    base(wm, 150, 40); wm.home[2].x = 150; wm.home[2].y = 150; wm.home[2].rot = 0;
+    e = wm.home[2]; motion::position(e, 158, 120);
+    run_zone(wm, 2);
+    if (!same(wm.home[2], e)) { printf("FAIL: 上翼应站 (158,120)\n"); return 1; }
+    // ④ 己方禁区纪律：球 (200,60)，下翼 MIDFIELD 官方站位 (20,120)→镜像 y=60 落在大禁区；
+    //   它不是离球最近的分区球员（中卫在 (195,65)）→ 夹到 fx=45 即 x=175
+    base(wm, 200, 60); wm.home[4].x = 195; wm.home[4].y = 65; wm.home[3].x = 150; wm.home[3].y = 100; wm.home[3].rot = 0;
+    e = wm.home[3]; motion::position(e, 175, 60);
+    run_zone(wm, 3);
+    if (!same(wm.home[3], e)) { printf("FAIL: 非最近者不许进己方大禁区\n"); return 1; }
+    printf("zone mode: OK (中卫直冲/门前侧绕/边翼站位/己方禁区纪律)\n");
+    return 0;
+}
+
 static int test_no_align_wait() {
     auto run = [](double sw, double &fwd, double &turn) {
         ::simuro5::set_param("roles.kNoAlignWait", sw);
@@ -3742,6 +3779,7 @@ int main(int argc, char **argv) {
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
     rc |= test_no_align_wait();
+    rc |= test_zone_mode();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

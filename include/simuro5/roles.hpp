@@ -84,5 +84,8 @@ void run_midfield(WorldModel &wm, int id);
 // 前场散球逼抢（docs/06 第 83 轮）：strategy 选出的逼抢者跑过去抢散球
 void run_press(WorldModel &wm, int id);
 
+// 第 91 轮：官方式分区（取代 PASSIVE/ASSIST/MIDFIELD 分支；strategy.kZoneMode 开关）
+void run_zone(WorldModel &wm, int id);
+
 }  // namespace simuro5
 #endif

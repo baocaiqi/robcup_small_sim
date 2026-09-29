@@ -1953,4 +1953,103 @@ void run_press(WorldModel &wm, int id) {
     move_avoiding(wm, r, id, chased.x, chased.y, true);
 }
 
+
+// ============================================================
+// 第 91 轮：官方式分区（用户："球到哪就追到哪，不需要另一套防守策略来回切"）
+//   官方 demo 没有防守模式：4 个场上球员各管一片，球进自己的片就直冲球，不在就站随球平移的点。
+//   进攻=防守=同一个动作 → 没有模式切换、没有犹豫。本函数取代 PASSIVE/ASSIST/MIDFIELD 的全部分支
+//   （回防/清道夫/二抢一/护门点/反弹位/助攻点/逼抢者）；ACTIVE 仍走 run_active（= 官方中锋，永远追球）。
+//   坐标：fx = 距己方门线，y 绝对值（上下两翼对称，无需镜像）。
+//   保留：接球任务、对方门区纪律（夹 85cm 线 + 绕门区）、角区不推球、己方门前只准往外冲（防乌龙）。
+//   回滚：strategy.kZoneMode=0。
+// ============================================================
+
+// 己方禁区纪律（裁判 Judge_PENALTY_KICK：球在本方 80cm 内时，GK 外 小禁区 >1 人 / 1 人满 20 帧、
+//   或 小+大禁区 >3 人 / 3 人满 20 帧 ⇒ 判对方点球）。官方分区站位 (20,120)/(25,by) 正落在大禁区，
+//   magic_rob 未加此纪律时 9.1 个点球/局。规则：分区球员一律不进小禁区；大禁区只放离球最近的一个分区球员
+//   ⇒ 禁区内至多 主攻+1 = 2 人。
+static void own_box_clamp(const WorldModel &wm, int id, double &tx, double &ty) {
+    const TeamContext &ctx = wm.ctx;
+    double fx = ctx.dist_our_goal(tx);
+    int best = -1; double bd = 1e18;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+        if (wm.role[i] == ROLE_ACTIVE || wm.role[i] == ROLE_GOALIE) continue;
+        double d = dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y);
+        if (d < bd) { bd = d; best = i; }
+    }
+    if (fx < 17.0 && ty > 62.0 && ty < 118.0) fx = 17.0;
+    if (id != best) {
+        const RobotState &r = wm.home[id];
+        // 已在大禁区（含 10cm 余量）→ 先沿 x 直线退出，不横穿禁区去新站位点
+        if (ctx.dist_our_goal(r.x) < 45.0 && r.y > 40.0 && r.y < 140.0) { fx = 48.0; ty = r.y; }
+        else if (fx < 45.0 && ty > 40.0 && ty < 140.0) fx = 45.0;
+    }
+    tx = ctx.our_goal_x() + ctx.attack_dir() * fx;
+}
+
+void run_zone(WorldModel &wm, int id) {
+    if (run_pass_receiver(wm, id)) return;
+    const TeamContext &ctx = wm.ctx;
+    RobotState &r = wm.home[id];
+    const double ad = ctx.attack_dir();
+    const double bfx = ctx.dist_our_goal(wm.ball.x), by = wm.ball.y;
+    auto X = [&](double fx) { return ctx.our_goal_x() + ad * fx; };   // 距己方门线 → 绝对 x
+
+    // —— 分区：按官方 LeftWing / RightWing / CenterDefender 原样 ——
+    bool chase = false;
+    double sfx = 0.0, sy = 90.0;                                    // 不追时的站位点
+    if (wm.role[id] == ROLE_ASSIST || wm.role[id] == ROLE_MIDFIELD) {
+        const bool up = (wm.role[id] == ROLE_ASSIST);               // ASSIST 管上翼、MIDFIELD 管下翼
+        const double yb = up ? by : 180.0 - by;                     // 统一成"上翼"口径
+        double ty = 0.0;
+        if (yb < 45.0)         { sfx = bfx - 8.0; ty = 120.0; }
+        else if (yb > 135.0)   chase = true;
+        else if (bfx < 25.0)   { sfx = 20.0; ty = (yb < 80.0) ? 150.0 : 120.0; }
+        else if (yb > 80.0)    chase = true;
+        else                   { sfx = bfx - 20.0; ty = 140.0; }
+        sy = up ? ty : 180.0 - ty;
+    } else {                                                        // PASSIVE = 中卫
+        if (bfx > 130.0)                 { sfx = 110.0; sy = 90.0; }
+        else if (by > 130.0 || by < 50.0) { sfx = std::max(bfx - 45.0, 25.0); sy = 90.0; }
+        else if (bfx < 25.0)             { sfx = 25.0; sy = by; }
+        else                             chase = true;
+    }
+
+    if (!chase) {
+        double tx = X(clamp(sfx, 15.0, 205.0)), ty = clamp(sy, 8.0, 172.0);
+        if (ctx.dist_opp_goal(tx) < 100.0 && std::fabs(ty - 90.0) < 45.0) tx = ctx.opp_goal_x() - ad * 85.0;
+        own_box_clamp(wm, id, tx, ty);
+        opp_box_detour(ctx, r.x, r.y, tx, ty);
+        motion::position(r, tx, ty);
+        return;
+    }
+
+    // —— 追球：目标就是球，穿球不减速；只加两条官方没有的守卫 ——
+    if (in_no_push_zone(wm.ball.x, wm.ball.y)) { hold_out_of_corner(wm, r); return; }
+    BallState c = chase_target(wm);
+    // 对方门前锥形区：非主攻不进，夹到门区外沿等球弹出（同 run_press）
+    if (ctx.dist_opp_goal(c.x) < 100.0 && std::fabs(c.y - 90.0) < 45.0) {
+        double tx = ctx.opp_goal_x() - ad * 85.0, ty = clamp(c.y, 72.5, 107.5);
+        opp_box_detour(ctx, r.x, r.y, tx, ty);
+        motion::position(r, tx, ty, motion::TM_PASS);
+        return;
+    }
+    const double dx = c.x - r.x, dy = c.y - r.y, d = std::hypot(dx, dy);
+    const double fwd = d > 1e-6 ? dx * ad / d : 1.0;                // 人→球方向在进攻方向上的分量
+    const double need = (ctx.dist_our_goal(c.x) < kChargeOwnGuard) ? kChargeMinFwdOwn : kChargeMinFwd;
+    if (fwd >= need) {
+        double tx = c.x + (d > 1e-6 ? dx / d : ad) * kChargeThrough, ty = c.y + (d > 1e-6 ? dy / d : 0.0) * kChargeThrough;
+        own_box_clamp(wm, id, tx, ty);
+        opp_box_detour(ctx, r.x, r.y, tx, ty);
+        motion::position(r, tx, ty, motion::TM_PASS);
+        return;
+    }
+    // 站在球的进攻侧（撞过去会把球往自家门送）→ 从球侧绕到球后，绝不穿球
+    const double side = (r.y >= c.y) ? 1.0 : -1.0;
+    double tx = c.x - ad * 20.0, ty = c.y;
+    if (dist(r.x, r.y, c.x, c.y) < 25.0 || (r.x - c.x) * ad > 0.0) { tx = c.x - ad * 5.0; ty = c.y + side * 22.0; }
+    own_box_clamp(wm, id, tx, ty);
+    motion::position(r, tx, ty, motion::TM_PASS);
+}
+
 }  // namespace simuro5
