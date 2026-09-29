@@ -38,7 +38,7 @@ TUNABLE(kCounterWindowFrames, 30);
 
 // 第 91 轮：官方式分区防守（见 roles.cpp run_zone）。活球期 PASSIVE/ASSIST/MIDFIELD 一律 run_zone，
 //   不再走逼抢者/清道夫/回防等分支；死球摆位期与点球执行期照旧。=0 回滚到第 90 轮。
-TUNABLE(kZoneMode, 1.0);
+TUNABLE(kZoneMode, 0.0);  // 2026-09-30 用户指令关闭，回到第 90 轮行为（第 93 轮）
 
 // 罚球点几何（真机 rlg 实测，2026-09-12 两场共 14 次摆球）
 TUNABLE(kPenaltySpotDist, 39.4);  // 罚球点到门线距离 cm
