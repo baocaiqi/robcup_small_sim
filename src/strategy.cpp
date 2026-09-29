@@ -100,7 +100,6 @@ void Strategy::run(WorldModel &wm) {
     //    原地抖振卡在门区（实测蓝1 滞留 45 帧的根因）。
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
-        if (i == wm.presser_id) { run_press(wm, i); continue; }   // 前场散球逼抢者 override 原角色
         if (wm.ga_cooldown[i] > 0) {
             --wm.ga_cooldown[i];
             bool in_ga = in_opp_goal_area(wm.ctx, wm.home[i].x, wm.home[i].y);
@@ -118,6 +117,8 @@ void Strategy::run(WorldModel &wm) {
                 continue;   // 冷却期禁令：跳过角色函数
             }
         }
+        // 第 89 轮：逼抢者也要守门区冷却禁令（原先排在冷却检查之前，被撤出后又冲回门区）
+        if (i == wm.presser_id) { run_press(wm, i); continue; }   // 前场散球逼抢者 override 原角色
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
             case ROLE_PASSIVE:  run_passive(wm, i); break;
@@ -142,7 +143,10 @@ void Strategy::run(WorldModel &wm) {
             bool ball_in_ga = in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y);
             bool shooting_work = ball_in_ga &&
                 dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
-            if (!shooting_work && ++wm.ga_overstay[i] > 15) {
+            // 第 89 轮：非主攻没有进对方门区的理由 → 一进就撤（真机 09-29：ASSIST/MID 滞留 40~94 帧）；
+            //   主攻保留 15 帧（追球穿区/门前补位）。
+            const int limit = (wm.role[i] == ROLE_ACTIVE) ? 15 : 0;
+            if (!shooting_work && ++wm.ga_overstay[i] > limit) {
                 if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
                     wm.coop_finish(CoopOutcome::GoalDiscipline);
                 if (wm.coop_ball_control.active && (i == wm.active_id || i == wm.coop_ball_control.receiver_id))

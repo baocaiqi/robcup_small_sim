@@ -3547,6 +3547,22 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 第 89 轮：非主攻进对方门区当帧就撤（真机 09-29 帧 4544：MID 在 (23,63) 滞留 26 帧，球在对角 (5,154)）
+static int test_opp_box_instant_exit() {
+    TeamContext ctx{true};               // 蓝队：对方门 x=0
+    WorldModel wm; wm.ctx = ctx; wm.ball.valid = true;
+    wm.ball.x = 5; wm.ball.y = 154;
+    const double hx[5] = {211, 20, 54, 23, 72}, hy[5] = {103, 100, 153, 63, 113};
+    const double ox[5] = {2, 8, 5, 33, 47}, oy[5] = {106, 132, 58, 121, 101};
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = hx[i]; wm.home[i].y = hy[i]; wm.opp[i].x = ox[i]; wm.opp[i].y = oy[i]; }
+    Strategy strat;
+    strat.run(wm);
+    if (wm.ga_cooldown[3] <= 0) { printf("FAIL: MID 在对方门区应当帧撤出(cooldown=%d)\n", wm.ga_cooldown[3]); return 1; }
+    if (wm.ga_cooldown[1] != 0) { printf("FAIL: ACTIVE 在对方门区应保留 15 帧宽限\n"); return 1; }
+    printf("opp box instant exit: OK (非主攻进对方门区当帧撤出，主攻保留宽限)\n");
+    return 0;
+}
+
 // 第 88 轮：活球判定。真机进行中 gameState 停在重启类型不回 PlayOn（黑匣子 09-28 三场 gs∈{1,2,3,5}，0 帧 PlayOn）
 static int test_live_play() {
     WorldModel wm; Environment e; TeamContext ctx{true};
@@ -3676,6 +3692,7 @@ int main(int argc, char **argv) {
     rc |= test_goalie_line_cover();
     rc |= test_goalie_line_block();
     rc |= test_live_play();
+    rc |= test_opp_box_instant_exit();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

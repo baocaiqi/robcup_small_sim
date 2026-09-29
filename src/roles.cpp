@@ -1652,6 +1652,28 @@ bool near_opp_box(const TeamContext &ctx, double x, double y) {
            std::fabs(y - 90.0) < 27.5 + kOppBoxMargin;
 }
 
+// 第 89 轮：去目标的**路线**也不许穿对方门区（原先只夹目标点）。
+//   真机 09-29 黑匣子：弱侧跟进目标在门区侧后方（如 (27,48)），ASSIST/MID 从门前斜插过去，
+//   整条线穿过门区、被对方门将/后卫卡在里面 40~94 帧。
+//   人在（外扩）门区内 → 先沿 x 直线退出到前沿外；路线穿门区 → 先去门区前沿角点
+//   （人在门区侧面时取自己这侧的角，否则取目标那侧的角），逐帧重算。
+TUNABLE(kOppBoxDetourPad, 8.0);   // 绕行角点离外扩门区的余量（cm）
+void opp_box_detour(const TeamContext &ctx, double rx, double ry, double &tx, double &ty) {
+    const double depth = 50.0 + kOppBoxMargin, half = 27.5 + kOppBoxMargin;
+    const double front_x = ctx.opp_goal_x() - ctx.attack_dir() * (depth + kOppBoxDetourPad);
+    if (near_opp_box(ctx, rx, ry)) { tx = front_x; ty = ry; return; }
+    bool cross = false;
+    for (int k = 1; k <= 20 && !cross; ++k) {
+        double s = k / 20.0;
+        cross = near_opp_box(ctx, rx + (tx - rx) * s, ry + (ty - ry) * s);
+    }
+    if (!cross) return;
+    const bool beside = ctx.dist_opp_goal(rx) < depth;   // 人在门区侧面（没到前沿外）
+    const double side = ((beside ? ry : ty) >= 90.0) ? 1.0 : -1.0;
+    tx = front_x;
+    ty = 90.0 + side * (half + kOppBoxDetourPad);
+}
+
 // 推进方向（单位向量）：射门方案（plan_shoot 已含直线/借墙择优）→ 借墙推进 → 门心
 void herd_direction(const WorldModel &wm, int id, double &ux, double &uy) {
     ShootPlan sp = plan_shoot(wm, id);
@@ -1678,6 +1700,7 @@ void swarm_move(WorldModel &wm, int id, double tx, double ty) {
     ty = clamp(ty, 4.0, TeamContext::FIELD_WIDTH - 4.0);
     if (near_opp_box(ctx, tx, ty))
         tx = ctx.opp_goal_x() - ctx.attack_dir() * (58.0 + kOppBoxMargin);
+    opp_box_detour(ctx, wm.home[id].x, wm.home[id].y, tx, ty);
     motion::position(wm.home[id], tx, ty, motion::TM_PASS);
 }
 
@@ -1883,6 +1906,8 @@ void run_press(WorldModel &wm, int id) {
         chased.x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * 85.0;
         chased.y = clamp(chased.y, 72.5, 107.5);
     }
+    if (wm.role[id] != ROLE_ACTIVE)   // 第 89 轮：非主攻逼抢者的路线不穿对方门区
+        opp_box_detour(wm.ctx, r.x, r.y, chased.x, chased.y);
     move_avoiding(wm, r, id, chased.x, chased.y, true);
 }
 
