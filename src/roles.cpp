@@ -1685,7 +1685,7 @@ void swarm_move(WorldModel &wm, int id, double tx, double ty) {
 bool run_swarm(WorldModel &wm, int id, double lane) {
     if (!kSwarmEnabled) return false;
     const TeamContext &ctx = wm.ctx;
-    if (wm.game_state != PM_PlayOn || wm.in_penalty_exec) return false;
+    if (!wm.live_play || wm.in_penalty_exec) return false;   // 第 88 轮：认活球（真机 gameState 不回 PlayOn）
     if (wm.coop_pass_task.active &&
         (id == wm.coop_pass_task.passer_id || id == wm.coop_pass_task.receiver_id)) return false;
     if (wm.coop_ball_control.active && id == wm.coop_ball_control.receiver_id) return false;

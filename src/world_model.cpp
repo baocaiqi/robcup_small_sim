@@ -69,6 +69,19 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
         ball.vy = (std::fabs(bvy) > kMaxBallVel) ? 0.0 : bvy;
     }
     ball.valid = true;
+    // 活球判定（第 88 轮，见 world_model.hpp live_play）：球离开重启摆放点 kLiveMoveDist 即算开球。
+    {
+        const double kLiveMoveDist = 6.0;
+        const bool jump = std::fabs(ball.x - ball_last.x) > kMaxBallVel ||
+                          std::fabs(ball.y - ball_last.y) > kMaxBallVel;
+        if (game_state == PM_PlayOn) {
+            live_play = true; restart_armed = false;
+        } else if (!restart_armed || jump || game_state != game_state_last) {
+            restart_armed = true; restart_x = ball.x; restart_y = ball.y; live_play = false;
+        } else if (!live_play && std::hypot(ball.x - restart_x, ball.y - restart_y) > kLiveMoveDist) {
+            live_play = true;
+        }
+    }
     ball_pred.x = env->predictedBall.pos.x; ball_pred.y = env->predictedBall.pos.y;
     ball_pred.valid = true;
 

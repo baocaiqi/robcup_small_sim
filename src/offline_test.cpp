@@ -510,6 +510,7 @@ static int test_roles_spread() {
     wm.ctx = ctx;
     wm.threat_level = 0.1;               // <=0.3 走进攻分支
     wm.game_state = PM_PlaceKick_Blue;   // 死球期：第 79 轮分道压迫不接管，这里只测站位微调
+    wm.live_play = false;                // 第 88 轮：压迫闸门认 live_play
 
     // 把无关对手放到远处（离站位点 > 威胁半径 30cm），避免干扰最近敌人判断
     auto scatter = [&]() {
@@ -3546,6 +3547,27 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 第 88 轮：活球判定。真机进行中 gameState 停在重启类型不回 PlayOn（黑匣子 09-28 三场 gs∈{1,2,3,5}，0 帧 PlayOn）
+static int test_live_play() {
+    WorldModel wm; Environment e; TeamContext ctx{true};
+    auto step = [&](double bx, double by, int gs) {
+        Environment prev = e; init_env(e, bx, by); e.gameState = gs;
+        e.lastBall.pos = prev.currentBall.pos;
+        wm.update(&e, ctx);
+        return wm.live_play;
+    };
+    init_env(e, 110, 90);
+    if (step(110, 90, PM_FreeBall_LeftBot)) { printf("FAIL: 重启摆球首帧不应算活球\n"); return 1; }
+    if (step(112, 90, PM_FreeBall_LeftBot)) { printf("FAIL: 球只动 2cm 不应算活球\n"); return 1; }
+    if (!step(118, 91, PM_FreeBall_LeftBot)) { printf("FAIL: 开球后 gameState 不回 PlayOn 也应算活球\n"); return 1; }
+    if (!step(140, 70, PM_FreeBall_LeftBot)) { printf("FAIL: 比赛进行中应保持活球\n"); return 1; }
+    if (step(55, 30, PM_FreeBall_LeftBot)) { printf("FAIL: 球位跳变(重新摆球)应回到死球\n"); return 1; }
+    if (step(55, 30, PM_PlaceKick_Blue)) { printf("FAIL: gameState 变化应回到死球\n"); return 1; }
+    if (!step(55, 30, PM_PlayOn)) { printf("FAIL: PlayOn 必须算活球\n"); return 1; }
+    printf("live play: OK (真机 gameState 不回 PlayOn 时按球离开摆放点判活球)\n");
+    return 0;
+}
+
 // 第 87 轮：对准球的直线提前堵（场景取自 09-28 真机黑匣子）
 static int test_goalie_line_block() {
     WorldModel wm;
@@ -3653,6 +3675,7 @@ int main(int argc, char **argv) {
     rc |= test_presser();
     rc |= test_goalie_line_cover();
     rc |= test_goalie_line_block();
+    rc |= test_live_play();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();

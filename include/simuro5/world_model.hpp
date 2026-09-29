@@ -100,6 +100,12 @@ struct WorldModel {
     Bounds goal;             // 球门边界(平台给)
     int game_state = 0;      // PlayMode
     int game_state_last = 0; // 上一帧 PlayMode（点球/定位球执行期识别：PenaltyKick→PlayOn 过渡）
+    // 活球判定（第 88 轮）：真机比赛进行中 gameState 一直停在上次重启的类型（1/2/3/5…），
+    //   从不回 PlayOn —— 只认 game_state==PM_PlayOn 的功能在真机上永远不触发。
+    //   live_play = PlayOn，或自上次重启（gameState 变化/球位跳变）后球已离开摆放点。
+    bool live_play = true;     // 默认与 game_state=0(PlayOn) 一致；update() 每帧重算
+    bool restart_armed = false;
+    double restart_x = 0.0, restart_y = 0.0;
     long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
     int whos_disagree = 0;   // 平台球权与自算不一致的累计帧数（标定/回归用）
     // 我方主罚点球执行中（strategy.cpp 每帧维护）：球静止在罚球点、我方必须去踢。

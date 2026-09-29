@@ -302,7 +302,7 @@ void Strategy::update_presser(WorldModel &wm) {
 
     if (kPressEnabled <= 0.0) return;
     if (!wm.ball.valid) return;
-    if (wm.game_state != PM_PlayOn) return;   // 死球期有专门逻辑，别抢
+    if (!wm.live_play) return;   // 死球期有专门逻辑，别抢（第 88 轮：真机 gameState 不回 PlayOn，改认活球）
     if (wm.we_have_ball) return;              // 球已在我方脚下，不「抢」
 
     const TeamContext &ctx = wm.ctx;
