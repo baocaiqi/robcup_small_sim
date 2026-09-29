@@ -26,6 +26,12 @@ constexpr double kGkBlockYLo = 78.0, kGkBlockYHi = 102.0;
 //   ⚠️ 与 plan_route 的 margin（默认 0.5）是绑定关系：路径允许侵入本膨胀圈最多 margin，
 //   即实际净空 ∈ [3.5, 4.0]cm。要调小本值必须同时调小 margin，否则会真撞（见 route.hpp 契约）。
 TUNABLE(kRouteInflate, 10.0);
+// 第 90 轮（用户："近球减速、停稳、对准角度等待……直接精简，像官方一样"）：
+//   官方 demo 近球不减速（sigmoid 速度律到接触前都 ≈70）、不原地转正、不等对准，目标就是球。
+//   =1：主攻追球去掉 10cm 线性减速；射门/带球只要在球后就直接穿球推，不原地转正、不超时死等；
+//   不在球后则 TM_PASS 赶去球后点（不做到点对准）。罚点球执行、防过冲反推、门区纪律照旧。
+//   =0 回滚到第 89 轮行为。
+TUNABLE(kNoAlignWait, 1.0);
 
 // 避障移动：从 (r.x,r.y) 向 (tx,ty)，对方 5 机器人作圆盘障碍。
 //   直线通 → 直线（最短即最优）；直线被挡 → 可见图+Dijkstra 绕行；
@@ -46,7 +52,7 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
     } else {
         motion::position(r, tx, ty, motion::TM_PASS);
     }
-    if (decel) {
+    if (decel && kNoAlignWait < 0.5) {
         double dg = dist(r.x, r.y, tx, ty);
         if (dg < 10.0) { r.vl *= dg / 10.0; r.vr *= dg / 10.0; }   // 同 chase_ball 防冲
     }
@@ -715,6 +721,15 @@ TUNABLE(kContestLead, 8.0);
 // 曾试第三项"无球不去接球点"：200 局 scripted −2.4、yellow −1.1、self −1.4 → 已删。
 TUNABLE(kContestNoWait, 1.0);
 TUNABLE(kContestPush, 1.0);
+// 争抢直冲（第 90 轮，学官方 demo：目标就是球、不绕球后、不减速）。
+//   真机 09-28/29 黑匣子：争抢帧里主攻 60~74% 站在「撞过去球不会朝自家门」的一侧，
+//   朝球速度中位却只有 0.24~0.34cm/帧（在绕球后准备点/原地转正），15 帧后我方先到球仅 18~30%。
+//   推球方向 = 人→球方向；它在进攻方向上的分量 ≥ kChargeMinFwd 才冲（离己门 <kChargeOwnGuard 用更严的 kChargeMinFwdOwn）。
+TUNABLE(kContestCharge, 1.0);      // 回滚开关
+TUNABLE(kChargeMinFwd, -0.2);      // cos：约 ≤100° 偏离进攻方向都可冲（横推也算抢到）
+TUNABLE(kChargeMinFwdOwn, 0.3);    // 己方门前：必须明显朝前推
+TUNABLE(kChargeOwnGuard, 70.0);    // cm
+TUNABLE(kChargeThrough, 20.0);     // 目标 = 球心沿冲撞方向再过 20cm（穿球，不在球前停）
 TUNABLE(kPassivePress, 1.0);   // PASSIVE 争抢时从球门侧上抢（run_passive 末尾）
 TUNABLE(kPassivePressDepth, 130.0);   // 深度扫 110/130/150/170/全场：130 为拐点（净胜 +4~5，单人滞留不增）
 TUNABLE(kActiveGaLimit, 8);
@@ -1161,6 +1176,23 @@ void run_active(WorldModel &wm, int id) {
     //   真机（射正率 8% vs 对手 48%）是否值得为此付代价，**必须真机单开一轮验证**，
     //   不能拿 sim 判。到点定向的能力（motion::position_aligned）与单测已就位，随时可接。
     ShootPlan sp = plan_shoot(wm, id);
+    // 争抢直冲（第 90 轮，见 kContestCharge）：已在射门线后面的交给下面射门推穿（方向更好），
+    //   其余可安全撞的争抢帧直接朝球心全速冲过去。
+    if (contested && kContestCharge > 0.5 && !wm.coop_pass_task.active &&
+        !in_no_push_zone(wm.ball.x, wm.ball.y)) {
+        const double bx = wm.ball.x, by = wm.ball.y;
+        const double dx = bx - r.x, dy = by - r.y, d = std::hypot(dx, dy);
+        const bool shot_behind = sp.viable && (dx * sp.dir_x + dy * sp.dir_y) > 0.0;
+        if (d > 1e-6 && !shot_behind) {
+            const double fwd = dx * ctx.attack_dir() / d;
+            const double need = (ctx.dist_our_goal(bx) < kChargeOwnGuard) ? kChargeMinFwdOwn : kChargeMinFwd;
+            if (fwd >= need) {
+                motion::position(r, bx + dx / d * kChargeThrough, by + dy / d * kChargeThrough, motion::TM_PASS);
+                TRACE_MARK(r);
+                return;
+            }
+        }
+    }
     // —— 配合进攻（docs/06 第 69 轮，用户 2026-09-15 指令）——
     //   队友接球后的射门机会比我自己高 0.15 以上、且他能**安全接到** → 传给他（只向前传）。
     //   安全性（线路无遮挡/接球点 20cm 内无对手/距离≤120cm）在 pass.cpp 里判定；点球执行期不传。
@@ -1289,6 +1321,11 @@ void run_active(WorldModel &wm, int id) {
                 motion::position_aligned(r, px, py, sp.aim_rot, kPrepPosTol, kPrepAngTol);
                 return;
             }
+        } else if (kNoAlignWait > 0.5) {
+            // 第 90 轮官方式：在球后就直接推穿（不管远近、不管朝向）；不在球后 → 赶去球后点（经过型，不对准）
+            wm.shoot_align_frames = 0;
+            if (behind) ready = true;
+            else { motion::position(r, px, py, motion::TM_PASS); ready = false; }
         } else if (contested && behind && kContestPush > 0.5) {
             // 争抢态：已在球后就直接推穿，不原地转正、不绕准备点（转正的 1 秒里球已被抢走）
             wm.shoot_align_frames = 0;
@@ -1435,7 +1472,11 @@ void run_active(WorldModel &wm, int id) {
         // 对准纪律同样适用于带球推进（docs/18 §8）：推球方向 = 撞球瞬间机头方向，
         //   旧口径只判"机头对着球"(|te_d|<40°)——不管推往哪、站错侧还会往回推。
         //   带球推进是推球次数最多的路径（sim 一场 183 次 vs 射门分支 45 次）。
-        if (db < 12.0 && behind2 && std::fabs(te_head2) <= kDribAngTol) {
+        if (kNoAlignWait > 0.5 && behind2) {
+            // 第 90 轮官方式：在推进侧后方就直接穿球推，不等贴近、不等对准
+            wm.shoot_align_frames = 0;
+            motion::position(r, wm.ball.x + dirx * 20.0, wm.ball.y + diry * 20.0, motion::TM_PASS);
+        } else if (db < 12.0 && behind2 && std::fabs(te_head2) <= kDribAngTol) {
             motion::position(r, wm.ball.x + dirx * 20.0, wm.ball.y + diry * 20.0, motion::TM_PASS);   // 带球推进=穿球经过型
         } else if (!prep_point_ok(wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0)) {
             // docs/06 第 49 轮：球后站位点落在角落黄区 → 不绕球后（会穿过球把球顶进角里）
@@ -1448,7 +1489,8 @@ void run_active(WorldModel &wm, int id) {
                 motion::position_aligned(r, r.x, r.y, aim_rot2, kPrepPosTol, kPrepAngTol);
             }
         } else {
-            motion::position(r, wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0);
+            motion::position(r, wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0,
+                             kNoAlignWait > 0.5 ? motion::TM_PASS : motion::TM_STOP);
         }
     } else {
         // 球不在脚下 / 争抢中：追预测球位（带减速防冲过头）

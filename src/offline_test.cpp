@@ -1260,7 +1260,15 @@ static int test_follow_route() {
 //   ① 未对准（机头偏 40°）→ **不许推球**，先原地转正（旧实现 40° 就推 = 射正率 8% 的机制）
 //   ② 已对准（机头=瞄准线）→ 立刻推穿并计次
 //   ③ 超 3 次不再推；④ 球离开射程计数清零
+static int test_shoot_push_limit_impl();
+// 第 90 轮起默认不等对准；此单测验证回滚档（kNoAlignWait=0）的对准门禁仍完好
 static int test_shoot_push_limit() {
+    ::simuro5::set_param("roles.kNoAlignWait", 0.0);
+    int rc = test_shoot_push_limit_impl();
+    ::simuro5::reset_params();
+    return rc;
+}
+static int test_shoot_push_limit_impl() {
     TeamContext ctx{true};
     WorldModel wm;
     wm.ctx = ctx;
@@ -3547,6 +3555,45 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 第 90 轮：争抢直冲——对手贴球、主攻在球侧上方（撞过去是横推，不朝自家门）→ 直接朝球冲，不绕球后
+static int test_contest_charge() {
+    TeamContext ctx{true};               // 蓝队：攻向 x=0
+    WorldModel wm; wm.ctx = ctx; wm.ball.valid = true; wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 100; wm.ball.y = wm.ball_pred.y = 90;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 200; wm.home[i].y = 20 + i * 30; wm.opp[i].x = 20; wm.opp[i].y = 20 + i * 30; }
+    wm.opp[2].x = 85; wm.opp[2].y = 90;                    // 对手贴球 15cm
+    wm.home[1].x = 98; wm.home[1].y = 102; wm.home[1].rot = -80;   // 主攻贴在球侧上方 12cm、机头朝球（旧逻辑：绕回球后 20cm）
+    run_active(wm, 1);
+    const RobotState &r = wm.home[1];
+    if (r.vl < 50.0 || r.vr < 50.0 || std::fabs(r.vl - r.vr) > 30.0) {
+        printf("FAIL: 争抢时应直冲球 (vl=%.1f vr=%.1f)\n", r.vl, r.vr); return 1;
+    }
+    printf("contest charge: OK (争抢时安全侧直冲球)\n");
+    return 0;
+}
+
+// 第 90 轮：近球不减速/不原地转正/不等对准（官方式）。在球后、朝向偏 60°、无争抢：
+//   旧（kNoAlignWait=0）原地转正（前进分量≈0），新（=1）直接前冲穿球。
+static int test_no_align_wait() {
+    auto run = [](double sw, double &fwd, double &turn) {
+        ::simuro5::set_param("roles.kNoAlignWait", sw);
+        TeamContext ctx{true};               // 蓝队：攻向 x=0
+        WorldModel wm; wm.ctx = ctx; wm.ball.valid = true; wm.ball_pred.valid = true;
+        wm.ball.x = wm.ball_pred.x = 100; wm.ball.y = wm.ball_pred.y = 90;
+        for (int i = 0; i < 5; ++i) { wm.home[i].x = 200; wm.home[i].y = 20 + i * 30; wm.opp[i].x = 20; wm.opp[i].y = 20 + i * 30; }
+        wm.home[1].x = 108; wm.home[1].y = 92; wm.home[1].rot = 120;   // 球后 8cm，机头偏 60°
+        run_active(wm, 1);
+        fwd = (wm.home[1].vl + wm.home[1].vr) / 2; turn = std::fabs(wm.home[1].vl - wm.home[1].vr);
+    };
+    double f0, t0, f1, t1;
+    run(0.0, f0, t0); run(1.0, f1, t1);
+    ::simuro5::reset_params();
+    printf("no align wait: old fwd=%.1f turn=%.1f | new fwd=%.1f turn=%.1f\n", f0, t0, f1, t1);
+    if (!(std::fabs(f1) > std::fabs(f0) + 20.0)) { printf("FAIL: 新逻辑应直接推穿而非原地转正\n"); return 1; }
+    printf("no align wait: OK\n");
+    return 0;
+}
+
 // 第 89 轮：非主攻进对方门区当帧就撤（真机 09-29 帧 4544：MID 在 (23,63) 滞留 26 帧，球在对角 (5,154)）
 static int test_opp_box_instant_exit() {
     TeamContext ctx{true};               // 蓝队：对方门 x=0
@@ -3693,6 +3740,8 @@ int main(int argc, char **argv) {
     rc |= test_goalie_line_block();
     rc |= test_live_play();
     rc |= test_opp_box_instant_exit();
+    rc |= test_contest_charge();
+    rc |= test_no_align_wait();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();
