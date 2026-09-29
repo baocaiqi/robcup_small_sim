@@ -492,6 +492,24 @@ bool gk_rule_opp_ball_lock(WorldModel &wm, int id, const GkView &v) {
     return true;
 }
 
+// 第 92 轮：推球准备点（球后 kGkPushDist）的 y 若落在门将站位带 [kGkYLo,kGkYHi] 外，
+//   gk_goto 会把目标夹回带内 → 永远站不到球后、永远"未对准"，来回冲不触球
+//   （真机 s50/s52/s53 门球 y=72 卡 98~197+ 帧）。先镜像到另一侧（往边路推，不喂中路），
+//   仍够不着再直线推出。
+TUNABLE(kGkKickReach, 1.0);  // 0 = 回滚（不修正推球方向）
+void gk_reachable_dir(const TeamContext &ctx, const GkView &v, double &dx, double &dy) {
+    if (kGkKickReach < 0.5) return;
+    auto ok = [&](double ddy) {
+        double py = v.by - ddy * kGkPushDist;
+        return py >= kGkYLo && py <= kGkYHi;
+    };
+    if (ok(dy)) return;
+    if (ok(-dy)) { dy = -dy; return; }
+    // 球本身在带外（y<74 或 >106）：取最小斜度让准备点正好落回带内
+    dy = clamp((v.by - clamp(v.by, kGkYLo + 1.0, kGkYHi - 1.0)) / kGkPushDist, -0.8, 0.8);
+    dx = ctx.attack_dir() * std::sqrt(1.0 - dy * dy);
+}
+
 // 门前静止球（门球/定位球重启）：门将主动穿球推出，否则球滚回门线外反复触发门球。
 bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 45.0 && v.ball_still)) return false;
@@ -505,6 +523,7 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     if ((v.ball_goal < 20.0 || contested) && goal_side) {
         double dx = ctx.attack_dir(), dy = 0.0;
         if (!contested) gk_clear_direction(wm, id, v.bx, v.by, dx, dy);
+        gk_reachable_dir(ctx, v, dx, dy);
         if (v.db < 25.0 && gk_aligned(r, v, dx, dy)) {
             if (!gk_turn_to(r, dx, dy))
                 gk_goto(ctx, r, v.bx + dx * kGkKickThrough, v.by + dy * kGkKickThrough,
@@ -516,6 +535,7 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     }
     double dx = 0.0, dy = 0.0;
     gk_clear_direction(wm, id, v.bx, v.by, dx, dy);
+    gk_reachable_dir(ctx, v, dx, dy);
     bool ready = v.db < 25.0 && gk_aligned(r, v, dx, dy);
     if (ready && gk_turn_to(r, dx, dy)) return true;
     // 球贴门线（<15cm）且门将在球外侧：直奔球后会穿球把球顶进自家门 → 先横移到球侧 22cm

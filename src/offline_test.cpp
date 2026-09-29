@@ -3576,6 +3576,42 @@ static int test_contest_charge() {
 //   旧（kNoAlignWait=0）原地转正（前进分量≈0），新（=1）直接前冲穿球。
 // 第 91 轮：官方式分区。① 中卫在球后 → 直冲穿球；② 己方门前站在球的进攻侧 → 侧绕不穿球；
 //   ③ 上翼（ASSIST）球在下路 → 站 (球fx-8, y=120)。期望动作与直接调 motion 同目标逐位一致。
+// 第 92 轮：门球静止球门将够得着 —— 球 y=72 时准备点被 kGkYLo=74 夹住、永远对不准
+//   （真机 s53 门将 y 62↔88 来回冲 197+ 帧不触球）。简易运动学闭环：N 帧内必须把球推出 x<195。
+static int gk_kick_touch_frames(double by, double reach) {
+    ::simuro5::set_param("roles.kGkKickReach", reach);
+    WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
+    wm.ball.valid = wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 205.1; wm.ball.y = wm.ball_pred.y = by;
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 120; wm.home[i].y = 20 + i * 30; wm.opp[i].x = 60; wm.opp[i].y = 20 + i * 30; wm.role[i] = ROLE_PASSIVE; }
+    wm.role[0] = ROLE_GOALIE;
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
+    int hit = -1;
+    for (int f = 0; f < 200 && hit < 0; ++f) {
+        run_goalie(wm, 0);
+        RobotState &r = wm.home[0];
+        double v = 0.5 * (r.vl + r.vr) * 0.025, w = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        double ex = wm.ball.x - r.x, ey = wm.ball.y - r.y, d = std::hypot(ex, ey);
+        if (d < 7.0 && d > 1e-6) {                 // 碰到 → 球被顶到车身外沿
+            wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
+        }
+        wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
+        if (wm.ball.x > 219.0) return -2;          // 顶进自家门
+        if (wm.ball.x < 195.0) hit = f;            // 推出门区一带
+    }
+    ::simuro5::reset_params();
+    return hit;
+}
+static int test_gk_goal_kick_reach() {
+    int old72 = gk_kick_touch_frames(72.0, 0.0), new72 = gk_kick_touch_frames(72.0, 1.0),
+        new78 = gk_kick_touch_frames(78.0, 1.0), new66 = gk_kick_touch_frames(66.0, 1.0);
+    printf("gk goal kick reach: 旧 y72=%d / 新 y72=%d y78=%d y66=%d（帧，-1=没推出 -2=乌龙）\n", old72, new72, new78, new66);
+    if (new72 < 0 || new78 < 0 || new66 < 0) { printf("FAIL: 门球静止球门将 200 帧内未触球\n"); return 1; }
+    return 0;
+}
+
 static int test_zone_mode() {
     auto base = [](WorldModel &wm, double bx, double by) {
         TeamContext ctx{true};               // 蓝队：己方门 x=220，攻向 -x
@@ -3780,6 +3816,7 @@ int main(int argc, char **argv) {
     rc |= test_contest_charge();
     rc |= test_no_align_wait();
     rc |= test_zone_mode();
+    rc |= test_gk_goal_kick_reach();
     rc |= test_defense_intercept();
     rc |= test_goalie_predict();
     rc |= test_defense_reach();
