@@ -211,9 +211,10 @@ TUNABLE(kGkLbMaxSpeed, 2.5);     // cm/帧：A 只管慢球，快球仍由门线
 TUNABLE(kGkLbRange, 100.0);      // cm：A 球离门线多近才对线
 TUNABLE(kGkLbDepth, 10.0);       // cm：A 站位离门线（=常规站位深度）
 TUNABLE(kGkLbFreeDist, 15.0);    // cm：A 最近对手离球要大于此（对方带球交给持球硬锁）
-TUNABLE(kGkLbLineBand, 12.0);    // cm：B 球离门线多近算"贴门线滚"
+TUNABLE(kGkLbLineBand, 12.0);    // cm：B 球离门线多近算"贴门线滚"（第99轮 12→20 引入下路失球，已回滚）
 TUNABLE(kGkLbRollSpeed, 0.3);    // cm/帧：B 沿门线速度下限
 TUNABLE(kGkLbAhead, 12.0);       // cm：B 站在球前方多远
+TUNABLE(kGkLbBand, 30.0);        // cm：B 门口带半宽（|by-90|<此值即带内；第98轮 20→30 罩住门口弹跳区）
 
 bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty) {
     if (kGkLineBlock < 0.5) return false;
@@ -241,9 +242,19 @@ bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty) {
         clamp_goalie_area(ctx, tx, ty);
         return true;
     }
-    // B：球贴门线、沿 y 滚向门口（或已在门口前）
+    // B：球贴门线滚向门口（或已在门口前）。
+    //   第 99 轮改（用户指令）：旧"门口带"硬编码 |by-90|<20，球滚到门口带外侧
+    //   2~3cm（y≈110~113）弹跳时 vy 上下抖动，方向判断 (by-90)*vy<0 一抖就失配，
+    //   门将"断线"掉回常规站位，球从门将和门线之间的缝漏进（第 2 场整场唯一丢球
+    //   实测：球贴门线 x≈218 从上路 y=125 滚到 y=100 进门，门将停在 x≈211 没迎上去）。
+    //   改法：门口带 |by-90|<kGkLbBand 从 20 放宽到 30，把 y≈110~125 的弹跳区罩进来，
+    //   球在带内弹跳时无论 vy 方向都稳定触发、不掉线；带外仍靠方向判断区分
+    //   "滚向门口"与"滚离门口"（后者不追，别被带走的球牵出门口）。
+    //   同轮踩坑：门槛 kGkLbLineBand 也顺手 12→20，结果让 B 分支提前抢了 shot_block
+    //   （下路球离门线 12~20cm 时门将就"贴门线滚球"处理、y clamp 到 74 下不去，漏成
+    //   下路进球，6 球全打门柱内侧）→ 门槛已回滚 12，本注释只保留门口带放宽。
     if (ball_goal < kGkLbLineBand && std::fabs(vy) > kGkLbRollSpeed &&
-        ((by - 90.0) * vy < 0.0 || std::fabs(by - 90.0) < 20.0)) {
+        ((by - 90.0) * vy < 0.0 || std::fabs(by - 90.0) < kGkLbBand)) {
         // 门将中心与球同一 x（略深 1cm，站在球的门侧，不触发"球已越过门将"让开）
         tx = ctx.our_goal_x() + ctx.attack_dir() * clamp(ball_goal - 1.0, 3.0, kGkLbLineBand);
         ty = clamp(by + (vy > 0.0 ? 1.0 : -1.0) * kGkLbAhead, kGkYLo, kGkYHi);
@@ -300,6 +311,7 @@ constexpr double kGkTrackYHi         = 104.0;
 constexpr double kGkMinSpeed         = 5.0;    // 朝门球速（cm/帧）低于此值不前压
 constexpr double kGkFastShotSpeed    = 12.0;   // 朝门球速达到此值 → 前压到罚球区前缘
 constexpr double kGkOppPullback      = 20.0;   // 罚球区内每个对手让前压深度回缩（cm），防埋伏回敲
+constexpr double kGkOppFrontPad      = 8.0;    // 前压深度上限：对方最前插球员身后余量（cm）
 constexpr double kGkClearDist        = 20.0;   // 球进此距离 → 脚下清球
 constexpr double kGkClearAlignTol    = 20.0;   // 穿球前允许的机头偏差（度）
 constexpr double kGkPushDist         = 8.0;    // 推球准备点：球后 cm
@@ -639,6 +651,13 @@ bool gk_rule_shot_block(WorldModel &wm, int id, const GkView &v) {
     double frac = clamp((v.danger - kGkMinSpeed) / (kGkFastShotSpeed - kGkMinSpeed), 0.0, 1.0);
     double depth = kGkGuardDist + frac * (80.0 - kGkGuardDist);
     depth = std::max(kGkGuardDist, depth - opp_in_box * kGkOppPullback);
+    // 前压深度上限：不越过对方最靠近己门（最前插）的球员，留 kGkOppFrontPad 余量。
+    //   保证门将始终站在"对方最前插球员"和球门之间，身后不留回敲/插上的空当；
+    //   下限仍锁 kGkGuardDist，对方压得再深门将也不退到门线后。
+    double opp_front = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        opp_front = std::min(opp_front, ctx.dist_our_goal(wm.opp[i].x));
+    depth = std::max(kGkGuardDist, std::min(depth, opp_front - kGkOppFrontPad));
     double out_x = gk_line_x(ctx, v.ball_goal < 15.0 ? 3.0 : depth);
     // 拦截点 y：球轨迹在 out_x 处的 y；不可用时取球-门连线与 out_x 的交点
     double iy = 90.0;
