@@ -12,7 +12,7 @@ namespace simuro5 {
 //   原 ACTIVE 接手它的角色（其余分工与阵型不变）。
 //   防抖（第 8 轮废弃距离贪心的原因）：代价优势 > kActSwapMargin 且连续 kActSwapFrames 帧，
 //   换人后 kActSwapHold 帧内不再换；配合传球/控球、点球、死球期间冻结。
-TUNABLE(kActDynamic, 0.0);      // 默认关：sim 300 局 scripted/yellow 净胜下降，待真机定
+TUNABLE(kActDynamic, 1.0);      // 第 94 轮用户指令开启真机试（sim 犯规 ×5，盯点球）；0 = 回滚
 TUNABLE(kActSwapMargin, 20.0);   // cm 等效
 TUNABLE(kActSwapFrames, 4.0);
 TUNABLE(kActSwapHold, 25.0);
