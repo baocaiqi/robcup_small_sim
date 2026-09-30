@@ -1540,6 +1540,73 @@ void run_active(WorldModel &wm, int id) {
     }
 }
 
+// 人盯人执行体（第 97 轮从 run_passive 里提出来的**纯搬家**，逐行行为不变）：
+//   把「盯住对手 t」这一整套动作（对方门区不追 / 贴身逼抢 / 堵传球线 / 门侧站位 / 禁区纪律）
+//   做成可复用函数——这样 PASSIVE 和「被匈牙利指派的 ASSIST/MIDFIELD」走**同一套**执行逻辑，
+//   不会出现两套盯人写法各调各的（那种分叉正是第 97 轮要消灭的「各自贪心」）。
+//   t < 0（没被指派）⇒ 什么都不做，调用方继续走后面的分支。
+static void run_mark_body(WorldModel &wm, int id, int t) {
+    if (t < 0 || t >= PLAYERS_PER_SIDE) return;
+    // 对方门区聚集犯规防护（C 模块方案，余量并入 A/B 15cm 调参）：
+    //   被盯者缩在对方门区且球不在门区时不追进去（门区 2+ 人 / 停留>20帧 → 罚点球），
+    //   改站对方门区前缘外 15cm 等反击。
+    if (in_opp_goal_area(wm.ctx, wm.opp[t].x, wm.opp[t].y) &&
+        !in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y)) {
+        double fx = 0.0, fy = 0.0;
+        opp_goal_area_front(wm.ctx, wm.ball.y, fx, fy);
+        motion::position(wm.home[id], fx, fy);
+        return;
+    }
+    // E2 盯人转逼抢（docs/13 攻击强化）：被盯者离球 <25cm（控球/即将接球）时
+    //   放弃站连线、直接冲球贴身逼抢（抢下或破坏对手组织，配合 E1 双人夹抢）。
+    double d_opp_ball = dist(wm.ball.x, wm.ball.y, wm.opp[t].x, wm.opp[t].y);
+    // 球在我方门区内不逼抢：门前交给门将（否则与门将 2+ 人违规，
+    //   sim 实测 E2 首版 2+人 0.5→2.3 次/场），站门区外等解围。
+    if (d_opp_ball < 25.0 && !in_goal_area(wm.ctx, wm.ball.x, wm.ball.y)) {
+        // 逼抢护栏（docs 第 73 轮 · 问题1 · B）：只从球门侧贴球。后卫从门侧追球，
+        //   碰球只会把球顶向场内（远离己门）；从场侧追则把球顶向己门 = 乌龙
+        //   （历史 3:8 已回滚）。球在门区外本已 >50cm 离门线，此护栏再堵死最后
+        //   一条乌龙通道——从场侧时不追球、落到下面 mark 站位封线。
+        double d_home_goal = wm.ctx.dist_our_goal(wm.home[id].x);
+        double d_ball_goal = wm.ctx.dist_our_goal(wm.ball.x);
+        if (d_home_goal < d_ball_goal) {   // 门将侧（离门更近）→ 追球把球顶离门
+            motion::chase_ball(wm.home[id], chase_target(wm));
+            return;
+        }
+    }
+    // 站位：速度前馈预测被盯者未来位置（改「追着跑」为「截击」，
+    //   同速追逐追不上移动目标），站到「被盯者→球门」连线上、离其 mark_dist 处，
+    //   封住他的传/射路线。
+    double gx = wm.ctx.our_goal_x(), gy = 90.0;
+    double px = wm.opp[t].x + wm.opp_vx[t] * mark_lead();
+    double py = wm.opp[t].y + wm.opp_vy[t] * mark_lead();
+    // 站位方向选择：
+    //   · 被盯者是接球者（非持球者）且离球够近 → 传球随时发生，
+    //     站「球→被盯者」连线上（堵传球线，提前掐断传球）；
+    //   · 否则（持球者 / 离球远）→ 站「被盯者→球门」连线上（封射门/再传）。
+    double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[t].x, wm.opp[t].y);
+    double ref_x = gx, ref_y = gy;                       // 默认 goal-side
+    if (d_ball > 15.0 && d_ball < mark_pass_lane_dist()) {
+        ref_x = wm.ball.x; ref_y = wm.ball.y;            // 堵传球线
+    }
+    double dx = ref_x - px, dy = ref_y - py;
+    double len = std::hypot(dx, dy);
+    if (len > 1e-6) { dx /= len; dy /= len; }
+    double mx = px + dx * mark_dist();
+    double my = py + dy * mark_dist();
+    // 站位点若落入己方罚球区（只有门将能进）→ 推到罚球区前缘 5cm
+    if (in_penalty_area(wm.ctx, mx, my)) {
+        mx = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
+        my = clamp(py, 72.5, 107.5);
+    }
+    mx = clamp(mx, 0.0, TeamContext::FIELD_LENGTH);
+    my = clamp(my, 0.0, TeamContext::FIELD_WIDTH);
+    // 对方门区禁入（docs/13 方案 A）：盯人站位不得进入对方门区（防 2+ 人违规判点球）
+    clamp_out_opp_goal_area(wm.ctx, mx, my);
+    motion::position(wm.home[id], mx, my);
+    return;
+}
+
 void run_passive(WorldModel &wm, int id) {
     if (run_pass_receiver(wm, id)) return;
     // —— 门前协防（docs/03 第14轮，参考官方 demo CenterDefender 球-门连线思想，自研实现）——
@@ -1592,72 +1659,15 @@ void run_passive(WorldModel &wm, int id) {
             return;
         }
     }
-    // 人盯人：威胁高时，盯住威胁最大的对方球员，站在他与己方球门之间。
-    //   威胁分已计入球速（接球威胁 approach + 持球突破 danger，见 defense.cpp mark_threat），
-    //   球越快越该贴住危险的进攻点。
+    // 人盯人（第 97 轮）：目标来自**带权匈牙利一一匹配**（defense::assign_marks 每帧写入
+    //   wm.mark_assign）——从数学上杜绝「两个人盯同一个对手」，且换人惩罚 λ 直接进代价矩阵。
+    //   匈牙利没生效时（威胁门槛没过 / defense.kMarkHungarian=0）回退旧的单目标贪心。
+    //   执行体统一在 run_mark_body（PASSIVE 与被指派的 ASSIST/MIDFIELD 共用）。
     if (wm.threat_level >= 0.6) {
-        int t = pick_mark_target(wm, wm.mark_target);
+        int t = wm.mark_assign_valid ? wm.mark_assign[id]
+                                  : pick_mark_target(wm, wm.mark_target);
         wm.mark_target = t;
-        if (t >= 0) {
-            // 对方门区聚集犯规防护（C 模块方案，余量并入 A/B 15cm 调参）：
-            //   被盯者缩在对方门区且球不在门区时不追进去（门区 2+ 人 / 停留>20帧 → 罚点球），
-            //   改站对方门区前缘外 15cm 等反击。
-            if (in_opp_goal_area(wm.ctx, wm.opp[t].x, wm.opp[t].y) &&
-                !in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y)) {
-                double fx = 0.0, fy = 0.0;
-                opp_goal_area_front(wm.ctx, wm.ball.y, fx, fy);
-                motion::position(wm.home[id], fx, fy);
-                return;
-            }
-            // E2 盯人转逼抢（docs/13 攻击强化）：被盯者离球 <25cm（控球/即将接球）时
-            //   放弃站连线、直接冲球贴身逼抢（抢下或破坏对手组织，配合 E1 双人夹抢）。
-            double d_opp_ball = dist(wm.ball.x, wm.ball.y, wm.opp[t].x, wm.opp[t].y);
-            // 球在我方门区内不逼抢：门前交给门将（否则与门将 2+ 人违规，
-            //   sim 实测 E2 首版 2+人 0.5→2.3 次/场），站门区外等解围。
-            if (d_opp_ball < 25.0 && !in_goal_area(wm.ctx, wm.ball.x, wm.ball.y)) {
-                // 逼抢护栏（docs 第 73 轮 · 问题1 · B）：只从球门侧贴球。后卫从门侧追球，
-                //   碰球只会把球顶向场内（远离己门）；从场侧追则把球顶向己门 = 乌龙
-                //   （历史 3:8 已回滚）。球在门区外本已 >50cm 离门线，此护栏再堵死最后
-                //   一条乌龙通道——从场侧时不追球、落到下面 mark 站位封线。
-                double d_home_goal = wm.ctx.dist_our_goal(wm.home[id].x);
-                double d_ball_goal = wm.ctx.dist_our_goal(wm.ball.x);
-                if (d_home_goal < d_ball_goal) {   // 门将侧（离门更近）→ 追球把球顶离门
-                    motion::chase_ball(wm.home[id], chase_target(wm));
-                    return;
-                }
-            }
-            // 站位：速度前馈预测被盯者未来位置（改「追着跑」为「截击」，
-            //   同速追逐追不上移动目标），站到「被盯者→球门」连线上、离其 mark_dist 处，
-            //   封住他的传/射路线。
-            double gx = wm.ctx.our_goal_x(), gy = 90.0;
-            double px = wm.opp[t].x + wm.opp_vx[t] * mark_lead();
-            double py = wm.opp[t].y + wm.opp_vy[t] * mark_lead();
-            // 站位方向选择：
-            //   · 被盯者是接球者（非持球者）且离球够近 → 传球随时发生，
-            //     站「球→被盯者」连线上（堵传球线，提前掐断传球）；
-            //   · 否则（持球者 / 离球远）→ 站「被盯者→球门」连线上（封射门/再传）。
-            double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[t].x, wm.opp[t].y);
-            double ref_x = gx, ref_y = gy;                       // 默认 goal-side
-            if (d_ball > 15.0 && d_ball < mark_pass_lane_dist()) {
-                ref_x = wm.ball.x; ref_y = wm.ball.y;            // 堵传球线
-            }
-            double dx = ref_x - px, dy = ref_y - py;
-            double len = std::hypot(dx, dy);
-            if (len > 1e-6) { dx /= len; dy /= len; }
-            double mx = px + dx * mark_dist();
-            double my = py + dy * mark_dist();
-            // 站位点若落入己方罚球区（只有门将能进）→ 推到罚球区前缘 5cm
-            if (in_penalty_area(wm.ctx, mx, my)) {
-                mx = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0;
-                my = clamp(py, 72.5, 107.5);
-            }
-            mx = clamp(mx, 0.0, TeamContext::FIELD_LENGTH);
-            my = clamp(my, 0.0, TeamContext::FIELD_WIDTH);
-            // 对方门区禁入（docs/13 方案 A）：盯人站位不得进入对方门区（防 2+ 人违规判点球）
-            clamp_out_opp_goal_area(wm.ctx, mx, my);
-            motion::position(wm.home[id], mx, my);
-            return;
-        }
+        run_mark_body(wm, id, t);
     }
     // 争抢上抢（第 81 轮）：威胁分 < 0.6 时原本回防区点站着；sim 分支追踪显示这是全队
     //   最大的犹豫源——对手贴球、PASSIVE 是离球最近的己方场上队员，却在防区点上等。
@@ -1866,6 +1876,14 @@ void run_assist(WorldModel &wm, int id) {
             motion::position(wm.home[id], rx, ry);
             return;
         }
+        // 盯人（第 97 轮）：被带权匈牙利分配到某个对手 → 走与 PASSIVE 同一套执行体。
+        //   位置：排在"抢反弹位"之后（门前救险优先）、"双人夹抢"之前
+        //   （既然分配已决定"这个对手归我"，就不必再去算夹抢点，避免两台车又扑同一个人）。
+        //   没被分配（mark_assign=-1 / 匈牙利没生效）⇒ 什么都不做，继续走原逻辑。
+        if (wm.mark_assign_valid) {
+            run_mark_body(wm, id, wm.mark_assign[id]);
+            if (wm.mark_assign[id] >= 0) return;
+        }
         // 二抢一：持球者带球推进到门前危险区时，补一个防守者上前与 passive 包夹
         double dtx = 0.0, dty = 0.0;
         if (double_team_point(wm, id, dtx, dty)) {
@@ -1914,6 +1932,14 @@ void run_midfield(WorldModel &wm, int id) {
             rebound_point(wm, -30.0, rx, ry);
             motion::position(wm.home[id], rx, ry);
             return;
+        }
+        // 盯人（第 97 轮）：被带权匈牙利分配到某个对手 → 走与 PASSIVE 同一套执行体。
+        //   位置：排在"抢反弹位"之后（门前救险优先）、"双人夹抢"之前
+        //   （既然分配已决定"这个对手归我"，就不必再去算夹抢点，避免两台车又扑同一个人）。
+        //   没被分配（mark_assign=-1 / 匈牙利没生效）⇒ 什么都不做，继续走原逻辑。
+        if (wm.mark_assign_valid) {
+            run_mark_body(wm, id, wm.mark_assign[id]);
+            if (wm.mark_assign[id] >= 0) return;
         }
         // 二抢一：持球者带球推进到门前危险区时，补一个防守者上前与 passive 包夹
         double dtx = 0.0, dty = 0.0;

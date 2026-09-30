@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <chrono>
 #include <limits>
+#include <algorithm>
 #include "simuro5/simuro_interface.hpp"
 #include "simuro5/formation.hpp"
 #include "simuro5/team.hpp"
@@ -23,6 +24,7 @@
 #include "simuro5/field_info.hpp"
 #include "simuro5/pass.hpp"
 #include "simuro5/shoot.hpp"
+#include "simuro5/hungarian.hpp"   // 带权匈牙利求解器（第 97 轮盯人分配）
 #include "simuro5/tunable.hpp"   // 参数注册表：--params 注入 + 按当前旋钮值断言
 
 using namespace simuro5;
@@ -857,6 +859,65 @@ static int test_bank_shot() {
         }
     }
     printf("bank shot: OK (反射闭式解/与镜面解有差/不抢直线/贴门线不硬凑/黄队镜像)\n");
+    return 0;
+}
+
+// 借墙测试档单测（docs/06 第 96 轮：用户指令「真机上直接测借墙射门，一个队员就够」）：
+//   测试档 = shoot.kBankForceTest=1.0。默认 0.0（生产），只有平台入口 dll_blue.cpp 会打开它；
+//   这里显式打开后守三件事：
+//   ① 直线本来是好机会，测试档也改走借墙 —— 这才是"强制出样本"（自然对局 175 场只有 2 个借墙进球）
+//   ② 门前 ≤70cm 无条件射区**仍然**走直线 —— 测试档不许吃掉最稳的进球区
+//   ③ 测试档下 plan_bank_carry 恒不可行 —— 借墙只由主攻一个人发起（用户要的"一个队员"）
+//   用 save/restore 而非 reset_params()：后者会清掉 --params 注入（见 test_shoot_push_limit 的坑）。
+static int test_bank_force_test() {
+    struct ForceRestore {
+        double v;
+        ~ForceRestore() { set_param("shoot.kBankForceTest", v); }
+    } force_restore{get_param("shoot.kBankForceTest", 0.0)};
+
+    // ① 直线是好机会（门将站在射门线外）→ 门槛版走直线、测试档改借墙
+    {
+        TeamContext ctx{true};                    // 蓝队：守 x=220、攻 x=0
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 75; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;   // dgoal=75 → 远射档
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 30; }
+        wm.opp[0].x = 5; wm.opp[0].y = 130;       // 门将离射门线很远 → 直线净开口很大
+        set_param("shoot.kBankForceTest", 0.0);
+        ShootPlan gated = plan_shoot(wm, 1);
+        set_param("shoot.kBankForceTest", 1.0);
+        ShootPlan forced = plan_shoot(wm, 1);
+        if (!gated.viable || gated.bank) {
+            printf("FAIL: 直线是好机会时门槛版不该借墙 (viable=%d bank=%d q=%.3f)\n",
+                   (int)gated.viable, (int)gated.bank, gated.quality);
+            return 1;
+        }
+        if (!forced.viable || !forced.bank) {
+            printf("FAIL: 测试档应强制借墙 (viable=%d bank=%d)\n",
+                   (int)forced.viable, (int)forced.bank);
+            return 1;
+        }
+        if (plan_bank_carry(wm).viable) {
+            printf("FAIL: 测试档下 plan_bank_carry 应恒不可行（只留主攻一人借墙）\n");
+            return 1;
+        }
+    }
+    // ② 门前 ≤70cm（无条件可射区）：测试档也不许被借墙抢走
+    {
+        TeamContext ctx{true};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 25; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 3; wm.opp[i].y = 74.0 + i * 8.0; }
+        ShootPlan p = plan_shoot(wm, 1);
+        if (!p.viable || p.bank) {
+            printf("FAIL: 测试档下门前 25cm 仍应走直线射门 (bank=%d)\n", (int)p.bank);
+            return 1;
+        }
+    }
+    printf("bank force test: OK (门槛版走直线/测试档强制借墙/门前70内不被抢/蜂群借墙关)\n");
     return 0;
 }
 
@@ -3806,6 +3867,208 @@ static int test_goalie_line_block() {
     return 0;
 }
 
+// ============================================================
+// 带权匈牙利求解器单测（第 97 轮，用户指令「使用带权的匈牙利算法」）
+//   ① 手算 3×3 的唯一最优解
+//   ② "两台车都想盯同一个人"的例子：证明一一匹配的价值（各自贪心会撞车）
+//   ③ 随机矩阵 ×300 组与**暴力枚举所有排列**对拍（n=3/4/5；5!=120）——
+//      求解器只要错一点，这一条就会抓出来
+// ============================================================
+static double brute_force_min(const double *c, int n) {
+    int perm[kHungarianMaxN];
+    for (int i = 0; i < n; ++i) perm[i] = i;
+    double best = 1e18;
+    do {
+        double s = 0.0;
+        for (int i = 0; i < n; ++i) s += c[i * n + perm[i]];
+        if (s < best) best = s;
+    } while (std::next_permutation(perm, perm + n));
+    return best;
+}
+
+static int test_hungarian_solver() {
+    // ① 手算：最优 = row0→col1(1) + row1→col0(2) + row2→col2(2) = 5
+    {
+        const double c[9] = {4, 1, 3,
+                             2, 0, 5,
+                             3, 2, 2};
+        int a[3] = {-1, -1, -1};
+        if (!hungarian_solve(c, 3, a)) { printf("FAIL: 3x3 应有解\n"); return 1; }
+        if (a[0] != 1 || a[1] != 0 || a[2] != 2) {
+            printf("FAIL: 3x3 最优应为 (1,0,2)，实际 (%d,%d,%d)\n", a[0], a[1], a[2]);
+            return 1;
+        }
+    }
+    // ② 撞车例子：（行=两台车，列=两个对手）
+    //    两台车都离对手 0 更近（10 / 12 < 30 / 15）⇒ 各自贪心会**双双去盯对手 0**，
+    //    对手 1 没人管。匈牙利必须一一匹配：(0→0, 1→1) = 25 < (0→1, 1→0) = 42。
+    {
+        const double c[4] = {10, 30,
+                             12, 15};
+        int a[2] = {-1, -1};
+        if (!hungarian_solve(c, 2, a)) { printf("FAIL: 2x2 应有解\n"); return 1; }
+        if (a[0] == a[1]) { printf("FAIL: 匈牙利不该让两行配同一列\n"); return 1; }
+        if (a[0] != 0 || a[1] != 1) {
+            printf("FAIL: 撞车例子最优应为 (0,1)，实际 (%d,%d)\n", a[0], a[1]);
+            return 1;
+        }
+    }
+    // ③ 暴力对拍（固定种子 ⇒ 可复现）
+    {
+        srand(20260930);
+        const int n_list[3] = {3, 4, 5};
+        for (int t = 0; t < 300; ++t) {
+            const int n = n_list[t % 3];
+            double c[kHungarianMaxN * kHungarianMaxN];
+            for (int i = 0; i < n * n; ++i) c[i] = (rand() % 2000) / 10.0;   // 0~200cm
+            int a[kHungarianMaxN];
+            if (!hungarian_solve(c, n, a)) {
+                printf("FAIL: 随机 %dx%d 求解失败\n", n, n); return 1;
+            }
+            bool seen[kHungarianMaxN] = {false};
+            double got = 0.0;
+            for (int i = 0; i < n; ++i) {
+                if (a[i] < 0 || a[i] >= n || seen[a[i]]) {
+                    printf("FAIL: 随机 %dx%d 的解不是合法排列\n", n, n); return 1;
+                }
+                seen[a[i]] = true;
+                got += c[i * n + a[i]];
+            }
+            const double best = brute_force_min(c, n);
+            if (fabs(got - best) > 1e-6) {
+                printf("FAIL: 随机 %dx%d 解 %.3f != 暴力最优 %.3f\n", n, n, got, best);
+                return 1;
+            }
+        }
+    }
+    printf("hungarian solver: OK (手算最优/撞车一一匹配/300 组与暴力枚举对拍)\n");
+    return 0;
+}
+
+// 盯人分配的场景脚手架（蓝队、威胁过门槛、固定分工 2=ASSIST 3=MIDFIELD 4=PASSIVE）
+static WorldModel mark_scene() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};          // 蓝队：守 x=220、攻 x=0
+    wm.ball.valid = true;
+    wm.threat_level = 0.8;               // 过 defense.kMarkRelGate(0.55)
+    wm.role[0] = ROLE_GOALIE;
+    wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST;
+    wm.role[3] = ROLE_MIDFIELD;
+    wm.role[4] = ROLE_PASSIVE;
+    return wm;
+}
+
+// ② 防抖对照用：跑 80 帧（前 40 帧分工 A、后 40 帧把两台车位置互换 → 裸最优想换成分工 B，
+//    省 7.2cm），对手位置带确定性微扰（±0.3cm，模拟真机噪声）。返回"换人次数"。
+static int run_mark_swap_probe(double lambda) {
+    const double lam_save = get_param("defense.kMarkLambda", 25.0);
+    set_param("defense.kMarkLambda", lambda);
+    WorldModel wm = mark_scene();
+    wm.ball.x = 160; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    // 两个"有价值"的对手（球在它们中间，威胁相同）
+    const double opp_base[5][2] = {{150, 70}, {150, 110}, {60, 20}, {60, 160}, {90, 40}};
+    for (int j = 0; j < PLAYERS_PER_SIDE; ++j) {
+        wm.opp[j].x = opp_base[j][0];
+        wm.opp[j].y = opp_base[j][1];
+    }
+    wm.home[4].x = 30; wm.home[4].y = 90;          // 4 号留在前场（太远 ⇒ 应当闲着）
+    wm.mark_switch_events = 0;
+    for (int f = 0; f < 80; ++f) {
+        // 前 40 帧：2 号在 (140,88)、3 号在 (140,92) —— 分工 A 更优
+        // 后 40 帧：两者位置互换 —— 分工 B 反而优 7.2cm
+        const bool phase2 = (f >= 40);
+        wm.home[2].x = 140; wm.home[2].y = phase2 ? 92 : 88;
+        wm.home[3].x = 140; wm.home[3].y = phase2 ? 88 : 92;
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j) {   // 确定性微扰（±0.3cm）
+            wm.opp[j].x = opp_base[j][0] + 0.3 * sin(f * 1.7 + j);
+            wm.opp[j].y = opp_base[j][1] + 0.3 * cos(f * 2.3 + j);
+        }
+        assign_marks(wm);
+    }
+    const int switches = wm.mark_switch_events;
+    set_param("defense.kMarkLambda", lam_save);
+    return switches;
+}
+
+// ============================================================
+// 带权匈牙利盯人分配单测（第 97 轮）
+//   ① 一个危险对手只能被**一台**车盯（旧的各自贪心会让三台都扑上去）
+//   ② 局面几乎没变时不许换人（λ/EMA/量化/承诺期四道锁）——
+//      并用"把 λ 调成 0 就会换"做对照，证明锁真的在起作用
+//   ③ 关掉开关 / 威胁没过门槛 ⇒ 不产生指派（角色函数回退旧逻辑）
+// ============================================================
+static int test_mark_assignment() {
+    // ① 三台车都挤在危险对手旁边：只能有一台被指派盯他，且是最近的那台
+    {
+        WorldModel wm = mark_scene();
+        wm.ball.x = 200; wm.ball.y = 90; wm.ball.vx = -1.0; wm.ball.vy = 0.0;
+        wm.opp[0].x = 195; wm.opp[0].y = 90;                 // 贴球 = 最危险
+        wm.opp[1].x = 40;  wm.opp[1].y = 30;
+        wm.opp[2].x = 40;  wm.opp[2].y = 150;
+        wm.opp[3].x = 60;  wm.opp[3].y = 90;
+        wm.opp[4].x = 30;  wm.opp[4].y = 60;
+        wm.home[2].x = 185; wm.home[2].y = 80;               // 三台都想盯 0 号
+        wm.home[3].x = 185; wm.home[3].y = 100;
+        wm.home[4].x = 190; wm.home[4].y = 90;               // 最近（5cm）
+        const int n = assign_marks(wm);
+        int on0 = 0;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) if (wm.mark_assign[i] == 0) ++on0;
+        if (!wm.mark_assign_valid) { printf("FAIL: 门槛内 mark_assign_valid 应为 true\n"); return 1; }
+        if (on0 != 1) { printf("FAIL: 危险对手应恰好被 1 台盯，实际 %d 台\n", on0); return 1; }
+        if (wm.mark_assign[4] != 0) {
+            printf("FAIL: 应由最近的 4 号盯 0 号，实际 %d\n", wm.mark_assign[4]); return 1;
+        }
+        if (n != 1) { printf("FAIL: 只应指派 1 台（其余闲着），实际 %d\n", n); return 1; }
+        if (wm.mark_assign[1] != -1 || wm.mark_assign[0] != -1) {
+            printf("FAIL: 门将/主攻不参与盯人分配\n"); return 1;
+        }
+    }
+    // ② 防抖：λ=0（无锁）会换人；默认 λ=25（有锁）必须顶住
+    {
+        const int sw_free = run_mark_swap_probe(0.0);
+        const int sw_locked = run_mark_swap_probe(25.0);
+        if (sw_free < 1) {
+            printf("FAIL: λ=0 时几何互换应导致换人（说明本用例的\"裸最优\"确实翻转了），实际 %d\n", sw_free);
+            return 1;
+        }
+        if (sw_locked != 0) {
+            printf("FAIL: λ=25 应顶住这次几何互换（不许换人），实际换了 %d 次\n", sw_locked);
+            return 1;
+        }
+    }
+    // ③ 关掉开关 / 威胁没过门槛 ⇒ 不指派（角色函数各自回退旧逻辑）
+    {
+        const double save = get_param("defense.kMarkHungarian", 1.0);
+        const double gate = get_param("defense.kMarkRelGate", 0.55);
+        set_param("defense.kMarkHungarian", 0.0);
+        WorldModel wm = mark_scene();
+        wm.ball.x = 200; wm.ball.y = 90; wm.ball.vx = -1.0; wm.ball.vy = 0.0;
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j) { wm.opp[j].x = 195; wm.opp[j].y = 80 + j * 5; }
+        const int n_off = assign_marks(wm);
+        const bool valid_off = wm.mark_assign_valid;
+        int any_off = 0;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) if (wm.mark_assign[i] != -1) any_off = 1;
+        // 门槛以下（开关开着也不该指派）
+        set_param("defense.kMarkHungarian", save);
+        WorldModel wm2 = mark_scene();
+        wm2.threat_level = gate - 0.1;
+        for (int j = 0; j < PLAYERS_PER_SIDE; ++j) { wm2.opp[j].x = 195; wm2.opp[j].y = 80 + j * 5; }
+        const int n_low = assign_marks(wm2);
+        if (n_off != 0 || valid_off || any_off) {
+            printf("FAIL: 关掉 switch 后应无任何指派 (n=%d valid=%d any=%d)\n",
+                   n_off, (int)valid_off, any_off);
+            return 1;
+        }
+        if (n_low != 0 || wm2.mark_assign_valid) {
+            printf("FAIL: 威胁低于门槛时不应指派 (n=%d valid=%d)\n", n_low, (int)wm2.mark_assign_valid);
+            return 1;
+        }
+    }
+    printf("mark assignment: OK (危险对手只 1 台盯/最近者优先/λ=0 会换 vs λ=25 顶住/开关与门槛可回退)\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
@@ -3868,6 +4131,8 @@ int main(int argc, char **argv) {
     rc |= test_zone_mode();
     rc |= test_gk_goal_kick_reach();
     rc |= test_defense_intercept();
+    rc |= test_hungarian_solver();     // 第 97 轮：带权匈牙利求解器（含暴力枚举对拍）
+    rc |= test_mark_assignment();      // 第 97 轮：盯人一一匹配 + 防抖动四道锁
     rc |= test_goalie_predict();
     rc |= test_defense_reach();
     rc |= test_goal_cover();
@@ -3887,6 +4152,7 @@ int main(int argc, char **argv) {
     rc |= test_shoot_push_limit();
     rc |= test_shoot_plan();
     rc |= test_bank_shot();
+    rc |= test_bank_force_test();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
     rc |= test_no_push_zone();

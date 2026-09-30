@@ -100,6 +100,22 @@ TUNABLE(kBankWSpd, 0.20);
 // 真机若验证下来进攻变差，改回 false 即回退（单常量，和 kFarShotEnabled 一个套路）。
 constexpr bool kBankEnabled = true;
 
+// —— 真机借墙测试档（第 96 轮，用户 2026-09-30 指令「在真机上直接测借墙射门，一个队员就够」）——
+// 1.0 = 测试档：① 主攻只要算得出**合法**借墙几何就打墙（不看 kBankMinQ/kBankMargin/
+//              kBankDirectWeak 三道门槛）；② `plan_bank_carry` 直接返回空 ⇒ 关掉蜂群借墙推进，
+//              **场上只有主攻一个人借墙**（用户要的"一个队员"）。
+// 0.0 = 第 95 轮的生产行为（三道门槛 + 蜂群借墙推进 160cm）——**仿真/单测/调参的默认**。
+// 打开方式：只在**平台入口** `src/dll_blue.cpp` 里 set_param("shoot.kBankForceTest", 1.0)
+//   （历史教训：把测试档写成源码默认值会污染 sim A/B 与 tune_es 的参数搜索基线）。
+// 为什么必须强制才有样本：扫 175 场真机 .rlg（`tools/py/bank_shot_report.py`）——
+//   撞边墙 173 次、我方进球 313 个，其中「撞墙后 2.5s 内进球」只有 **2 个** ⇒
+//   自然对局里借墙几乎不出样本，不强制就永远测不出效果。
+// 保留的门槛（测试档也不动）：射程闸门（≤70cm 无条件射区不许被借墙抢走、>110cm 不射）、
+//   `build_bank` 内部的几何合法性（反弹点在球与门之间、离门线 ≥kBankCornerMin、
+//   两段路线无遮挡、推球准备点在场内且不进对方门区、从反弹点看门不被门将挡住）。
+// ⚠️ 这是测试档：比赛版必须回 0.0（并删掉 dll_blue.cpp 里那行）。
+TUNABLE(kBankForceTest, 0.0);
+
 double deg(double rad) { return rad * 180.0 / SIMURO5_PI; }
 
 // 对方守门员 = 离对方门线最近者，返回其下标并回填 y
@@ -354,6 +370,22 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
 ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
     ShootPlan direct = build_direct(wm);
     if (!kBankEnabled) { g_bank_prev = false; return direct; }
+
+    // —— 测试档（第 96 轮）：不看三道门槛，只要有合法借墙几何就用 ——
+    //   唯一保留的"不抢"规则：门前 ≤70cm 的无条件射区仍走直线（那是最稳的进球区，
+    //   借墙天生更远更慢，抢它只会白扔机会；与第 65 轮定的口径一致）。
+    if (kBankForceTest >= 0.5) {
+        ShootPlan bank = build_bank(wm, kFarShotEnabled ? kMaxShotFar : kMaxShotNormal);
+        if (bank.viable && bank.shot_dist > kLegacyRange) {
+            ++g_bank_frames;
+            if (!g_bank_prev) ++g_bank_plans;
+            g_bank_prev = true;
+            return bank;
+        }
+        g_bank_prev = false;
+        return direct;
+    }
+
     // 直线能射且不算差 → 不换（借墙天生更远更慢，只在直线没戏时换角度）
     if (direct.viable && direct.quality >= kBankDirectWeak) { g_bank_prev = false; return direct; }
 
@@ -371,6 +403,8 @@ ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
 
 ShootPlan plan_bank_carry(const WorldModel &wm) {
     if (!kBankEnabled) return ShootPlan{};
+    // 测试档（第 96 轮）：关掉蜂群借墙推进 ⇒ 借墙只可能由主攻一个人发起（用户要的"一个队员"）
+    if (kBankForceTest >= 0.5) return ShootPlan{};
     return build_bank(wm, kBankCarryMax);
 }
 

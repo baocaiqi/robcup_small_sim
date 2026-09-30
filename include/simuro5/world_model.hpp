@@ -147,6 +147,27 @@ struct WorldModel {
     // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
 
+    // —— 带权匈牙利盯人分配（第 97 轮，用户 2026-09-30 指令「使用带权的匈牙利算法」）——
+    //   为什么要有它：原来只有 PASSIVE 一台做单目标贪心 argmax（各自挑自己认为最危险的），
+    //   多人一起盯时**会撞车**——两个人盯同一个对手，最危险的那个反而没人管。
+    //   匈牙利是**一一匹配**，从数学上杜绝重复；"换人惩罚 λ"直接进代价矩阵，
+    //   所以"少折腾"和"配得准"是同一个最小化问题（不是事后补丁）。
+    //   mark_assign[i]     ：机器人 i 本帧被指派的对手（-1 = 不盯，按原区域防守走）。
+    //                        由 defense::assign_marks() 每帧写；角色函数只读。
+    //   mark_prev_assign[i]：上一帧的指派（换人惩罚 λ 的比较基准）。
+    //   mark_commit[i]     ：刚换过目标的"强化承诺"帧数（>0 时换回去的代价再加一个 λ，治来回抖）。
+    //   mark_cost_ema      ："我到盯防点距离"的 EMA 平滑值（消逐帧噪声；首帧直接取观测值）。
+    //   mark_switch_events ：累计换人次数（纯统计，sim/真机复盘用）。
+    int mark_assign[PLAYERS_PER_SIDE] = {-1, -1, -1, -1, -1};
+    int mark_prev_assign[PLAYERS_PER_SIDE] = {-1, -1, -1, -1, -1};
+    int mark_commit[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};
+    double mark_cost_ema[PLAYERS_PER_SIDE][PLAYERS_PER_SIDE] = {{0.0}};
+    bool mark_ema_ready = false;
+    // 本帧的 mark_assign[] 是否有效（威胁门槛没过时为 false ⇒ 角色函数回退旧逻辑，
+    //   避免"拿着上一帧的旧指派"去盯人）。
+    bool mark_assign_valid = false;
+    int mark_switch_events = 0;
+
     // ACTIVE 在对方门区停留计数（docs/13 方案 C：防"门区单人停留>20 周期"罚点球）
     // roles.cpp run_active 每帧更新；超限强制撤出（射门/传球/带球出区）。
     //   active_ga_frames ：纯停留帧数（人在门区 且 球不在门区或不在脚下>25cm）——主判据

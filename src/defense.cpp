@@ -7,6 +7,7 @@
 #include "simuro5/defense.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/role_assignment.hpp"
+#include "simuro5/hungarian.hpp"   // 带权匈牙利指派（第 97 轮盯人分配，自研实现）
 #define TUNABLE_PREFIX "defense."
 #include "simuro5/tunable.hpp"
 #include <cmath>
@@ -289,6 +290,148 @@ TUNABLE(kDoubleTeamDangerDist, 111.151);  // 持球者离门多近才夹抢(cm)
 TUNABLE(kDoubleTeamLateral, 32.5);  // 夹抢点横向偏移(cm)：与盯人者错开角度
 TUNABLE(kDoubleTeamCarryDist, 15);  // 持球者判定：离球 <此值视为正带球（8→15 第73轮：松球/即将接球也夹抢）
 TUNABLE(kDoubleTeamCoverDist, 53.832);  // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
+
+// ============================================================
+// 带权匈牙利盯人分配（第 97 轮，用户指令「使用带权的匈牙利算法」）
+//   设计说明见 defense.hpp 的声明处注释；这里只写"数字为什么这么大"。
+// ============================================================
+// 总开关：1 = 用匈牙利做全队一一匹配（默认）；0 = 回退旧的单目标贪心
+//   （run_passive 走 pick_mark_target，run_assist/run_midfield 走双人夹抢）。
+//   回退方式：defense.kMarkHungarian=0（或改源码默认值）——单旋钮。
+TUNABLE(kMarkHungarian, 1.0);
+
+// 参与分配的威胁门槛：威胁低于它 ⇒ 整队不进入"盯人分配"（mark_assign 全清 -1），
+//   角色函数按各自的原逻辑走。跟 run_passive 原有的 `threat_level >= 0.6` 同量级，
+//   取 0.55 略宽一点是为了让边翼在"威胁刚要起来"时就参与分配（分配本身有 λ 兜着，不会乱跑）。
+TUNABLE(kMarkRelGate, 0.55);
+
+// 换人惩罚 λ（cm）：把某个防守者换到另一个对手头上，需要"总路程省下超过 λ"才算值。
+//   ⚠️ 这是**唯一**需要真机标定的旋钮（docs/06 第 97 轮）：太小 = 来回抖；
+//   太大 = 危险对手换防不过来（该盯的人没人管）。默认 25cm 来自"一次无效转向约等于走 25cm"。
+TUNABLE(kMarkLambda, 25.0);
+
+// 代价 EMA 系数 α：α 越大越跟手、越小越稳。0.35 ≈ 3 帧时间常数的平滑。
+TUNABLE(kMarkEma, 0.35);
+
+// 代价量化步长(cm)：把距离四舍五入到 5cm ⇒ 制造"平台"——
+//   两个候选差不到 5cm 就算打平，打平时不换人（配合 λ 双重防抖）。
+TUNABLE(kMarkQuant, 5.0);
+
+// 换人后的"强化承诺"帧数：窗口内换回去要**再加一个 λ**（等价于临时把 λ 翻倍）。
+//   为什么不是"全局冻结"：那会把该救的球也冻住（第 97 轮设计讨论里的结论）。
+TUNABLE(kMarkCommit, 20.0);
+
+// "没人盯他"的代价系数（cm / 威胁分）：没人盯对手 j 的总代价 = kMarkLeaveW × 威胁_j。
+//   越危险越贵 ⇒ 危险的对手必然有人管；不危险的（威胁≈0.4）只值几厘米 ⇒
+//   除非某个防守者正好贴着他，否则宁可站着不追（省体力、保阵型）。
+//   这也顺带取代了原来写死的"危险门限"（离球>40 且离门>40 就回区域防守）。
+TUNABLE(kMarkLeaveW, 22.0);
+
+// 局面是否处于"该盯人"的状态（威胁够高、不是点球执行期、球有效）。
+static bool mark_gate_open(const WorldModel &wm) {
+    return kMarkHungarian >= 0.5 && wm.ball.valid && !wm.in_penalty_exec &&
+           wm.threat_level >= kMarkRelGate;
+}
+
+// 清空本帧指派（不动 prev/commit：门重新打开时还能"回到上次的分工"而不是重新洗牌）。
+static void mark_clear(WorldModel &wm) {
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_assign[i] = -1;
+    wm.mark_assign_valid = false;
+}
+
+int assign_marks(WorldModel &wm) {
+    if (!mark_gate_open(wm)) { mark_clear(wm); return 0; }
+
+    // —— ① 可盯人的防守者（行）：非门将/非主攻，且没被清道夫/逼抢者占用 ——
+    int rows[PLAYERS_PER_SIDE], nr = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+        const int r = wm.role[i];
+        if (r != ROLE_PASSIVE && r != ROLE_ASSIST && r != ROLE_MIDFIELD) continue;
+        if (i == wm.sweeper_id || i == wm.presser_id) continue;   // 已有明确任务，不参与分配
+        rows[nr++] = i;
+    }
+    constexpr int M = PLAYERS_PER_SIDE;      // 对手数（列）
+    if (nr <= 0) { mark_clear(wm); return 0; }
+
+    // —— ② 对手威胁度（复用现有打分，口径与旧贪心完全一致）——
+    const double danger = ball_danger_speed(wm);
+    const int dribbler = nearest_opp_to_ball(wm);
+    double threat[M];
+    for (int j = 0; j < M; ++j) {
+        const double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[j].x, wm.opp[j].y);
+        const double d_goal = wm.ctx.dist_our_goal(wm.opp[j].x);
+        const double appr = ball_approach_speed(wm, wm.opp[j].x, wm.opp[j].y);
+        threat[j] = mark_threat(d_ball, d_goal, appr, danger, j == dribbler);
+    }
+
+    // —— ③ 约化代价 c(i→j)：我到"对手预测位置"的距离（EMA 平滑 + 量化）+ 换人惩罚 ——
+    //   用预测位置（mark_lead 帧外推）而不是当前位置：防守是"截击"不是"追尾"，
+    //   与执行侧 run_passive 的站位口径一致。
+    double real[PLAYERS_PER_SIDE][M];
+    for (int r = 0; r < nr; ++r) {
+        const int i = rows[r];
+        for (int j = 0; j < M; ++j) {
+            const double px = wm.opp[j].x + wm.opp_vx[j] * mark_lead();
+            const double py = wm.opp[j].y + wm.opp_vy[j] * mark_lead();
+            const double now = dist(wm.home[i].x, wm.home[i].y, px, py);
+            if (!wm.mark_ema_ready) wm.mark_cost_ema[i][j] = now;
+            else wm.mark_cost_ema[i][j] = kMarkEma * now + (1.0 - kMarkEma) * wm.mark_cost_ema[i][j];
+            const double q = (kMarkQuant > 1e-6)
+                           ? std::floor(wm.mark_cost_ema[i][j] / kMarkQuant + 0.5) * kMarkQuant
+                           : wm.mark_cost_ema[i][j];
+            // 换人惩罚：目标不是上一帧那个 ⇒ 加 λ；承诺窗口内再加一个 λ（治"换回去"）
+            double lam = 0.0;
+            if (wm.mark_prev_assign[i] >= 0 && wm.mark_prev_assign[i] != j) {
+                lam = kMarkLambda + ((wm.mark_commit[i] > 0) ? kMarkLambda : 0.0);
+            }
+            real[r][j] = q + lam;
+        }
+    }
+    wm.mark_ema_ready = true;
+
+    // —— ④ 补成方阵：n = 防守者数 + 对手数 ——
+    //   行 = [防守者… | 虚拟行（代表"这个对手没人盯"）]
+    //   列 = [对手…   | 虚拟列（代表"这个防守者闲着"）]
+    //   虚拟行 × 对手 j 的代价 = kMarkLeaveW × 威胁_j（越危险越贵 ⇒ 必须有人管）
+    //   防守者 × 虚拟列 = 0（不追不危险的对手不花钱）
+    const int n = nr + M;
+    if (n > kHungarianMaxN) { mark_clear(wm); return 0; }     // 理论到不了（3+5=8）
+    double cost[kHungarianMaxN * kHungarianMaxN];
+    for (int r = 0; r < n; ++r) {
+        for (int c = 0; c < n; ++c) {
+            double value = 0.0;
+            if (r < nr && c < M)       value = real[r][c];                    // 防守者盯对手
+            else if (r >= nr && c < M) value = kMarkLeaveW * threat[c];       // 没人盯这个对手
+            else                       value = 0.0;                           // 闲着（含全虚拟区）
+            cost[r * n + c] = value;
+        }
+    }
+    int row_to_col[kHungarianMaxN];
+    if (!hungarian_solve(cost, n, row_to_col)) { mark_clear(wm); return 0; }
+
+    // —— ⑤ 落地：防守者的列若在"对手区"就是真指派；写回状态 + 统计换人 ——
+    int assigned = 0, switches = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_assign[i] = -1;
+    for (int r = 0; r < nr; ++r) {
+        const int i = rows[r];
+        const int col = row_to_col[r];
+        const int target = (col >= 0 && col < M) ? col : -1;
+        wm.mark_assign[i] = target;
+        if (target >= 0) ++assigned;
+        if (target != wm.mark_prev_assign[i]) {
+            // 只有"从某个人换到另一个人"才算换人；-1→某人 是首次接任务（不是抖动）
+            if (wm.mark_prev_assign[i] >= 0) ++switches;
+            wm.mark_commit[i] = static_cast<int>(kMarkCommit);
+        }
+    }
+    // 承诺帧递减（只在窗口内递减，不越界成负数）
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        if (wm.mark_commit[i] > 0) --wm.mark_commit[i];
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_prev_assign[i] = wm.mark_assign[i];
+    wm.mark_switch_events += switches;
+    wm.mark_assign_valid = true;
+    return assigned;
+}
 
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
