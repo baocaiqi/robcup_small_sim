@@ -23,9 +23,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-// ⚠️ 改成你们自己的队名
+// ⚠️ 黄队报「DEMO Yellow」——2026-09-30 用户指令：这份黄队 DLL 就是用来**替换官方 demo** 的
+//    （平台黄队槽位 `C:\Strategy\Strategy4Yellow.dll` 原来是官方 DEMO Yellow），
+//    保留 demo 队名 ⇒ 平台控制台显示与 `.rlg` 命名习惯（`…-5-DEMO Yellow-Hnnu.rlg`）完全不变。
+//    ⚠️ 但此后带此名的比赛跑的是**我们的策略**，别再当成官方 demo 的成绩来读。
 STRATEGY4YELLOW_API void SetYellowTeamName(char* teamName) {
-    strcpy(teamName, "Hnnu");   // 用户指令：队伍名称统一为 Hnnu
+    strcpy(teamName, "DEMO Yellow");   // 用户指令（2026-09-30）：替换官方 demo，沿用 demo 队名
 }
 
 STRATEGY4YELLOW_API void SetFormerRobots(PlayMode gameState, Robot robots[]) {
