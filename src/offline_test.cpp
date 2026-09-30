@@ -141,6 +141,10 @@ static int test_defense_intercept() {
     // 边界反弹：球朝底/顶边线滚，直线会出界，反射后应折返到界内。
     // ⚠️ 2026-09-14 修正（docs/06 第 65 轮）：反射**不是理想镜面**——实测法向 0.66、切向 0.81，
     //    出射线比镜面更贴墙：同样的输入镜面会给 40 / 140，实测系数给 32.6 / 147.4。
+    //    ⚠️ 2026-09-30：本用例走的是 field_info 的 ball_wall_rest()（仍是 0.66，门将/后卫反弹
+    //    预测共用）。第 75 轮补记已判定真机其实是 **0.45**，但**本轮刻意不动这条路径**——
+    //    只改了借墙射门（shoot.kBankWallRest），以便真机上把"借墙"单独测出来。
+    //    ⇒ 若将来要修这里，期望值 32.6 / 147.4 必须按新系数重算，不能直接套用。
     double ry = 0.0;
     predict_y_at_x_reflect(100.0, 20.0, 2.0, -2.0, 160.0, ry);   // 撞底墙
     if (fabs(ry - 32.6) > 0.3) {
@@ -675,8 +679,20 @@ static int test_shoot_plan() {
         if (p5.open_angle < 8.0) { printf("FAIL: open=%.1f 应≥8\n", p5.open_angle); return 1; }
         if (p5.quality < 0.35) { printf("FAIL: quality=%.2f 应≥0.35\n", p5.quality); return 1; }
         // 射门线 12cm 处横一个非门将防守者 → 直线路线被挡
-        wm.opp[1].x = wm.ball.x + p5.dir_x * 12.0;
-        wm.opp[1].y = wm.ball.y + p5.dir_y * 12.0;
+        //   ⚠️ 2026-09-30 修正一处**测试自身的 bug**：原实现用 `p5.dir_x/dir_y` 放阻挡者，
+        //   但本场景（100cm + 球静止）里 p5 **可能是借墙方案**——此时 `dir` 是
+        //   "球→墙面"的**入射方向**，不是直线瞄准方向。照它摆，阻挡者被放到墙那一侧，
+        //   直线路线其实**没被挡**（lane_blocked=0），后面的断言就失去了意义。
+        //   （旧系数 0.66 时 p6 恰好又选中借墙，把这条 bug 掩盖住了；系数修正后暴露。）
+        //   改为显式用「球→对方门心」方向摆放：本场景瞄准线只偏离门心方向约 3°，
+        //   12cm 处横向偏差 <1cm ≪ kLaneBlockR(8cm) ⇒ 必然挡住瞄准线，断言才真正成立。
+        {
+            double dgx = ctx.opp_goal_x() - wm.ball.x, dgy = 90.0 - wm.ball.y;
+            double dn = std::hypot(dgx, dgy);
+            if (dn > 1e-6) { dgx /= dn; dgy /= dn; }
+            wm.opp[1].x = wm.ball.x + dgx * 12.0;
+            wm.opp[1].y = wm.ball.y + dgy * 12.0;
+        }
         ShootPlan p6 = plan_shoot(wm, 1);
         // docs/06 第 65 轮起：直线被封后**允许改走借墙**（借墙是"换个角度"，不是硬射被挡的直线）
         //   所以判据改成：要么不射，要么必须是借墙方案（且质量过阈值）——不许沿被挡的直线硬射。
@@ -713,9 +729,16 @@ static int test_shoot_plan() {
         if (pp.quality < 0.99) { printf("FAIL: 点球 quality 应置 1 got %.2f\n", pp.quality); return 1; }
         wm.in_penalty_exec = false;
         ShootPlan pn = plan_shoot(wm, 1);
-        // 非点球时：92cm 在远射档内，但 GK 封死 → 净开口只有两侧各 ~7.3° < 8° → 应被拒
-        if (pn.viable) {
-            printf("FAIL: 非点球时 GK 封死的 92cm 应被闸门拒\n");
+        // 非点球时：92cm 在远射档内，GK 封死直线 → **直线必须被闸门拒**。
+        //   ⚠️ 2026-09-30 修正：原判据是 `if (pn.viable)`——但第 65 轮起**借墙可以接管**
+        //   （借墙是"换个角度"，不是硬射被挡的直线），所以那个判据从第 65 轮起就过强了：
+        //   旧系数 0.66 时本场景借墙质量 ~0.419 < kBankMinQ(0.42) 恰好没接管，判据"碰巧"通过；
+        //   本轮把借墙系数改成真机实测的 0.45 后，弹点几何变化使 q≈0.4255 ≥ 0.42 → 借墙接管 →
+        //   判据失效。改为与 test_shoot_plan 的路线阻挡用例同一口径（docs/06 第 65 轮）：
+        //   **要么不射、要么必须是借墙方案**，不许沿被门将封死的直线硬射。
+        if (pn.viable && !pn.bank) {
+            printf("FAIL: 非点球时 GK 封死的 92cm 不该沿直线硬射 (bank=%d open=%.2f)\n",
+                   (int)pn.bank, pn.open_angle);
             return 1;
         }
     }
@@ -727,7 +750,8 @@ static int test_shoot_plan() {
 // 借墙射门（bank shot，docs/06 第 65 轮）
 //   验证四件事：
 //   ① 直线被门将封死时，自动改走借墙，且机会质量过阈值（≥0.45）
-//   ② 反射点满足**实测各向异性反射**（法向×0.66、切向×0.81），且与"理想镜面"解**明显不同**
+//   ② 反射点满足**实测各向异性反射**（法向×shoot.kBankWallRest、切向×shoot.kBankWallFric；
+//      2026-09-30 起法向默认 **0.45**，见 docs/06 第 75 轮补记），且与"理想镜面"解**明显不同**
 //      （镜面解偏 3cm 以上 → 证明系数真的生效了，不是白写）
 //   ③ 直线好机会不被抢（≤70cm 无条件可射区仍然返回直线方案）
 //   ④ 球贴门线（无借墙几何可用）时不硬凑；门线另一侧（黄队 ctx）同样成立
@@ -756,8 +780,12 @@ static int test_bank_shot() {
             printf("FAIL: 球在 y=55 应借底墙 got wall=%.0f\n", p.bank_wall);
             return 1;
         }
-        // 出射方向必须指向瞄准点：用实测系数算 out，再与「反弹点→目标」做叉积（应共线）
-        double ox = p.dir_x * ball_wall_fric(), oy = -p.dir_y * ball_wall_rest();
+        // 出射方向必须指向瞄准点：用**借墙旋钮的当前值**算 out，再与「反弹点→目标」做叉积（应共线）
+        //   按旋钮取值而非写死 0.45/0.81 —— 否则自动调参一改旋钮，测试就从"守住行为"变成"禁止调参"
+        //   （tunable.hpp:60-63 明确推荐这个写法）。
+        const double kTestFric = get_param("shoot.kBankWallFric", 0.81);
+        const double kTestRest = get_param("shoot.kBankWallRest", 0.45);
+        double ox = p.dir_x * kTestFric, oy = -p.dir_y * kTestRest;
         double tx = ctx.opp_goal_x() - p.bounce_x, ty = p.aim_y - p.bank_wall;
         double cross = ox * ty - oy * tx;
         double sc = std::hypot(ox, oy) * std::hypot(tx, ty);
@@ -3453,6 +3481,28 @@ static int test_swarm_attack() {
         }
         return true;
     };
+    // —— 与射门模块解耦：本用例测的是"蜂群推进几何"，不该被借墙几何牵连 ——
+    //   ⚠️ 2026-09-30：撞墙系数修正（shoot.kBankWallRest 0.66→0.45）后，本场景
+    //   `plan_shoot` 会返回**借墙方案**，于是 herd_direction 给出"朝墙"的入射方向，
+    //   各子用例的期望目标随之变化。这不是蜂群逻辑的问题，而是射门模块的输入变了。
+    //   ⇒ 这里临时把**两条借墙路径**关掉，让 herd_direction 稳定退回"朝门心"兜底方向，
+    //     用例只考蜂群几何、与射门调参解耦（射门自己的行为由 test_shoot_plan/test_bank_shot 守）。
+    //   用 save/restore 而非 reset_params()：后者会清掉 --params 注入（见 test_shoot_push_limit 的坑）。
+    //   用 RAII 保证早退路径也复原。
+    struct BankOffGuard {
+        double carry_save, minq_save;
+        BankOffGuard() {
+            carry_save = get_param("shoot.kBankCarryMax", 160.0);
+            minq_save  = get_param("shoot.kBankMinQ", 0.42);
+            set_param("shoot.kBankCarryMax", 1.0);   // 借墙推进射程压到 1cm → 恒不可行
+            set_param("shoot.kBankMinQ", 2.0);       // 借墙接管门槛拉到 2.0 → 恒不接管
+        }
+        ~BankOffGuard() {
+            set_param("shoot.kBankCarryMax", carry_save);
+            set_param("shoot.kBankMinQ", minq_save);
+        }
+    } bank_off_guard;
+    (void)bank_off_guard;
     // ① 人在球后且对准 → 沿推进方向推穿
     {
         WorldModel wm = scene(100, 120);

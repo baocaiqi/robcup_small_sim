@@ -11,12 +11,18 @@
 //   净开口 = 门张角 \ 遮挡角 的最大连续空隙，取空隙**中心**为射门方向（连续值）。
 //
 // 借墙射门（本文件下半部分）：直线被封（门将站位挡住开口 / 路线有人）时的**换角度**打法。
-//   ⚠️ 关键物理（2026-09-14 实测 118 场真机 .rlg、273 个弹墙样本）：
-//     球撞墙后 **法向分量只剩 0.66（中位）、切向保住 0.81** ⇒ **入射角 ≠ 反射角**，
+//   ⚠️ 关键物理（撞墙系数：docs/06 第 65 轮 → **第 75 轮补记修正**）：
+//     球撞墙后 **法向分量恢复 ≈0.45、切向保持 ≈0.81** ⇒ **入射角 ≠ 反射角**，
 //     出射线会明显往墙那边"扫"。所以**不能**用"把球门对墙镜像、连线求交点"的镜面做法
 //     （那只在弹性各向同性时成立），必须按各向异性反射解方程（有闭式解，见 build_bank）。
-//     对照：sim_bench 的 kWallRest=0.45 偏保守；defense.hpp 的 predict_y_at_x_reflect
-//     用理想镜面（=1.0）偏乐观——两处都与实测不符，已在 docs/06 第 65 轮记录。
+//     ⚠️ 第 65 轮老测法给 0.66，**第 75 轮补记证明那是测量假象**：老测法要求"球贴墙 +
+//     法向位移变号"，而球是**同一帧内**被弹回的、位置序列根本不变号（docs/06:2430-2437）。
+//     新测法（找法向坐标的局部极值帧）在真机两套日志、两个轴向上一致给
+//     **0.451(x, n=380) / 0.449(y, n=501)**，并写明"借墙门槛全建立在 0.66 上，
+//     需按 0.45 重新评估"（docs/06:2446-2448）。
+//     ⇒ 本轮（2026-09-30）**只把借墙改用 0.45**：field_info 的 ball_wall_rest() 仍留 0.66，
+//       因为它同时被 defense.hpp 的 predict_y_at_x_reflect（门将/后卫反弹落点预测）使用——
+//       **门将不动，才能把"借墙"这一个功能的效果在真机上单独测出来**。
 //
 // 射程闸门（docs/03 R17-18 的教训：无闸门放宽 70cm → 真机 0:3）：
 //   · ≤70cm：维持"无条件可射"——sim A/B 验证过的进球主力区，
@@ -70,7 +76,11 @@ TUNABLE(kWSpeed, 0.2);  // quality 权重
 
 
 // —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
-// 撞墙系数不在这里写死：唯一真值来源是 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()
+// 撞墙系数：**借墙专用**旋钮（2026-09-30，见文件头）。不直接用 field_info 的
+// ball_wall_rest()（那个仍是第 65 轮老测法的 0.66，且被门将反弹预测共用，不能动）。
+// 回退：shoot.kBankWallRest 改回 0.66 → 行为回到第 79 轮（单常量）。
+TUNABLE(kBankWallRest, 0.45);   // 法向恢复（真机新测法 0.451/0.449）
+TUNABLE(kBankWallFric, 0.81);   // 切向保持（真机 y 墙实测 0.78~0.84，取 0.81）
 TUNABLE(kBankMaxDist, 300);  // 借墙总路程上限 cm（超过则距离项 0）
 TUNABLE(kBankCornerFull, 40.0);  // 反弹点离对方门线多远算满分（否则像"蹭门柱"）
 TUNABLE(kBankCornerMin, 12.0);  // 反弹点离门线近于此 → 直接否决
@@ -235,8 +245,9 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
 
     const double tys[3]   = {goal_y_low() + 4.0, 90.0, goal_y_high() - 4.0};
     const double walls[2] = {0.0, TeamContext::FIELD_WIDTH};
-    // 撞墙实测系数（field_info.hpp，唯一真值来源）：切向保持 kFric、法向恢复 kRest
-    const double kFric = ball_wall_fric(), kRest = ball_wall_rest();
+    // 撞墙系数：**借墙专用旋钮**（见文件头）。刻意不用 field_info 的 ball_wall_rest()——
+    //   那个 0.66 是第 65 轮老测法的测量假象，且与门将反弹预测共用，本轮不动它。
+    const double kFric = kBankWallFric, kRest = kBankWallRest;
 
     ShootPlan best;
     double best_q = 0.0;
