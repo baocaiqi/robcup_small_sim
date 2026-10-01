@@ -273,6 +273,14 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y);
 bool intercept_point(const WorldModel &wm, double line_dist,
                      double &ix, double &iy);
 
+// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）：
+//   补 intercept_point 的盲区——现有只算「球到门前拦截线」，横传/斜传的球
+//   根本滚不到那条线，所以全程没人管。本函数专管这些「在飞但不朝门」的球：
+//   沿球前进方向扫一串采样点，逐个问「我能不能比球先到」，找到最早可截点。
+//   返回 false（球慢/追不上/有人持球/落点不在防区）→ 交回 plan_defense 兜底。
+bool early_intercept_point(const WorldModel &wm, int defender_id,
+                           double &out_x, double &out_y);
+
 // ============================================================
 // 人盯人（man-marking）：威胁打分 + 目标选择（队员 D 负责）
 // ============================================================

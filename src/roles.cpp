@@ -9,6 +9,7 @@
 #define TUNABLE_PREFIX "roles."
 #include "simuro5/tunable.hpp"
 #include <cmath>
+#include <cstdio>
 #include "simuro5/branch_trace.hpp"   // 须在所有 include 之后（诊断构建才生效）
 
 namespace simuro5 {
@@ -492,14 +493,28 @@ bool gk_rule_side_step(WorldModel &wm, int id, const GkView &) {
 
 // 对方持球：绝不前出（对方一变向就甩开门将、自摆乌龙），锁门前浅位跟球 y。
 //   例外：对方已带到门口（<30cm）且门将贴球（<25cm）→ 上前封球-门连线，否则 1v1 门洞大开。
+TUNABLE(kGkOppLockEnable, 1.0);  // 封角前压总开关：1=开（对方持球球远时也封角），0=回退锁死门线前10cm
+TUNABLE(kGkOppLockDepth, 30.0);  // 封角深度上限 cm（kGkOppLockEnable=1 时生效）
 bool gk_rule_opp_ball_lock(WorldModel &wm, int id, const GkView &v) {
     if (!v.opp_has_ball) return false;
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
     if (v.ball_goal < 30.0 && v.db < 25.0) {
         gk_block_ball_line(ctx, r, v);
-    } else {
+    } else if (kGkOppLockEnable < 0.5) {
+        // 总开关关：恢复「锁死门线前10cm」旧行为
         motion::position(r, gk_line_x(ctx, kGkGuardDist), clamp(v.by, kGkTrackYLo, kGkTrackYHi));
+    } else {
+        // 对方持球但球还没到门口（>30cm 或 门将离球≥25cm）→ 也站球-门连线封角：
+        //   深度 = 球距门−12cm（连续），上限收窄到 kGkOppLockDepth(30)。
+        //   不再钉死门线前10cm 干等单刀（见 docs/06 第101轮：opp_ball_lock 94.7% 时间走锁门线）。
+        double back  = std::max(0.0, v.ball_goal - 12.0);
+        double depth = std::min(kGkOppLockDepth, std::max(kGkGuardDist, v.ball_goal - 12.0));
+        double cx = gk_line_x(ctx, depth);
+        double cy = clamp(90.0 + (v.by - 90.0) * (back / std::max(1.0, v.ball_goal)),
+                          kGkBlockYLo, kGkBlockYHi);
+        clamp_goalie_area(ctx, cx, cy);
+        motion::position(r, cx, cy);
     }
     return true;
 }
@@ -585,6 +600,19 @@ bool gk_rule_opp_kick_line(WorldModel &wm, int id, const GkView &) {
 bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 45.0 && v.opp_dmin < 25.0)) return false;
     gk_block_ball_line(wm.ctx, wm.home[id], v);
+    return true;
+}
+
+// 门将贴球站定防乌龙（docs/06 第101轮）：球贴门线且门将贴球、对手已离开球 →
+//   停轮站定，用身体封门，绝不绕行/推球。clear 的"绕到球门侧+侧移"分支在贴球时
+//   会把球拖进自家门（真机 6:1 复盘 5 个疑似乌龙全是这样，门将前后 -6~-15cm = 站球外侧）。
+//   —— 对齐 run_passive 第37轮"门线球站定防乌龙"，补齐门将缺的这条兜底。
+//   排在 clear 之前：对手贴球时 press_door 已在上游封连线，此处只管"自由球贴门线"。
+bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
+    if (!(v.ball_goal < 15.0 && v.db < 14.0)) return false;
+    TRACE_MARK(wm.home[id]);
+    wm.home[id].vl = 0.0;
+    wm.home[id].vr = 0.0;
     return true;
 }
 
@@ -693,23 +721,48 @@ const GkRule kGoalieRules[] = {
     gk_rule_cover_line,     // 球在门框内轨迹上：抢门线落点
     gk_rule_opp_kick_line,  // 对手准备出脚：按机头方向提前封线
     gk_rule_press_door,     // 门前对手贴球：封球-门连线
+    gk_rule_goal_line_hold, // 贴门线+贴球：站定防乌龙
     gk_rule_clear,          // 球在脚下：解围
     gk_rule_wall_ball,      // 贴墙朝门滚：提前到门线落点
     gk_rule_shot_block,     // 会进门的球：动态前压封角
     gk_rule_default,        // 无威胁：门前跟球 y
 };
 
+// 临时诊断（第101轮单刀复盘，用完删）：记录门将每帧命中规则到 C:\Strategy\goalie_trace.csv
+const char *const kGoalieRuleNames[] = {
+    "no_push", "side_step", "opp_ball_lock", "restart_kick", "cover_line",
+    "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
+    "shot_block", "default",
+};
+
+static void gk_trace(const char *rule, const WorldModel &wm, int id, const GkView &v) {
+    static FILE *fp = nullptr;
+    static long frame = 0;
+    if (!fp) fp = std::fopen("C:\\Strategy\\goalie_trace.csv", "a");
+    if (!fp) return;
+    ++frame;
+    std::fprintf(fp, "%ld,%s,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f\n",
+                 frame, rule, wm.ball.x, wm.ball.y, wm.home[id].x, wm.home[id].y,
+                 v.ball_goal, v.db, v.opp_dmin, (int)v.opp_has_ball, wm.ball.vx, wm.ball.vy);
+    if ((frame % 40) == 0) std::fflush(fp);
+}
+
 }  // anonymous namespace
 
 void run_goalie(WorldModel &wm, int id) {
     GkView v = gk_view(wm, id);
+    const char *hit = "none";
     // 点球和"球被甩到身后"排在对方持球滞回更新之前：命中的帧不推进滞回计数。
-    if (gk_rule_penalty(wm, id, v) || gk_rule_line_block(wm, id, v) ||
-        gk_rule_ball_behind(wm, id, v)) return;
-    gk_update_opp_hold(wm, v);
-    for (GkRule rule : kGoalieRules) {
-        if (rule(wm, id, v)) return;
+    if (gk_rule_penalty(wm, id, v)) { hit = "penalty"; }
+    else if (gk_rule_line_block(wm, id, v)) { hit = "line_block"; }
+    else if (gk_rule_ball_behind(wm, id, v)) { hit = "ball_behind"; }
+    else {
+        gk_update_opp_hold(wm, v);
+        for (int i = 0; i < (int)(sizeof(kGoalieRules) / sizeof(kGoalieRules[0])); ++i) {
+            if (kGoalieRules[i](wm, id, v)) { hit = kGoalieRuleNames[i]; break; }
+        }
     }
+    gk_trace(hit, wm, id, v);
 }
 
 // 对方门区停留红线（docs/13 方案 C）：规则"门区除门将外停留 >20 周期 → 罚点球"。

@@ -41,6 +41,22 @@ TUNABLE(kMySpeed, 2.18624);
 TUNABLE(kReachMargin, 1.04068);
 
 // ============================================================
+// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）
+// ============================================================
+// 总开关：0=关（回退旧行为），1=开。初始默认关，sim A/B 确认有收益再设默认 1。
+TUNABLE(kEarlyEnable, 0.0);
+// 轨迹采样步长(cm)：球慢（阈值 1.36cm/帧），10cm 采样已足够密。
+TUNABLE(kEarlyStep, 10.0);
+// 采样最远距离(cm)：覆盖传球距离；球这么慢，更远没必要追。
+TUNABLE(kEarlyMaxDist, 150.0);
+// 护栏1：截点离我方门的距离上限(cm)。对方组织进攻的传球落点必在我们半场，
+//   滚向对方半场/边线角落的死球不该追（追了白丢位，第 99 轮教训）。
+TUNABLE(kEarlyProtectDist, 140.0);
+// 护栏3：最近对手离球多近视为「还在带球」。球虽在飞，但若对方仍贴球控制，
+//   正面去抄会变抢球推人犯规，交给盯人/门将。
+TUNABLE(kEarlyDribbleDist, 20.0);
+
+// ============================================================
 // 纯函数：球轨迹 ∩ 球门前拦截线
 // ============================================================
 bool intercept_point(const WorldModel &wm, double line_dist,
@@ -64,6 +80,44 @@ bool intercept_point(const WorldModel &wm, double line_dist,
     ix = clamp(line_x, kMinX, kMaxX);
     iy = clamp(y_at_line, kMinY, kMaxY);
     return true;
+}
+
+// ============================================================
+// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）：
+//   补 intercept_point 的盲区——现有只算「球到门前拦截线」，横传/斜传的球
+//   根本滚不到那条线。本函数沿球前进方向扫一串采样点，逐个问「我能不能比球
+//   先到」，找到最早可截点站过去截。找不到则 return false 交回 plan_defense。
+// ============================================================
+bool early_intercept_point(const WorldModel &wm, int defender_id,
+                           double &out_x, double &out_y) {
+    if (kEarlyEnable < 0.5) return false;   // 总开关：默认关，sim 注入开启
+
+    // 护栏3：对方还贴着球（带球控制）→ 正面去抄会变抢球犯规，交盯人/门将
+    if (opp_clear_dist(wm) < kEarlyDribbleDist) return false;
+
+    const double spd = ball_speed(wm.ball.vx, wm.ball.vy);
+    if (spd < kMinBallSpeed) return false;   // 球慢/停着 → 交现有逻辑，别抢静止球
+
+    const double ux = wm.ball.vx / spd;      // 球前进方向单位向量
+    const double uy = wm.ball.vy / spd;
+    const double mx = wm.home[defender_id].x;
+    const double my = wm.home[defender_id].y;
+
+    // 从近往远扫：第一个「我能比球先到」的点就是离我最近、截得最早的点
+    for (double d = kEarlyStep; d <= kEarlyMaxDist; d += kEarlyStep) {
+        const double px = wm.ball.x + ux * d;   // 球未来会经过的位置（匀速近似）
+        const double py = wm.ball.y + uy * d;
+        if (px < kMinX || px > kMaxX || py < kMinY || py > kMaxY) continue;  // 出界不追
+        if (wm.ctx.dist_our_goal(px) > kEarlyProtectDist) continue;  // 护栏1：不在防区不追
+        const double t_ball = d / spd;                       // 球沿轨迹走 d cm
+        const double t_me   = dist(mx, my, px, py) / kMySpeed;   // 我直线冲过去
+        if (t_me <= t_ball * kReachMargin) {                 // 我比球先到（含余量）
+            out_x = px;
+            out_y = py;
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================
@@ -102,6 +156,11 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
             plan.target_x = wm.passive_x;
             plan.target_y = wm.passive_y;
         }
+    } else if (early_intercept_point(wm, defender_id, ix, iy)) {
+        // 主动截球（docs/15）：球在飞但现有断门逻辑不处理（横传/斜传/横滚），
+        //   沿球轨迹扫点、找「我能比球先到」的最早截点站过去截。
+        plan.target_x = ix;
+        plan.target_y = iy;
     } else {
         plan.target_x = wm.passive_x;
         plan.target_y = wm.passive_y;
@@ -245,7 +304,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
     double best_score = -1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y);
-        double d_goal = ctx.dist_our_goal(wm.opp[i].x);
+        double d_goal = wm.ctx.dist_our_goal(wm.opp[i].x);
         double appr = ball_approach_speed(wm, wm.opp[i].x, wm.opp[i].y);
         double score = mark_threat(d_ball, d_goal, appr, danger, i == dribbler);
         if (score > best_score) { best_score = score; best = i; }
@@ -259,7 +318,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         best != current_target) {
         double cur_d_ball = dist(wm.ball.x, wm.ball.y,
                                  wm.opp[current_target].x, wm.opp[current_target].y);
-        double cur_d_goal = ctx.dist_our_goal(wm.opp[current_target].x);
+        double cur_d_goal = wm.ctx.dist_our_goal(wm.opp[current_target].x);
         double cur_appr = ball_approach_speed(wm, wm.opp[current_target].x,
                                               wm.opp[current_target].y);
         double cur_score = mark_threat(cur_d_ball, cur_d_goal, cur_appr, danger,
@@ -272,7 +331,7 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
     //   追不危险的对手白费体力还丢区域。
     if (best >= 0) {
         double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[best].x, wm.opp[best].y);
-        double d_goal = ctx.dist_our_goal(wm.opp[best].x);
+        double d_goal = wm.ctx.dist_our_goal(wm.opp[best].x);
         if (d_ball > mark_engage_ball_dist() && d_goal > mark_engage_goal_dist()) {
             return -1;
         }
