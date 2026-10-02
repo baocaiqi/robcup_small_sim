@@ -552,6 +552,83 @@ int assign_marks(WorldModel &wm) {
     return assigned;
 }
 
+// ============================================================
+// 抢断唯一竞标（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）
+//   参考「预期价值（EV）决策」的通用防守战术思想，自研实现。
+//   把原来散在 run_mark_body（逼抢）/run_passive（争抢上抢）里各自独立、
+//   只按「谁近谁抢」的判断，收成每帧一次全局竞标：只让 EV 最高且 >0 的那一个
+//   上前抢脚下球，其余人守住盯人位——治第 103 轮「多人同扑、一起被过、身后漏人」。
+//   EV = 成功率 × 夺回球权价值  −  失败率 × 失位后露出的威胁  −  抢断折腾 λ。
+//   λ 是常数（对所有人相同），不影响「谁 EV 最高」的排序，只决定「要不要抢」的零点。
+// ============================================================
+// 总开关：0=关（回退旧分散逻辑「谁近谁抢」），1=开。默认开，真机验证。
+TUNABLE(kStealEnable, 1.0);
+// 候选门槛：我到球距离上限(cm)。对齐 run_passive 争抢的 kContestReach=60，不缩小
+//   原有「能抢」的范围，只把「谁最终抢」交给 EV 排序。
+TUNABLE(kStealDist, 60.0);
+// 球速上限(cm/帧)：球太快（对手高速带球）不抢——正面冲抢会被变速过掉。
+//   ⚠️ 保守默认 6.0（球速很少到 6cm/帧，默认不因球速拦截）；真机标定后调小。
+TUNABLE(kStealVMax, 6.0);
+// 夺回球权的价值（cm 当量，标定项）：越大越愿意抢。
+TUNABLE(kStealValue, 40.0);
+// 抢断折腾 λ（cm 当量）：抢断动作本身的成本（离开盯人位、转身、冲刺）。
+TUNABLE(kStealLambda, 8.0);
+// 成功率 sigmoid 系数 p = 1/(1+exp(−A + B·d + C·spd − D·has_cover))：
+//   越近(B)、球越慢(C)、有协防(D) 成功率越高。标定项。
+TUNABLE(kStealA, 2.0);
+TUNABLE(kStealB, 0.1);
+TUNABLE(kStealC, 0.5);
+TUNABLE(kStealD, 0.8);
+// 「有协防」判定半径(cm)：附近有队友（非门将）→ 抢断更安全，成功率 +D。
+TUNABLE(kStealCover, 30.0);
+
+// 我失位后「原来盯的那个人」还危不危险：越危险越不该离开他去抢。
+//   复用 mark_threat（口径与 assign_marks 完全一致），威胁分高 = 身后露大洞。
+static double steal_exposed_cost(const WorldModel &wm, int i) {
+    int t = wm.mark_assign[i];
+    if (t < 0 || t >= PLAYERS_PER_SIDE) return 0.0;
+    const double danger = ball_danger_speed(wm);
+    const int dribbler = nearest_opp_to_ball(wm);
+    const double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[t].x, wm.opp[t].y);
+    const double d_goal = wm.ctx.dist_our_goal(wm.opp[t].x);
+    const double appr = ball_approach_speed(wm, wm.opp[t].x, wm.opp[t].y);
+    return mark_threat(d_ball, d_goal, appr, danger, t == dribbler);
+}
+
+// 单个防守者 i 的抢断期望价值 EV（越小越不该抢；触发护栏返回 -1e9 不参与）。
+static double steal_ev(const WorldModel &wm, int i) {
+    const RobotState &me = wm.home[i];
+    const double d_ball = dist(me.x, me.y, wm.ball.x, wm.ball.y);
+    const double opp_spd = ball_speed(wm.ball.vx, wm.ball.vy);
+    if (d_ball > kStealDist || opp_spd > kStealVMax) return -1e9;  // 太远/球太快不抢
+
+    // 附近有队友（非门将）协防 → 抢断更安全
+    bool has_cover = false;
+    for (int k = 0; k < PLAYERS_PER_SIDE; ++k) {
+        if (k == i || wm.role[k] == ROLE_GOALIE) continue;
+        if (dist(me.x, me.y, wm.home[k].x, wm.home[k].y) < kStealCover) { has_cover = true; break; }
+    }
+
+    const double z = -kStealA + kStealB * d_ball + kStealC * opp_spd - (has_cover ? kStealD : 0.0);
+    const double p = 1.0 / (1.0 + std::exp(z));
+    const double gain = p * kStealValue;
+    const double loss = (1.0 - p) * steal_exposed_cost(wm, i);
+    return gain - loss - kStealLambda;
+}
+
+void steal_decide(WorldModel &wm) {
+    wm.stealer_id = -1;
+    if (kStealEnable < 0.5) return;   // 总开关：关 → 回退旧分散逻辑（谁近谁抢）
+    double best = 0.0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {   // i=1 起（0=门将，门将不参与）
+        const int r = wm.role[i];
+        if (r != ROLE_PASSIVE && r != ROLE_ASSIST && r != ROLE_MIDFIELD) continue;
+        if (i == wm.sweeper_id || i == wm.presser_id) continue;   // 有明确任务，不抢
+        const double ev = steal_ev(wm, i);
+        if (ev > best) { best = ev; wm.stealer_id = i; }
+    }
+}
+
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
     // 门槛①：威胁足够高（球在己方半场，passive 已人盯人）

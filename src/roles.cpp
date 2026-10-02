@@ -403,11 +403,27 @@ bool gk_turn_to(RobotState &r, double dx, double dy) {
     return false;
 }
 
+// 封角度站位 y（第 105 轮）：球会进门（on_target）时，在门将站位深度 tx 处取预测轨迹的 y，
+//   堵近角漏球；带球/慢球/不会进门走 else，仍用"球→门心"直线（避免被带球噪声带偏、左右抖）。
+//   根因：旧公式只认 v.by（球此刻的 y），无视球速，近角射门（球带向边角的速度分量）时门将站偏
+//   6~15cm，球从缝里漏进（真机 4 个近角丢球）。
+TUNABLE(kGkPredictBlock, 1.0);  // 0 = 回退到纯"球→门心"直线（治近角预测站位的总开关）
+inline double gk_block_cy(const GkView &v, double tx) {
+    if (kGkPredictBlock > 0.5 && v.on_target) {
+        double cy = 90.0;
+        if (!predict_y_at_x(v.bx, v.by, v.vx, v.vy, tx, cy))
+            cy = v.y_at_goal;                     // 预测不到就退到门线进门点兜底
+        return clamp(cy, kGkBlockYLo, kGkBlockYHi);
+    }
+    double back = std::max(0.0, v.ball_goal - 12.0);
+    return clamp(90.0 + (v.by - 90.0) * (back / std::max(1.0, v.ball_goal)),
+                 kGkBlockYLo, kGkBlockYHi);
+}
+
 // 站在球-门心连线上、球前 12cm 处封角度（深度夹在 [kGkGuardDist, 40]，不过度上抢）
 void gk_block_ball_line(const TeamContext &ctx, RobotState &r, const GkView &v) {
-    double back  = std::max(0.0, v.ball_goal - 12.0);
     double cx = gk_line_x(ctx, goalie_block_depth(ctx, v.bx, kGkGuardDist));
-    double cy = clamp(90.0 + (v.by - 90.0) * (back / std::max(1.0, v.ball_goal)), kGkBlockYLo, kGkBlockYHi);
+    double cy = gk_block_cy(v, cx);
     clamp_goalie_area(ctx, cx, cy);
     motion::position(r, cx, cy);
 }
@@ -508,11 +524,10 @@ bool gk_rule_opp_ball_lock(WorldModel &wm, int id, const GkView &v) {
         // 对方持球但球还没到门口（>30cm 或 门将离球≥25cm）→ 也站球-门连线封角：
         //   深度 = 球距门−12cm（连续），上限收窄到 kGkOppLockDepth(30)。
         //   不再钉死门线前10cm 干等单刀（见 docs/06 第101轮：opp_ball_lock 94.7% 时间走锁门线）。
-        double back  = std::max(0.0, v.ball_goal - 12.0);
+        //   封角 y 改用 gk_block_cy：球会进门时站预测轨迹（同第105轮治近角），否则球→门心直线。
         double depth = std::min(kGkOppLockDepth, std::max(kGkGuardDist, v.ball_goal - 12.0));
         double cx = gk_line_x(ctx, depth);
-        double cy = clamp(90.0 + (v.by - 90.0) * (back / std::max(1.0, v.ball_goal)),
-                          kGkBlockYLo, kGkBlockYHi);
+        double cy = gk_block_cy(v, cx);
         clamp_goalie_area(ctx, cx, cy);
         motion::position(r, cx, cy);
     }
@@ -1724,7 +1739,10 @@ static void run_mark_body(WorldModel &wm, int id, int t) {
         //   一条乌龙通道——从场侧时不追球、落到下面 mark 站位封线。
         double d_home_goal = wm.ctx.dist_our_goal(wm.home[id].x);
         double d_ball_goal = wm.ctx.dist_our_goal(wm.ball.x);
-        if (d_home_goal < d_ball_goal) {   // 门将侧（离门更近）→ 追球把球顶离门
+        // 门将侧（离门更近）→ 追球把球顶离门；但第 104 轮起只有「全局唯一竞标」
+        //   选中的那一个才上前抢（wm.stealer_id==id），其余人落到下方站位封线——
+        //   治第 103 轮「多人同扑、一起被过、身后漏人」。
+        if (d_home_goal < d_ball_goal && wm.stealer_id == id) {
             motion::chase_ball(wm.home[id], chase_target(wm));
             return;
         }
@@ -1832,13 +1850,12 @@ void run_passive(WorldModel &wm, int id) {
     if (kPassivePress > 0.5 && !in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y) &&
         wm.ctx.dist_our_goal(wm.ball.x) < kPassivePressDepth) {
         const RobotState &me = wm.home[id];
-        double my_d = dist(me.x, me.y, wm.ball.x, wm.ball.y), opp_d = 1e9, mate_d = 1e9;
-        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double my_d = dist(me.x, me.y, wm.ball.x, wm.ball.y), opp_d = 1e9;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
             opp_d = std::min(opp_d, dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y));
-            if (i != id && wm.role[i] != ROLE_GOALIE)
-                mate_d = std::min(mate_d, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
-        }
-        if (opp_d < kContestOppDist && my_d < kContestReach && my_d < mate_d &&
+        // 第 104 轮：全局唯一竞标取代「谁近谁抢」（原 my_d < mate_d）——只让 EV 最高的
+        //   那一个上前抢，其余人守住盯人位，治「多人同扑、一起被过、身后漏人」。
+        if (opp_d < kContestOppDist && my_d < kContestReach && wm.stealer_id == id &&
             wm.ctx.dist_our_goal(me.x) < wm.ctx.dist_our_goal(wm.ball.x)) {
             motion::chase_ball(wm.home[id], chase_target(wm));
             return;
