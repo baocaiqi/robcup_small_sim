@@ -131,6 +131,43 @@ bool position_aligned(RobotState &r, double tx, double ty, double desired_rot,
     return false;
 }
 
+// 到位迎球（第 103 轮，用户指令："防守/接球要迎球、不能后退绕行"）：
+//   ① 赶路阶段不因朝向没对准而限速——迎球时"该朝哪"（球来的反方向）与"该往哪跑"
+//      常常差 60~90°，照 position_aligned 的口径会一路 ×0.4，赶不到会合点；
+//   ② 进入 arrive_dist 后原地转正到 aim_rot 并站定——让球撞在身体正面
+//      （球被撞出去的方向 ≈ 机头方向，见头注释）。
+//   allow_reverse=false：目标在身后时先原地转身，不倒着走（接球路径的用户要求）。
+bool arrive_facing(RobotState &r, double tx, double ty, double aim_rot,
+                   double arrive_dist, double ang_tol, bool allow_reverse) {
+    const double de = std::hypot(tx - r.x, ty - r.y);
+    if (!std::isfinite(de) || !std::isfinite(aim_rot)) { stop(r); return false; }
+
+    const double te_head = angle_diff(aim_rot, r.rot);
+    if (de <= arrive_dist && std::fabs(te_head) <= ang_tol) { stop(r); return true; }
+
+    if (de > arrive_dist) {
+        if (!allow_reverse) {
+            const double te_go = angle_diff(angle_to(r.x, r.y, tx, ty), r.rot);
+            if (std::fabs(te_go) > 95.0) {          // 目标在正后方：先转身，绝不倒车
+                double w = clamp(kAlignedGain * te_go, -kMaxRotW, kMaxRotW);
+                if (std::fabs(w) < kMinRotW) w = (te_go > 0.0) ? kMinRotW : -kMinRotW;
+                r.vl = clamp(-w, -kMaxWheel, kMaxWheel);
+                r.vr = clamp( w, -kMaxWheel, kMaxWheel);
+                return false;
+            }
+        }
+        position(r, tx, ty, TM_STOP);               // 赶路：全速 + 制动包线，不因朝向罚速度
+        return false;
+    }
+
+    // 已在点上：原地转正迎球（差速轮原地旋转不产生位移，不会把位置甩出容差）
+    double w = clamp(kAlignedGain * te_head, -kMaxRotW, kMaxRotW);
+    if (std::fabs(w) < kMinRotW) w = (te_head > 0.0) ? kMinRotW : -kMinRotW;
+    r.vl = clamp(-w, -kMaxWheel, kMaxWheel);
+    r.vr = clamp( w, -kMaxWheel, kMaxWheel);
+    return false;
+}
+
 void chase_ball(RobotState &r, const BallState &pred) {    // 追预测点；快到球时减速避免冲过头。经过型任务 → TM_PASS（不套制动包线，
     //   否则抢点会变慢；减速仍由下面的 10cm 线性缩放负责）
     position(r, pred.x, pred.y, TM_PASS);

@@ -57,6 +57,22 @@ TUNABLE(kEarlyProtectDist, 140.0);
 TUNABLE(kEarlyDribbleDist, 20.0);
 
 // ============================================================
+// 会合点 + 迎球朝向（第 103 轮，用户指令）
+// ============================================================
+// 球每帧速度衰减：真机实测高速段 0.992~0.994（sim_bench kBallDecay 同一口径），
+//   所以外推必须带衰减——只按匀速推会把落点算远。
+TUNABLE(kBallDecay, 0.993);
+// 提前量（帧）：我比球早到这么多帧才算"会合"。
+//   差速轮原地转 ~30°/帧（motion kMaxRotW=14 轮速 ≈160°/s），转身 90° 约 3 帧 ⇒ 取 6 留一倍余量。
+TUNABLE(kMeetLead, 6.0);
+// 外推上限（帧）：40 帧 ≈ 2.4s，够覆盖一次传球飞行（球 6cm/帧 → 40 帧 240cm）。
+TUNABLE(kMeetHorizon, 40.0);
+// 会合点离场地边界的余量（cm）：贴边线的点站不下车。
+TUNABLE(kMeetMargin, 12.0);
+// 迎球朝向总开关（1=开，0=回退"只给位置不给朝向"的旧行为）。
+TUNABLE(kFaceIncoming, 1.0);
+
+// ============================================================
 // 纯函数：球轨迹 ∩ 球门前拦截线
 // ============================================================
 bool intercept_point(const WorldModel &wm, double line_dist,
@@ -121,6 +137,38 @@ bool early_intercept_point(const WorldModel &wm, int defender_id,
 }
 
 // ============================================================
+// 会合点（第 103 轮）：沿球未来轨迹逐帧外推，找「我比球早到 lead 帧」的第一个点。
+//   比喻：不是"球会停在哪我去那儿等"（球几乎不减速，等不到），而是
+//   "球会经过哪儿、我几帧能到那儿"——谁先到，谁就占住那个点。
+// ============================================================
+bool ball_meeting_point(const WorldModel &wm, double px, double py,
+                        double my_speed, double lead_frames,
+                        double &out_x, double &out_y, double &out_aim) {
+    const double spd = ball_speed(wm.ball.vx, wm.ball.vy);
+    if (spd < kMinBallSpeed) return false;          // 球停着：没有"会合"，交回静态站位
+    if (!(my_speed > 1e-6) || !std::isfinite(my_speed)) return false;
+    if (!std::isfinite(px) || !std::isfinite(py)) return false;
+
+    const double lead = std::max(0.0, lead_frames);
+    const double dec  = clamp(kBallDecay, 0.5, 1.0);
+    const int horizon = (int)clamp(kMeetHorizon, 1.0, 120.0);
+    double bx = wm.ball.x, by = wm.ball.y, vx = wm.ball.vx, vy = wm.ball.vy;
+
+    for (int k = 1; k <= horizon; ++k) {
+        bx += vx; by += vy; vx *= dec; vy *= dec;        // 球下一帧的位置（含衰减）
+        if (bx < kMeetMargin || bx > TeamContext::FIELD_LENGTH - kMeetMargin ||
+            by < kMeetMargin || by > TeamContext::FIELD_WIDTH - kMeetMargin) break;  // 出界：不再追
+        const double t_me = dist(px, py, bx, by) / my_speed;     // 我直线跑过去要几帧
+        if (t_me + lead <= (double)k) {                  // 我比球早到 lead 帧 → 这就是会合点
+            out_x = bx; out_y = by;
+            out_aim = angle_to(0.0, 0.0, -vx, -vy);      // 迎球朝向 = 球来向的反方向
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================
 // 主入口：2 号防守队员的断球点
 // ============================================================
 DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
@@ -140,6 +188,7 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     // 否则（球慢 / 背离 / 无有效交点）→ 回退到 situation 给的
     // 球-门连线静态点 wm.passive_xy。
     double ix = 0.0, iy = 0.0;
+    bool on_ball_path = false;   // 本次给的是「球来路上的点」还是「静态卡位点」
     if (plan.approaching && plan.ball_spd >= kMinBallSpeed &&
         intercept_point(wm, kInterceptLineDist, ix, iy)) {
         // 可达性判断：算出的断球点，我赶不赶得上？
@@ -152,6 +201,7 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         if (t_me <= t_ball * kReachMargin) {
             plan.target_x = ix;
             plan.target_y = iy;
+            on_ball_path = true;
         } else {
             plan.target_x = wm.passive_x;
             plan.target_y = wm.passive_y;
@@ -161,9 +211,19 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         //   沿球轨迹扫点、找「我能比球先到」的最早截点站过去截。
         plan.target_x = ix;
         plan.target_y = iy;
+        on_ball_path = true;
     } else {
         plan.target_x = wm.passive_x;
         plan.target_y = wm.passive_y;
+    }
+
+    // 迎球朝向（第 103 轮，用户指令）：断球点落在球来路上、且球确实在动
+    //   → 到点后机头朝球来的反方向（-v）站定迎球。
+    //   为什么：本平台球被撞出去的方向 ≈ 机头方向，斜着迎球 = 把球横着顶出去、
+    //   动量不抵消（球继续朝自家门滚）。球慢/卡位点不给朝向（方向是噪声）。
+    if (kFaceIncoming > 0.5 && on_ball_path && plan.ball_spd >= kMinBallSpeed) {
+        plan.aim_rot = angle_to(0.0, 0.0, -wm.ball.vx, -wm.ball.vy);
+        plan.face_incoming = true;
     }
 
     // 规则红线：断球点不得进入己方门区（只有守门员能进）。

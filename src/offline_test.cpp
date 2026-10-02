@@ -215,6 +215,128 @@ static int test_defense_reach() {
     return 0;
 }
 
+// 第 103 轮（用户指令："防守不能对准球冲过来的方向"）：
+//   断球点落在球来路上时，plan_defense 必须同时给出「迎球朝向」= 球来向的反方向。
+static int test_defense_face_incoming() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};          // 蓝队守 x=220
+    wm.ball.valid = true;
+    wm.passive_x = 150; wm.passive_y = 70;
+
+    // ① 正对门滚的球：v=(3,0) → 迎球朝向应 = 180°（机头朝 -x，正对来球）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 3.0; wm.ball.vy = 0.0;
+    wm.home[1].x = 168; wm.home[1].y = 90;
+    DefensePlan a = plan_defense(wm, 1);
+    if (!a.face_incoming) { printf("FAIL: 断球点应给出迎球朝向\n"); return 1; }
+    if (fabs(angle_diff(a.aim_rot, 180.0)) > 1e-6) {
+        printf("FAIL: 正对来球应朝 180°，实际 %.1f\n", a.aim_rot); return 1;
+    }
+
+    // ② 斜向球：v=(3,1.5) → 迎球朝向 = 球来向的反方向（不是"我跑过来的方向"）
+    wm.ball.x = 100; wm.ball.y = 60; wm.ball.vx = 3.0; wm.ball.vy = 1.5;
+    wm.home[1].x = 168; wm.home[1].y = 95;
+    DefensePlan b = plan_defense(wm, 1);
+    const double want = angle_to(0.0, 0.0, -3.0, -1.5);
+    if (!b.face_incoming || fabs(angle_diff(b.aim_rot, want)) > 1e-6) {
+        printf("FAIL: 斜向球迎球朝向错 face=%d aim=%.1f 应 %.1f\n",
+               (int)b.face_incoming, b.aim_rot, want); return 1;
+    }
+
+    // ③ 球停着：不给朝向（方向是噪声），执行方走旧的"只给位置"逻辑
+    wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.home[1].x = 168; wm.home[1].y = 90;
+    DefensePlan c = plan_defense(wm, 1);
+    if (c.face_incoming) { printf("FAIL: 球停着不该给迎球朝向\n"); return 1; }
+
+    // ④ 执行侧：人已经站在断球点上、但机头朝反了 → 原地转正（左右轮反向、共模≈0，不产生位移）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 3.0; wm.ball.vy = 0.0;
+    wm.home[1].x = 170; wm.home[1].y = 90; wm.home[1].rot = 0.0;
+    DefensePlan d0 = plan_defense(wm, 1);                 // 先问"断球点在哪"（禁区纪律会把它推出己方禁区）
+    wm.home[1].x = d0.target_x; wm.home[1].y = d0.target_y;   // 人站到点上
+    wm.home[1].rot = 0.0;                                     // 但机头朝 +x（背对来球）
+    DefensePlan d = plan_defense(wm, 1);
+    if (!d.face_incoming) { printf("FAIL: 场景④应有迎球朝向\n"); return 1; }
+    motion::arrive_facing(wm.home[1], d.target_x, d.target_y, d.aim_rot, 6.0, 12.0);
+    const double common = fabs(wm.home[1].vl + wm.home[1].vr);
+    if (!(wm.home[1].vl * wm.home[1].vr < 0.0) || common > 1e-9) {
+        printf("FAIL: 到位迎球应原地转正 vl=%.1f vr=%.1f (点在 %.1f,%.1f 我在 %.1f,%.1f)\n",
+               wm.home[1].vl, wm.home[1].vr, d.target_x, d.target_y, wm.home[1].x, wm.home[1].y);
+        return 1;
+    }
+
+    printf("defense face incoming: OK (正对/斜向给朝向，停球不给，到位原地转正)\n");
+    return 0;
+}
+
+// 第 103 轮：会合点 = 沿球未来轨迹找「我比球早到 lead 帧」的第一个点。
+//   为什么不是"球停点"：真机标定球每帧只衰减 0.992~0.994，球几乎不会自己停下。
+static int test_ball_meeting_point() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    double mx = 0, my = 0, aim = 0;
+
+    // ① 球停着 → 没有会合点（回退静态站位）
+    wm.ball.x = 100; wm.ball.y = 90; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    if (ball_meeting_point(wm, 130, 90, 2.0, 6.0, mx, my, aim)) {
+        printf("FAIL: 停球不该有会合点\n"); return 1;
+    }
+
+    // ② 慢球（低于 kMinBallSpeed）→ 方向不可信，不给会合点
+    wm.ball.vx = 0.5;
+    if (ball_meeting_point(wm, 130, 90, 2.0, 6.0, mx, my, aim)) {
+        printf("FAIL: 慢球不该有会合点\n"); return 1;
+    }
+
+    // ③ 正向来球：球从 (100,90) 以 5cm/帧朝 +x 滚 → 会合点必在 y=90 的轨迹上、
+    //    在球前方，且「我跑过去的时间 + 提前量」不晚于球到那里的时间。
+    wm.ball.vx = 5.0; wm.ball.vy = 0.0;
+    if (!ball_meeting_point(wm, 140, 90, 2.0, 6.0, mx, my, aim)) {
+        printf("FAIL: 正向来球应有会合点\n"); return 1;
+    }
+    if (fabs(my - 90.0) > 1e-9 || mx <= 100.0) {
+        printf("FAIL: 会合点应在球轨迹前方 (%.1f,%.1f)\n", mx, my); return 1;
+    }
+    if (fabs(angle_diff(aim, 180.0)) > 1e-6) {   // 球朝 +x 来 → 机头应朝 -x
+        printf("FAIL: 迎球朝向应 180°，实际 %.1f\n", aim); return 1;
+    }
+    {   // 用同一套衰减复算"球到会合点要几帧"，验证提前量确实成立
+        const double dec = get_param("defense.kBallDecay", 0.993);
+        double bx = 100.0, vx = 5.0;
+        int frames = -1;
+        for (int k = 1; k <= 40; ++k) {
+            bx += vx; vx *= dec;
+            if (bx >= mx - 1e-9) { frames = k; break; }
+        }
+        if (frames < 0) { printf("FAIL: 会合点不在 40 帧外推范围内\n"); return 1; }
+        const double t_me = dist(140.0, 90.0, mx, my) / 2.0;
+        if (t_me + 6.0 > (double)frames) {
+            printf("FAIL: 会合点没留出提前量 t_me=%.2f+6 > 球到点 %d 帧\n", t_me, frames); return 1;
+        }
+    }
+
+    // ④ 站在场地另一头：追不上 → 不给会合点（避免为一个够不着的球失位）
+    if (ball_meeting_point(wm, 20, 20, 2.0, 6.0, mx, my, aim)) {
+        printf("FAIL: 追不上的球不该给会合点 (%.1f,%.1f)\n", mx, my); return 1;
+    }
+
+    // ⑤ 斜向球：会合点落在斜轨迹上，朝向 = 球来向的反方向
+    wm.ball.x = 100; wm.ball.y = 60; wm.ball.vx = 4.0; wm.ball.vy = 2.0;
+    if (!ball_meeting_point(wm, 140, 80, 2.0, 6.0, mx, my, aim)) {
+        printf("FAIL: 斜向球应有会合点\n"); return 1;
+    }
+    const double want = angle_to(0.0, 0.0, -4.0, -2.0);
+    if (fabs(angle_diff(aim, want)) > 1e-6) {
+        printf("FAIL: 斜向球迎球朝向错 aim=%.1f 应 %.1f\n", aim, want); return 1;
+    }
+    if (fabs((my - 60.0) * 4.0 - (mx - 100.0) * 2.0) > 2.0) {   // 近似落在斜率 2/4 的轨迹上
+        printf("FAIL: 会合点偏离球轨迹 (%.1f,%.1f)\n", mx, my); return 1;
+    }
+
+    printf("ball meeting point: OK (停球/慢球/追不上不给，正向/斜向给点并留提前量)\n");
+    return 0;
+}
+
 // 球-门连线护门点单测（docs 第14轮：参考官方 demo CenterDefender 思想）
 static int test_goal_cover() {
     TeamContext ctx{true};   // 蓝队守右门 x=220
@@ -2660,6 +2782,11 @@ static int test_coop_pass_task() {
     };
     using Runner = void (*)(WorldModel &, int);
     const Runner runners[] = {run_assist, run_midfield, run_passive};
+    // 第 103 轮：本段的断言都是"接球人走位 = 直线奔向任务锁点"这条老口径，
+    //   先把接球会合点新行为（roles.kRecvMeetBall / kRecvNoReverse）关掉，
+    //   新行为由 test_receiver_meet_ball 单独验；本段同时充当"回滚开关有效"的验证。
+    set_param("roles.kRecvMeetBall", 0.0);
+    set_param("roles.kRecvNoReverse", 0.0);
     for (int receiver = 2; receiver <= 4; ++receiver) {
         WorldModel wm = scene();
         if (receiver != 2) { wm.assist_x = 130; wm.assist_y = 140; }
@@ -2692,7 +2819,8 @@ static int test_coop_pass_task() {
         WorldModel ordinary = wm; ordinary.coop_pass_task.active = false;
         runners[receiver - 2](ordinary, receiver);
         runners[receiver - 2](wm, receiver);
-        if (!same_wheels(wm.home[receiver], expected_receiver) || same_wheels(wm.home[receiver], ordinary.home[receiver])) {
+        if (!same_wheels(wm.home[receiver], expected_receiver) ||
+            same_wheels(wm.home[receiver], ordinary.home[receiver])) {
             printf("FAIL: coop task receiver target overwritten id=%d\n", receiver); return 1;
         }
         for (int other = 2; other <= 4; ++other) {
@@ -2728,6 +2856,7 @@ static int test_coop_pass_task() {
             printf("FAIL: coop task timeout/ordinary recovery id=%d\n", receiver); return 1;
         }
     }
+    reset_params();   // 恢复接球会合点新行为（默认开）
     // 新任务与存量任务都要服从危险/比赛状态；不允许取消后同帧重发。
     for (int reason = 0; reason < 9; ++reason) {
         WorldModel wm = scene(); run_active(wm, 1);
@@ -3019,10 +3148,15 @@ static int test_ordinary_pass_task() {
     task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
     const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
     task.push_dir_x = (task.rx - wm.ball.x) / len; task.push_dir_y = (task.ry - wm.ball.y) / len;
+    // 第 103 轮：验"普通传球任务的锁点不被覆盖"这条老性质 → 先关掉接球会合点新行为。
+    set_param("roles.kRecvMeetBall", 0.0);
+    set_param("roles.kRecvNoReverse", 0.0);
     run_assist(wm, task.receiver_id);
     RobotState expected = wm.home[task.receiver_id]; motion::position(expected, task.rx, task.ry);
-    if (fabs(wm.home[task.receiver_id].vl - expected.vl) > 1e-8 ||
-        fabs(wm.home[task.receiver_id].vr - expected.vr) > 1e-8) {
+    const bool ordinary_ok = fabs(wm.home[task.receiver_id].vl - expected.vl) <= 1e-8 &&
+                             fabs(wm.home[task.receiver_id].vr - expected.vr) <= 1e-8;
+    reset_params();
+    if (!ordinary_ok) {
         printf("FAIL: ordinary receiver target overwritten\n"); return 1;
     }
     wm.ball_last = wm.ball;
@@ -3082,14 +3216,20 @@ static int test_pass_readiness_gate() {
         if (pass_receiver_ready(wm)) {
             printf("FAIL: pass readiness far receiver accepted kind=%d\n", (int)kind); return 1;
         }
+        // 第 103 轮：本段验"WAIT 时不改锁点/不推球"，接球人走位口径按老的锁点直线比。
+        set_param("roles.kRecvMeetBall", 0.0);
+        set_param("roles.kRecvNoReverse", 0.0);
         RobotState expected_receiver = wm.home[receiver];
         motion::position(expected_receiver, locked_x, locked_y);
         run_active(wm, 1);
         run_assist(wm, receiver);
-        if (!task.active || task.receiver_id != receiver || task.rx != locked_x || task.ry != locked_y ||
-            task.observing_push || !stopped(wm.home[1]) ||
-            fabs(wm.home[receiver].vl - expected_receiver.vl) > 1e-8 ||
-            fabs(wm.home[receiver].vr - expected_receiver.vr) > 1e-8) {
+        const bool wait_ok = task.active && task.receiver_id == receiver &&
+                             task.rx == locked_x && task.ry == locked_y &&
+                             !task.observing_push && stopped(wm.home[1]) &&
+                             fabs(wm.home[receiver].vl - expected_receiver.vl) <= 1e-8 &&
+                             fabs(wm.home[receiver].vr - expected_receiver.vr) <= 1e-8;
+        reset_params();
+        if (!wait_ok) {
             printf("FAIL: pass readiness WAIT mutated/pushed kind=%d active=%d observing=%d\n",
                    (int)kind, (int)task.active, (int)task.observing_push); return 1;
         }
@@ -3116,6 +3256,102 @@ static int test_pass_readiness_gate() {
         printf("FAIL: pass readiness WAIT outranked safety cancellation\n"); return 1;
     }
     printf("pass readiness gate: OK (shared WAIT/READY/locked task/safety priority)\n");
+    return 0;
+}
+
+// 第 103 轮（用户指令："接球需要提前到达位置，而不是后退、绕一下再接球"）：
+//   ① 球在飞 → 接球人奔「会合点」迎球（不再傻站锁点等球滚过来）；
+//   ② 目标在正后方 → 原地转身，不倒着走。
+static int test_receiver_meet_ball() {
+    auto scene = [](CoopPassPhase phase, double ball_x, double ball_vx,
+                    double receiver_x, double receiver_rot) {
+        WorldModel wm = coop_task_scene();
+        auto &task = wm.coop_pass_task;
+        task = {};
+        task.active = true; task.passer_id = 1; task.receiver_id = 2;
+        task.rx = 55; task.ry = 90; task.frames_left = 20;
+        task.game_state = wm.game_state; task.kind = PassTaskKind::Coop;
+        task.phase = phase;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 15 + 35 * i; }
+        wm.ball.x = ball_x; wm.ball.y = 90; wm.ball.vx = ball_vx; wm.ball.vy = 0.0;
+        wm.we_have_ball = true; wm.whos_ball = 1; wm.threat_level = 0.1;
+        wm.home[2].x = receiver_x; wm.home[2].y = 90; wm.home[2].rot = receiver_rot;
+        return wm;
+    };
+
+    // ① 球从远处朝锁点滚（球在 x=120 朝 -x 滚 5cm/帧，接球人在 x=60、面朝 +x）：
+    //    应奔"球来路上的会合点"迎上去（测试用同一个公开函数复算期望值），
+    //    而不是"直奔锁点 55"。会合点约 (67,90)，离接球人 7cm → 到位即站定迎球。
+    {
+        WorldModel wm = scene(CoopPassPhase::Receiving, 120.0, -5.0, 60.0, 0.0);
+        double mx = 0, my = 0, aim = 0;
+        if (!ball_meeting_point(wm, 60.0, 90.0, get_param("roles.kRecvSpeed", 2.0),
+                                get_param("roles.kRecvLead", 6.0), mx, my, aim)) {
+            printf("FAIL: 会合点场景本应算得出会合点\n"); return 1;
+        }
+        RobotState expect = wm.home[2];   // 期望 = 去会合点 + 到位迎球
+        motion::arrive_facing(expect, mx, my, aim, get_param("roles.kRecvArriveDist", 8.0),
+                              get_param("roles.kPassReceiveAngleTol", 12.0), false);
+        RobotState old_way = wm.home[2];  // 旧行为 = 直奔锁点
+        motion::position(old_way, 55.0, 90.0);
+        run_assist(wm, 2);   // 接球人入口（run_assist 首行即 run_pass_receiver）
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != 2) {
+            printf("FAIL: 会合点场景任务被取消 active=%d\n", (int)wm.coop_pass_task.active); return 1;
+        }
+        if (fabs(wm.home[2].vl - expect.vl) > 1e-8 || fabs(wm.home[2].vr - expect.vr) > 1e-8) {
+            printf("FAIL: 接球人没走会合点 vl=%.1f/%.1f 期望 %.1f/%.1f（会合点 %.1f,%.1f）\n",
+                   wm.home[2].vl, wm.home[2].vr, expect.vl, expect.vr, mx, my); return 1;
+        }
+        if (fabs(wm.home[2].vl - old_way.vl) <= 1e-8 && fabs(wm.home[2].vr - old_way.vr) <= 1e-8) {
+            printf("FAIL: 新行为没生效（仍等于直奔锁点）\n"); return 1;
+        }
+    }
+
+    // ② 目标在正后方（接球人在 x=70 面朝 +x、锁点在 x=55 身后）：原地转身，不倒车。
+    {
+        WorldModel wm = scene(CoopPassPhase::Preparing, 100.0, 0.0, 70.0, 0.0);
+        run_assist(wm, 2);   // 接球人入口（run_assist 首行即 run_pass_receiver）
+        const double common = fabs(wm.home[2].vl + wm.home[2].vr);
+        if (!(wm.home[2].vl < 0.0 && wm.home[2].vr > 0.0) || common > 1e-9) {
+            printf("FAIL: 目标在身后应原地转身 vl=%.1f vr=%.1f\n", wm.home[2].vl, wm.home[2].vr); return 1;
+        }
+    }
+
+    // ③ 球停着（还没出脚）：仍走锁点（原行为），不做会合点那套。
+    {
+        WorldModel wm = scene(CoopPassPhase::Preparing, 100.0, 0.0, 30.0, 0.0);
+        RobotState baseline = wm.home[2];
+        motion::position(baseline, 55.0, 90.0);
+        run_assist(wm, 2);   // 接球人入口（run_assist 首行即 run_pass_receiver）
+        if (fabs(wm.home[2].vl - baseline.vl) > 1e-8 || fabs(wm.home[2].vr - baseline.vr) > 1e-8) {
+            printf("FAIL: 停球时应按锁点走位 vl=%.1f/%.1f 应 %.1f/%.1f\n",
+                   wm.home[2].vl, wm.home[2].vr, baseline.vl, baseline.vr); return 1;
+        }
+    }
+
+    // ④ 纪律红线（第 103 轮 sim A/B 暴露"门区2+人帧 +40.8"）：会合点落进对方门区 →
+    //    弃用会合点、回退锁点（否则接球人会为了抢球踩进对方小禁区 → 罚点球）。
+    {
+        WorldModel wm = scene(CoopPassPhase::Preparing, 60.0, -2.0, 40.0, 0.0);
+        wm.coop_pass_task.rx = 60.0; wm.coop_pass_task.ry = 90.0;
+        double mx = 0, my = 0, aim = 0;
+        if (!ball_meeting_point(wm, 40.0, 90.0, get_param("roles.kRecvSpeed", 2.0),
+                                get_param("roles.kRecvLead", 6.0), mx, my, aim)) {
+            printf("FAIL: 门区场景本应算得出会合点（否则本用例测不到红线）\n"); return 1;
+        }
+        if (!in_opp_goal_area(wm.ctx, mx, my)) {
+            printf("FAIL: 门区场景的会合点应落在对方门区内 (%.1f,%.1f)\n", mx, my); return 1;
+        }
+        RobotState baseline = wm.home[2];
+        motion::position(baseline, 60.0, 90.0);
+        run_assist(wm, 2);   // 接球人入口（run_assist 首行即 run_pass_receiver）
+        if (fabs(wm.home[2].vl - baseline.vl) > 1e-8 || fabs(wm.home[2].vr - baseline.vr) > 1e-8) {
+            printf("FAIL: 会合点落对方门区应回退锁点 vl=%.1f/%.1f 应 %.1f/%.1f\n",
+                   wm.home[2].vl, wm.home[2].vr, baseline.vl, baseline.vr); return 1;
+        }
+    }
+
+    printf("receiver meet ball: OK (会合点迎球、身后原地转身不倒车、停球回退锁点)\n");
     return 0;
 }
 
@@ -4089,6 +4325,7 @@ int main(int argc, char **argv) {
         rc |= test_coop_lifecycle();
         rc |= test_ordinary_pass_task();
         rc |= test_pass_readiness_gate();
+        rc |= test_receiver_meet_ball();     // 第 103 轮：接球会合点 + 禁止倒车
         rc |= test_pass_opponent_first_cancel();
         rc |= test_pass_receive_control();
         printf(rc ? "=== COOP PASS TEST FAILED ===\n" : "=== COOP PASS TEST PASSED ===\n");
@@ -4110,6 +4347,7 @@ int main(int argc, char **argv) {
     rc |= test_coop_lifecycle();
     rc |= test_ordinary_pass_task();
     rc |= test_pass_readiness_gate();
+    rc |= test_receiver_meet_ball();     // 第 103 轮：接球会合点 + 禁止倒车
     rc |= test_pass_opponent_first_cancel();
     rc |= test_pass_receive_control();
     rc |= test_goalie_side_step();
@@ -4135,6 +4373,8 @@ int main(int argc, char **argv) {
     rc |= test_mark_assignment();      // 第 97 轮：盯人一一匹配 + 防抖动四道锁
     rc |= test_goalie_predict();
     rc |= test_defense_reach();
+    rc |= test_defense_face_incoming();  // 第 103 轮：防守到位迎球朝向
+    rc |= test_ball_meeting_point();     // 第 103 轮：会合点计算
     rc |= test_goal_cover();
     rc |= test_team_state();
     rc |= test_fixed_roles();

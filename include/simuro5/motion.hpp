@@ -56,6 +56,20 @@ void position(RobotState &r, double tx, double ty, TargetMode mode = TM_STOP);
 bool position_aligned(RobotState &r, double tx, double ty, double desired_rot,
                       double pos_tol = 3.0, double ang_tol = 8.0);
 
+// ============================================================
+// 到位迎球（第 103 轮，用户指令："防守/接球要迎球、不能后退绕行"）
+//   与 position_aligned 的区别只有两点，都针对"迎球"这个场景：
+//     ① 赶路阶段**不因朝向没对准而限速**（position_aligned 在朝向差 >60° 时命令 ×0.4）
+//        —— 迎球时"该朝哪"（球来的反方向）常常和"该往哪跑"差 60~90°，
+//        照 position_aligned 跑会一路半速，赶不到会合点。
+//     ② 到位后**原地转正到 aim_rot 并站定**（不是转到行进方向）：让球撞在身体正面。
+//   allow_reverse=false：目标在身后时先原地转身、不倒退（接球路径的用户要求）。
+//   返回 true = 已到位且已迎好（调用方可以放心做后续动作）。
+// ============================================================
+bool arrive_facing(RobotState &r, double tx, double ty, double aim_rot,
+                   double arrive_dist = 8.0, double ang_tol = 12.0,
+                   bool allow_reverse = true);
+
 // 追球：追平台的预测球位（球速外推），到附近减速。
 void chase_ball(RobotState &r, const BallState &pred);
 

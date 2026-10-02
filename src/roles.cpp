@@ -824,6 +824,12 @@ TUNABLE(kChargeOwnGuard, 70.0);    // cm
 TUNABLE(kChargeThrough, 20.0);     // 目标 = 球心沿冲撞方向再过 20cm（穿球，不在球前停）
 TUNABLE(kPassivePress, 1.0);   // PASSIVE 争抢时从球门侧上抢（run_passive 末尾）
 TUNABLE(kPassivePressDepth, 130.0);   // 深度扫 110/130/150/170/全场：130 为拐点（净胜 +4~5，单人滞留不增）
+// 防守到位迎球（第 103 轮，用户指令："防守不能对准球冲过来的方向"）：
+//   断球点在球来路上时，走位到点后原地转正、让机头朝球来的方向（-v）站定。
+//   本平台球被撞出去的方向 ≈ 机头方向 ⇒ 斜着迎球只会把球横着顶出去、动量照旧。
+TUNABLE(kDefFaceIncoming, 1.0);    // 回滚开关（0 = 旧的"只给位置不给朝向"）
+TUNABLE(kDefArriveDist, 6.0);      // cm：进入该半径即停车转正迎球
+TUNABLE(kDefFaceAngTol, 12.0);     // 度：迎球朝向允许误差
 TUNABLE(kActiveGaLimit, 8);
 TUNABLE(kActiveGaTotal, 18);  // 在门区总时长兜底：平台 20 周期判罚红线，留 2 帧余量
                                         // （8/29 实测被判滞留 21~30 帧；太紧会打断合法带球攻门 10~15 帧）
@@ -843,6 +849,22 @@ TUNABLE(kPassReceiveMinDriveScale, 0.25);   // 贴球时保留的最小平移比
 TUNABLE(kPassReceiveDirMinSpeed, 0.5);      // cm/帧：低于此值不采信球速方向
 TUNABLE(kPassReceiveDirMaxSpeed, 15.0);     // cm/帧：高于此值视为异常速度
 TUNABLE(kPassReceiveAngleTol, 12.0);        // 度：面向来球的允许误差
+
+// ============================================================
+// 接球会合点（第 103 轮，用户指令："接球需要提前到达位置，而不是后退、绕一下再接球"）
+// ============================================================
+// 总开关：1=接球人不去"锁点"站着等，而是算会合点、提前站过去迎球；0=回退原行为。
+TUNABLE(kRecvMeetBall, 1.0);
+// 提前量（帧）：接球人要比球早到这么多帧（转身迎球用的时间）。
+TUNABLE(kRecvLead, 6.0);
+// 接球人的估算速度（cm/帧）：与 pass.RECEIVER_READY_SPEED 同口径。
+TUNABLE(kRecvSpeed, 2.0);
+// 会合点相对锁点的最大偏移（cm）：球被踢飞/回传时不追出这个范围（防"追球追回自家半场"）。
+TUNABLE(kRecvMeetMaxOff, 60.0);
+// 到位判定半径（cm）：进入即停车原地转正迎球。
+TUNABLE(kRecvArriveDist, 8.0);
+// 接球路径禁止倒车（1=开，0=允许倒着走）。
+TUNABLE(kRecvNoReverse, 1.0);
 
 bool pass_context_safe(const WorldModel &wm) {
     if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
@@ -1023,12 +1045,55 @@ double pass_receive_facing(const WorldModel &wm, const CoopPassTask &task, const
     return receiver.rot;
 }
 
+// 接球目标点（第 103 轮，用户指令："接球点的计算有问题 / 接球要提前到达位置"）：
+//   球在飞 → 会合点（球来路上、"我比球早到 kRecvLead 帧"的点），提前站过去；
+//   球停着 / 会合点离锁点太远（球被踢飞、回传）→ 锁点（原行为，不追出防区）。
+//   返回 true 时 out_aim = 迎球朝向（球来向的反方向）。
+bool receiver_meeting_target(const WorldModel &wm, const CoopPassTask &task, int id,
+                             double &tx, double &ty, double &out_aim) {
+    tx = task.rx; ty = task.ry; out_aim = 0.0;
+    if (kRecvMeetBall < 0.5) return false;
+    const RobotState &r = wm.home[id];
+    double mx = 0.0, my = 0.0, maim = 0.0;
+    if (!ball_meeting_point(wm, r.x, r.y, kRecvSpeed, kRecvLead, mx, my, maim)) return false;
+    if (dist(mx, my, task.rx, task.ry) > kRecvMeetMaxOff) return false;
+    // 纪律红线（第 103 轮 A/B 暴露）：会合点是"球轨迹上的原始点"，没经过 clamp_receive_point
+    //   的场地/门区过滤。若它落在对方门区（球被压到门前时很常见），接球人就会踩门区 →
+    //   sim 50 局实测"门区2+人帧 +40.8"直接出噪声带（犯规风险）。落红线内一律弃用、回退锁点。
+    const TeamContext &ctx = wm.ctx;
+    if (in_opp_goal_area(ctx, mx, my) || in_goal_area(ctx, mx, my) || in_no_push_zone(mx, my)) return false;
+    tx = mx; ty = my; out_aim = maim;
+    return true;
+}
+
+// 原地转身（不产生位移）：用于"禁止倒车"时先转向、再前进。
+void turn_in_place(RobotState &r, double te_deg) {
+    double w = clamp(0.22 * te_deg, -14.0, 14.0);
+    if (std::fabs(w) < 2.5) w = (te_deg > 0.0) ? 2.5 : -2.5;
+    r.vl = clamp(-w, -motion::kMaxWheel, motion::kMaxWheel);
+    r.vr = clamp( w, -motion::kMaxWheel, motion::kMaxWheel);
+}
+
 void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
     RobotState &receiver = wm.home[id];
+    // 目标点：会合点优先（球在飞时"迎上去接"，不是"站在锁点等球滚过来"）。
+    double tx = task.rx, ty = task.ry, meet_aim = 0.0;
+    const bool has_meet = receiver_meeting_target(wm, task, id, tx, ty, meet_aim);
+    // 禁止倒车（用户指令）：目标在正后方 → 先原地转身，绝不倒着走。
+    auto go_to = [&](double gx, double gy) {
+        if (kRecvNoReverse > 0.5) {
+            const double te_go = angle_diff(angle_to(receiver.x, receiver.y, gx, gy), receiver.rot);
+            if (std::fabs(te_go) > 95.0) { turn_in_place(receiver, te_go); return; }
+        }
+        motion::position(receiver, gx, gy);
+    };
+
     const double ball_distance = dist(receiver.x, receiver.y, wm.ball.x, wm.ball.y);
     if (!std::isfinite(ball_distance) || !std::isfinite(kPassReceiveSlowRadius) ||
         kPassReceiveSlowRadius <= 1e-6 || ball_distance >= kPassReceiveSlowRadius) {
-        motion::position(receiver, task.rx, task.ry);
+        if (has_meet) motion::arrive_facing(receiver, tx, ty, meet_aim, kRecvArriveDist,
+                                            kPassReceiveAngleTol, /*allow_reverse=*/kRecvNoReverse < 0.5);
+        else go_to(tx, ty);
         return;
     }
 
@@ -1044,16 +1109,16 @@ void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
         // 近球时先原地迎球；把当前位置作为目标，避免离锁点稍远时 position_aligned 退回普通赶路。
         motion::position_aligned(receiver, receiver.x, receiver.y, desired_rot, 3.0, angle_tol);
     } else {
-        const double target_distance = dist(receiver.x, receiver.y, task.rx, task.ry);
+        const double target_distance = dist(receiver.x, receiver.y, tx, ty);
         if (!std::isfinite(target_distance) || target_distance <= 3.0) {
             motion::stop(receiver);
         } else {
-            const double target_rot = angle_to(receiver.x, receiver.y, task.rx, task.ry);
+            const double target_rot = angle_to(receiver.x, receiver.y, tx, ty);
             const double forward_error = std::fabs(angle_diff(target_rot, desired_rot));
             const double reverse_error = std::fabs(angle_diff(target_rot + 180.0, desired_rot));
-            // 差速车不能横移：锁点若在机头侧面就先面向球等待；前后方向一致才低速补位。
+            // 差速车不能横移：目标点若在机头侧面就先面向球等待；前后方向一致才低速补位。
             if (std::min(forward_error, reverse_error) <= 2.0 * angle_tol)
-                motion::position(receiver, task.rx, task.ry);
+                go_to(tx, ty);
             else
                 motion::stop(receiver);
         }
@@ -1070,13 +1135,31 @@ void run_receiving_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
     receiver.vr = clamp(drive + turn, -motion::kMaxWheel, motion::kMaxWheel);
 }
 
+// 接球准备（第 103 轮）：不是"走到锁点站着等球滚过来"，而是算会合点、
+//   提前站过去、到位后原地转正迎球站定（球撞在身体正面）。
+void run_preparing_receiver(WorldModel &wm, const CoopPassTask &task, int id) {
+    RobotState &receiver = wm.home[id];
+    double tx = task.rx, ty = task.ry, aim = 0.0;
+    if (receiver_meeting_target(wm, task, id, tx, ty, aim)) {
+        motion::arrive_facing(receiver, tx, ty, aim, kRecvArriveDist, kPassReceiveAngleTol,
+                              /*allow_reverse=*/kRecvNoReverse < 0.5);
+        return;
+    }
+    // 没有会合点（球还没出脚/球停着）：去锁点，但同样禁止倒车（用户指令）。
+    if (kRecvNoReverse > 0.5) {
+        const double te_go = angle_diff(angle_to(receiver.x, receiver.y, tx, ty), receiver.rot);
+        if (std::fabs(te_go) > 95.0) { turn_in_place(receiver, te_go); return; }
+    }
+    motion::position(receiver, tx, ty);
+}
+
 bool run_pass_receiver(WorldModel &wm, int id) {
     cancel_unsafe_pass_task(wm);
     if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) { carry_pass_ball(wm, id); return true; }
     const auto &task = wm.coop_pass_task;
     if (!task.active || task.receiver_id != id) return false;
     if (task.phase == CoopPassPhase::Receiving) run_receiving_receiver(wm, task, id);
-    else motion::position(wm.home[id], task.rx, task.ry);
+    else run_preparing_receiver(wm, task, id);
     return true;
 }
 }
@@ -1762,7 +1845,14 @@ void run_passive(WorldModel &wm, int id) {
         }
     }
     DefensePlan dp = plan_defense(wm, id);
-    motion::position(wm.home[id], dp.target_x, dp.target_y);
+    // 到位迎球（第 103 轮）：断球点在球来路上时，走位到点后原地转正、机头朝球来的方向站定。
+    //   不这么做（旧行为）：机头朝的是"我自己的来路"，球从侧面撞上来只被横着顶一下，
+    //   动量没抵消 → 球继续朝自家门滚，甚至被顶到更危险的角度。
+    if (dp.face_incoming && kDefFaceIncoming > 0.5)
+        motion::arrive_facing(wm.home[id], dp.target_x, dp.target_y, dp.aim_rot,
+                              kDefArriveDist, kDefFaceAngTol);
+    else
+        motion::position(wm.home[id], dp.target_x, dp.target_y);
 }
 
 // ============================================================
@@ -1964,7 +2054,11 @@ void run_assist(WorldModel &wm, int id) {
         }
         DefensePlan dp = plan_defense(wm, id);
         double ty = clamp(dp.target_y + 30.0, 20.0, 160.0);
-        motion::position(wm.home[id], dp.target_x, ty);
+        if (dp.face_incoming && kDefFaceIncoming > 0.5)   // 第 103 轮：到位迎球
+            motion::arrive_facing(wm.home[id], dp.target_x, ty, dp.aim_rot,
+                                  kDefArriveDist, kDefFaceAngTol);
+        else
+            motion::position(wm.home[id], dp.target_x, ty);
         return;
     }
     // —— 进攻分支：站 A 的助攻点；先躲敌人，再和队友 Y 轴互相推开 ——
@@ -2030,7 +2124,11 @@ void run_midfield(WorldModel &wm, int id) {
         }
         DefensePlan dp = plan_defense(wm, id);
         double ty = clamp(dp.target_y - 30.0, 20.0, 160.0);
-        motion::position(wm.home[id], dp.target_x, ty);
+        if (dp.face_incoming && kDefFaceIncoming > 0.5)   // 第 103 轮：到位迎球
+            motion::arrive_facing(wm.home[id], dp.target_x, ty, dp.aim_rot,
+                                  kDefArriveDist, kDefFaceAngTol);
+        else
+            motion::position(wm.home[id], dp.target_x, ty);
         return;
     }
     // —— 进攻分支：站 A 的中场点；先躲敌人，再和队友 Y 轴互相推开 ——

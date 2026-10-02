@@ -249,6 +249,15 @@ struct DefensePlan {
     double target_x = 0, target_y = 90;   // 断球站位点（给 motion::position 用）
     bool   approaching = false;           // 球是否朝己方球门逼近（有预判价值）
     double ball_spd = 0;                  // 当前球速（cm/帧）
+
+    // —— 迎球朝向（第 103 轮，用户指令："防守不能对准球冲过来的方向"）——
+    //   断球点落在球来路上时，同时给出「机头该朝哪」= 球来向的反方向（-v）。
+    //   为什么必须给：本平台没有踢球动作，球被撞出去的方向 ≈ 撞球瞬间的机头方向
+    //   （见 motion.hpp 头注释）。只给位置不给朝向 ⇒ 防守者是斜着/侧着迎球，
+    //   球只被横着顶一下、动量没被抵消，继续朝自家门滚。
+    //   face_incoming=false 表示"这次给的不是球来路上的点"（静态卡位），调用方按老逻辑走。
+    double aim_rot = 0.0;                 // 迎球朝向（度，angle_to 口径）
+    bool   face_incoming = false;         // true = 执行方应「到位迎球站定」
 };
 
 // 主入口：计算 2 号防守队员的断球点
@@ -280,6 +289,18 @@ bool intercept_point(const WorldModel &wm, double line_dist,
 //   返回 false（球慢/追不上/有人持球/落点不在防区）→ 交回 plan_defense 兜底。
 bool early_intercept_point(const WorldModel &wm, int defender_id,
                            double &out_x, double &out_y);
+
+// 会合点（第 103 轮，用户指令："接球需要提前到达位置"）：
+//   沿球未来轨迹逐帧往前推（含球速衰减），找第一个「我比球早到 lead_frames 帧」的点。
+//   为什么要"逐帧推"而不是求"球停点"：真机标定球每帧只衰减 0.992~0.994
+//   （sim_bench kBallDecay 同口径），6cm/帧的球理论上还能滚 600cm+ ⇒ "等球停下"等于永远等不到。
+//   能提前锁定的是**时间**：我几帧到、球几帧到。
+//   lead_frames 就是"提前量"：人到点时球还差这么多帧才到，这几帧用来转身迎球。
+//   返回 false（球停着 / 我追不上 / 会合点出界）→ 调用方回退原目标点。
+//   out_aim = 迎球朝向（球来向的反方向），可直接喂给 motion::arrive_facing。
+bool ball_meeting_point(const WorldModel &wm, double px, double py,
+                        double my_speed, double lead_frames,
+                        double &out_x, double &out_y, double &out_aim);
 
 // ============================================================
 // 人盯人（man-marking）：威胁打分 + 目标选择（队员 D 负责）
