@@ -168,6 +168,12 @@ struct WorldModel {
     bool mark_assign_valid = false;
     int mark_switch_events = 0;
 
+    // —— 抢断唯一竞标结果（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）——
+    //   steal_decide() 每帧算一次：只让 EV 最高且 >0 的那一个防守者上前抢脚下球，
+    //   其余人守住自己的盯人/站位——治第 103 轮「多人同扑、一起被过、身后漏人」。
+    //   角色函数只读（run_mark_body 逼抢 / run_passive 争抢上抢 认 wm.stealer_id==id）。
+    int stealer_id = -1;
+
     // ACTIVE 在对方门区停留计数（docs/13 方案 C：防"门区单人停留>20 周期"罚点球）
     // roles.cpp run_active 每帧更新；超限强制撤出（射门/传球/带球出区）。
     //   active_ga_frames ：纯停留帧数（人在门区 且 球不在门区或不在脚下>25cm）——主判据
