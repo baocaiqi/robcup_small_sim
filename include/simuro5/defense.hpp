@@ -361,6 +361,13 @@ int pick_mark_target(const WorldModel &wm, int current_target);
 // ============================================================
 int assign_marks(WorldModel &wm);
 
+// 抢断唯一竞标（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）：
+//   每帧全局算一次「谁该抢脚下球」，只让 EV 最高且 >0 的那一个防守者出手，
+//   其余人保持盯人/站位。取代原来散在 run_mark_body（逼抢）/run_passive（争抢上抢）
+//   里各自独立、只按「谁近谁抢」的判断——那是第 103 轮「多人同扑被过、身后漏人」的根因。
+//   出参：wm.stealer_id（唯一抢断者，-1=无人抢）。
+void steal_decide(WorldModel &wm);
+
 // 二抢一（双人夹击）站位：持球者带球推进到门前危险区时，为区域防守者
 //   （assist/midfield 中非清道夫、离持球者更近者）算夹抢点。
 //   defender_id：当前防守队员下标。返回 false=本轮不用夹抢（该防守者留在区域）。
