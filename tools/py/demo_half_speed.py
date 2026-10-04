@@ -98,7 +98,7 @@ def build():
         return None
     print("MSBuild:", msb)
     r = subprocess.run([msb, SLN, "/p:Configuration=Release", "/p:Platform=Win32",
-                        "/p:PlatformToolset=v143", "/m", "/v:m"],
+                        "/p:PlatformToolset=v145", "/m", "/v:m"],
                        capture_output=True, text=True, errors="replace")
     out = r.stdout + r.stderr
     ok = "-> " in out or r.returncode == 0
@@ -125,6 +125,12 @@ def newest_backup():
 
 
 def main():
+    # GBK 控制台打印 ✓/✗ 会 UnicodeEncodeError 崩（同 run_match.py 的坑），重配 utf-8 + replace。
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只查看状态（等同于不带参数）")
     ap.add_argument("--apply", action="store_true")

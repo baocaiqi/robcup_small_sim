@@ -306,15 +306,36 @@ bool ball_meeting_point(const WorldModel &wm, double px, double py,
 // 人盯人（man-marking）：威胁打分 + 目标选择（队员 D 负责）
 // ============================================================
 
+// ============================================================
+// 犀利进攻防守档（defense.kSharpDefense 总开关，队员 D）
+// ------------------------------------------------------------
+// 手动开关：默认 0=关（防守行为与现状逐位一致）。真机遇到"进攻极其犀利"的
+// 对手（推进快、传切准、突破强、射门果断）时置 1，防守整体收紧——核心逻辑
+// （函数调用链、决策结构、所有防乌龙/防推球/禁区纪律护栏）一个字不动，只把
+// 几个关键数值切到更紧的档（见 docs/06）。
+// 开关本体是 defense.cpp 顶层的 TUNABLE(kSharpDefense)，本文件只提供读取函数
+// 和"犀利档"收紧值。收紧值先做内联常量，真机标定后再决定是否提 TUNABLE。
+// ============================================================
+// 读总开关（跨 TU：strategy/roles/defense 三处共用，defense.cpp 实现）。
+bool sharp_defense_on();
+
+// —— 犀利档收紧值（只在开关打开时经下方各函数三元选择启用）——
+inline double sharp_danger_speed() { return 4.0; }   // 更早回防：威胁升档阈值(cm/帧)，默认 6
+inline double sharp_mark_dist()    { return 12.0; }  // 人盯人贴距(cm)，默认 16
+inline double sharp_mark_lead()    { return 5.0; }   // 盯人预测帧数，默认 3
+inline double sharp_mark_lambda()  { return 15.0; }  // 换人惩罚 λ(cm)，默认 25
+
 // 盯人距离：防守队员贴到被盯球员多近(cm)。
 //   太近(<8cm)会被判推球犯规，太远拦不住传/射。取 16cm 折中（原 12 实测超调到 8 犯规边）。
-inline double mark_dist() { return 16.0; }
+//   犀利进攻档：收到 12cm，封死对方传射。
+inline double mark_dist() { return sharp_defense_on() ? sharp_mark_dist() : 16.0; }
 
 // 盯人预测帧数：用被盯者速度外推其未来位置再站位（速度前馈截击）。
 //   同速追逐追不上移动目标，预测「几帧后会在哪」才能截住；太大易超调、太小追不上。
 //   6→3（2026-08-26）：修正尺子后复盘实测 marker 平均离理想点 38~52cm「追不到」，
 //   6 帧外推(≈15cm)过冲、目标点每帧跳，marker 永远追不上；降到 3 帧更稳。
-inline double mark_lead() { return 3.0; }
+//   犀利进攻档：对手快，外推提到 5 帧提前截击。
+inline double mark_lead() { return sharp_defense_on() ? sharp_mark_lead() : 3.0; }
 
 // 堵传球线站位距离(cm)：被盯者是接球者（非持球者）且离球在此距离内 →
 //   传球随时发生，marker 从 goal-side 换到「球→被盯者」连线，掐断传球。
