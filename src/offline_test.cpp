@@ -603,6 +603,91 @@ static int test_goalie_scenarios() {
     return 0;
 }
 
+// ============================================================
+// 2026-10-06 真机乌龙三修（docs/06 同日条目）
+//   ① 对方罚点球：球静止在我方罚球点 → 门将守门线中央，不去"开门球"
+//   ② 门球慢爬（0.31cm/帧背离己门）→ 仍按静止门球处理；朝门慢滚的活球不受影响
+//   ③ 贴线站定：门将在门侧但没挡在进门点 → 沿 y 横移补位，不再原地目送
+// ============================================================
+static void gk_test_field(WorldModel &wm) {
+    wm = WorldModel();
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 120; wm.home[i].y = 30.0 + i * 30; wm.role[i] = ROLE_PASSIVE;
+        wm.opp[i].x = 60;   wm.opp[i].y = 30.0 + i * 30;
+    }
+    wm.role[0] = ROLE_GOALIE;
+}
+static double gk_speed(const WorldModel &wm) {
+    return std::fabs(wm.home[0].vl) + std::fabs(wm.home[0].vr);
+}
+
+static int test_goalie_og_fixes() {
+    WorldModel wm;
+    // ① 点球：门将已在门线中央（217,90）→ 原地守住；旋钮关 → 旧行为会被 restart_kick 拉走
+    auto pen = [&](double knob) {
+        set_param("roles.kGkPenSpotGuard", knob);
+        gk_test_field(wm);
+        wm.ball.x = 180.8; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+        wm.opp[4].x = 165; wm.opp[4].y = 90;          // 主罚者在球后
+        wm.home[0].x = 217.0; wm.home[0].y = 90.0; wm.home[0].rot = 90.0;
+        run_goalie(wm, 0);
+        return gk_speed(wm);
+    };
+    double pen_on = pen(1.0), pen_off = pen(0.0);
+    set_param("roles.kGkPenSpotGuard", 1.0);
+    if (pen_on > 5.0 || pen_off < 5.0) {
+        printf("FAIL: 对方点球时门将应守门线不动 on=%.1f（旧行为应离位 off=%.1f）\n", pen_on, pen_off);
+        return 1;
+    }
+
+    // ② 门球慢爬：背离己门 0.31cm/帧 的门球输出必须与静止门球一致；朝门滚的不一致
+    auto kick = [&](double vx, double knob) {
+        set_param("roles.kGkCreepStill", knob);
+        gk_test_field(wm);
+        wm.ball.x = 205.2; wm.ball.y = 77.7; wm.ball.vx = vx; wm.ball.vy = 0.0;
+        wm.home[0].x = 212.0; wm.home[0].y = 80.0; wm.home[0].rot = -107.0;
+        run_goalie(wm, 0);
+        return std::make_pair(wm.home[0].vl, wm.home[0].vr);
+    };
+    auto still = kick(0.0, 1.0), creep = kick(-0.31, 1.0);
+    auto creep_off = kick(-0.31, 0.0), toward = kick(+0.31, 1.0);
+    set_param("roles.kGkCreepStill", 1.0);
+    if (still != creep) {
+        printf("FAIL: 慢爬门球应按静止门球处理 still=(%.0f,%.0f) creep=(%.0f,%.0f)\n",
+               still.first, still.second, creep.first, creep.second);
+        return 1;
+    }
+    if (still == creep_off || still == toward) {
+        printf("FAIL: 旋钮关/朝门滚的球不应走门球分支\n");
+        return 1;
+    }
+
+    // ③ 贴线：球 (216,80) 朝门慢爬（朝门 0.17cm/帧，低于 line_block 的 0.2、高于静止 0.2 合速），
+    //   门将 (219,92) 在门侧但离进门点 y≈82 有 10cm → 必须动起来
+    auto hold = [&](double gy, double knob) {
+        set_param("roles.kGkHoldSlide", knob);
+        gk_test_field(wm);
+        wm.ball.x = 216.0; wm.ball.y = 80.0; wm.ball.vx = 0.2; wm.ball.vy = 0.1;
+        wm.home[0].x = 219.0; wm.home[0].y = gy; wm.home[0].rot = 90.0;
+        run_goalie(wm, 0);
+        return gk_speed(wm);
+    };
+    double slide_on = hold(92.0, 1.0), slide_off = hold(92.0, 0.0), covered = hold(83.0, 1.0);
+    set_param("roles.kGkHoldSlide", 1.0);
+    if (slide_on < 5.0 || slide_off > 1e-9) {
+        printf("FAIL: 贴线门将没挡住进门点应横移 on=%.1f（旧行为站定 off=%.1f）\n", slide_on, slide_off);
+        return 1;
+    }
+    if (covered > 1e-9) {
+        printf("FAIL: 门将已挡在进门点应站定 v=%.1f\n", covered);
+        return 1;
+    }
+    printf("goalie og fixes: OK (点球守线/慢爬门球=静止门球/贴线横移补位)\n");
+    return 0;
+}
+
 // 传球威胁距离加权单测：半径内近/远敌人惩罚不同（新逻辑）
 static int test_pass_threat_weight() {
     TeamContext ctx{true};               // 蓝队：门 x=220，攻向左(对方门 x=0)
@@ -1669,6 +1754,35 @@ static int test_motion_brake_envelope() {
 }
 
 // 2) 停点收敛：新律在同一个平台上不过冲、能稳定；旧律必然冲过（对照论证）
+// 2026-10-06：侧向目标"直线来回蹭"（真机 G2 B4 帧 1798~1850：球在车侧 7cm，车头 -63° 不变，
+//   前进/倒车交替 50 帧不触球）。闭环：目标=球（经过型），车头 -63°、球在左后侧 7cm。
+//   新口径（两轮等比缩放 + 侧向收油门）须在 40 帧内碰到球；旧口径复现来回蹭（作对照）。
+static int lateral_touch_frames(double scale, double damp, double *heading_turn) {
+    const double s_save = get_param("motion.kWheelScaleSat", 1.0), d_save = get_param("motion.kLatDamp", 0.5);
+    set_param("motion.kWheelScaleSat", scale); set_param("motion.kLatDamp", damp);
+    RobotState r; r.x = 92.2; r.y = 47.2; r.rot = -63.0;
+    const double bx = 86.6, by = 44.3;                   // 车坐标系下 前+0.3 侧-6.6
+    int hit = -1;
+    for (int f = 0; f < 120 && hit < 0; ++f) {
+        motion::position(r, bx, by, motion::TM_PASS);
+        double v = 0.5 * (r.vl + r.vr) * 0.025, w = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        if (std::hypot(bx - r.x, by - r.y) < 4.5) hit = f;
+    }
+    *heading_turn = std::fabs(angle_diff(r.rot, -63.0));
+    set_param("motion.kWheelScaleSat", s_save); set_param("motion.kLatDamp", d_save);
+    return hit;
+}
+static int test_motion_lateral_target() {
+    double turn_new = 0, turn_old = 0;
+    int f_new = lateral_touch_frames(1.0, 0.5, &turn_new), f_old = lateral_touch_frames(0.0, 0.0, &turn_old);
+    printf("motion lateral: 新 触球帧=%d 车头转了 %.0f° / 旧 触球帧=%d 车头转了 %.0f°（-1=120 帧没碰到）\n",
+           f_new, turn_new, f_old, turn_old);
+    if (f_new < 0 || f_new > 40) { printf("FAIL: 球在车侧 7cm，新口径 40 帧内未触球\n"); return 1; }
+    return 0;
+}
+
 static int test_motion_stop_convergence() {
     StopTrace n1 = run_stop_task(120.0, 0.0, 0.0, true);        // 直冲 120cm
     StopTrace o1 = run_stop_task(120.0, 0.0, 0.0, false);       // 旧律对照
@@ -1962,6 +2076,82 @@ static int test_placement_semantics() {
 }
 
 // ============================================================
+// 2026-10-05：摆位**规则纪律**属性测试（规则书 7.10.1/7.10.2/7.15/7.17）
+//   ① 门区纪律：除 1 号守门员外，**己方门区(A = 门前 50cm × 门宽±15)里不许摆人**。
+//      7.10.1 = 门区里"再保持一个机器人"停留 >20 连续周期判点球；7.10.2 = 除门将外
+//      门区里 2 个以上直接判；7.17 = 发门球时**只有守门员允许在门区内**（明文摆位规则）。
+//      field_info.hpp 还记着平台裁判**计数离开不清零** ⇒ 摆位阶段就先别把人放进去。
+//      旧阵三处踩线：防守通用阵 1 号 (190,90)、开球阵 4 号 (185,90)、门球阵 1 号 (190,100)，
+//      都落在门区里（x∈[170,220] 且 y∈[75,105]），进场第一帧才被
+//      strategy.cpp 的 enforce_own_goal_area 顶出来 —— 摆位那一刻就是超规的。
+//   ② 争球纪律（7.15）：每队 1 人放在"沿场地纵向离球 25cm"处，**其余机器人必须在
+//      争球所在 1/4 场地之外**。旧阵把其余 3 台固定摆 (150,60)/(150,120)/(185,90)，
+//      不看争球在哪个 1/4 区 —— 争球在右上区时 (150,120) 就落在区内。
+//   本用例是**属性测试**：遍历 12 种 PlayMode × 蓝/黄 × 先摆/后摆，逐条断言。
+// ============================================================
+static int test_placement_rule_boxes() {
+    TeamContext blue{true}, yellow{false};
+    Robot r[5];
+    Robot former[5] = {};
+    for (int t = 0; t < 2; ++t) {
+        const TeamContext ctx = t ? yellow : blue;
+        const char *team = ctx.is_blue ? "蓝队" : "黄队";
+        for (int gi = PM_FreeBall_LeftTop; gi <= PM_GoalKick_Blue; ++gi) {
+            const PlayMode gs = (PlayMode)gi;
+            // 平台在该状态会给的球位（先摆那侧接口没有球参数 → 与 formation.cpp 的估计同口径）
+            Vector3D ball; ball.z = 0.0; ball.x = 110.0; ball.y = 90.0;
+            if (gi <= PM_FreeBall_RightBot) {                       // 争球：1/4 区中心
+                ball.x = (gi == PM_FreeBall_RightTop || gi == PM_FreeBall_RightBot) ? 165.0 : 55.0;
+                ball.y = (gi == PM_FreeBall_LeftTop || gi == PM_FreeBall_RightTop) ? 135.0 : 45.0;
+            } else if (gs == PM_PenaltyKick_Blue || gs == PM_PenaltyKick_Yellow) {
+                ball.x = (gs == PM_PenaltyKick_Blue) ? 39.4 : 180.6;  // 罚球点：门前 39.4cm
+                ball.y = 89.8;
+            }
+            for (int pass = 0; pass < 2; ++pass) {
+                for (int i = 0; i < 5; ++i) { r[i].pos.x = 0.0; r[i].pos.y = 0.0; r[i].rotation = 0.0; }
+                if (pass == 0) formation_former(ctx, gs, r);
+                else           formation_later(ctx, gs, former, ball, r);
+                const char *who = pass == 0 ? "先摆" : "后摆";
+
+                // ① 己方门区：除 0 号守门员外任何人不得落在里面
+                for (int i = 1; i < 5; ++i) {
+                    if (in_goal_area(ctx, r[i].pos.x, r[i].pos.y)) {
+                        printf("FAIL: %s %s gs=%d robot[%d] 摆在己方门区里 (%.1f,%.1f)\n",
+                               team, who, gi, i, r[i].pos.x, r[i].pos.y);
+                        return 1;
+                    }
+                }
+                // ② 争球：争球人纵向 25cm + 其余 3 台在争球 1/4 场外
+                if (gi <= PM_FreeBall_RightBot) {
+                    const bool right = ball.x > 110.0, top = ball.y > 90.0;
+                    if (std::fabs(std::fabs(r[1].pos.x - ball.x) - 25.0) > 0.5 ||
+                        std::fabs(r[1].pos.y - ball.y) > 0.5) {
+                        printf("FAIL: %s %s gs=%d 争球人应离球纵向 25cm，实际 (%.1f,%.1f) 球 (%.1f,%.1f)\n",
+                               team, who, gi, r[1].pos.x, r[1].pos.y, ball.x, ball.y);
+                        return 1;
+                    }
+                    for (int i = 2; i < 5; ++i) {
+                        const double x = r[i].pos.x, y = r[i].pos.y;
+                        const bool in_quarter = ((x > 110.0) == right) && ((y > 90.0) == top);
+                        // 贴中线（|y-90|≤1cm）时"算不算区内"口径不明 → 一并判不合格（留余量）
+                        const bool on_line = ((x > 110.0) == right) && (std::fabs(y - 90.0) <= 1.0);
+                        if (in_quarter || on_line) {
+                            printf("FAIL: %s %s gs=%d robot[%d]=(%.1f,%.1f) 落在争球 1/4 场内"
+                                   "（球 (%.1f,%.1f) 该区 x%s110、y%s90）\n",
+                                   team, who, gi, i, x, y, ball.x, ball.y,
+                                   right ? ">" : "<", top ? ">" : "<");
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("placement rule boxes: OK (除门将外不进己方门区/争球人纵向 25cm/其余人在争球 1/4 场外)\n");
+    return 0;
+}
+
+// ============================================================
 // docs/06 第 60 轮：门将开球（门球/清球）"先转正再推穿"单测
 //   真机 09-13 09:59 场：门球卡 7.6 秒球不动，门将机头 -100°（该 180°）→
 //   position 落进 (85°,95°) 纯自转死区 ⇒ 只蹭不推。断言两条：
@@ -1984,7 +2174,7 @@ static int test_goalie_clear_push() {
     // 推球方向（与 run_goalie 同一打分）：本布局队友/对手都在正前方，侧面是空当 →
     //   打分偏向侧面；门将须沿此方向对准才推穿。
     double pdirx = 0.0, pdiry = 0.0;
-    gk_clear_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
+    gk_restart_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
     double aim_rot = angle_to(0.0, 0.0, pdirx, pdiry);
 
     // ① 已对准（机头=推球方向、站在球后沿推球方向）+ 球在门前静止 → 必须有推穿速度（不是蹭）
@@ -2035,7 +2225,7 @@ static int test_goalie_straight_clear() {
     // ① 贴门线(15cm) + 对手远(105cm，不抢) → 应往【侧面】踢（出球方向必须带明显 y 分量）
     wm.ball.x = 205.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
     double pdirx = 0.0, pdiry = 0.0;
-    gk_clear_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
+    gk_restart_direction(wm, 0, wm.ball.x, wm.ball.y, pdirx, pdiry);
     if (std::fabs(pdiry) < 0.3) {
         printf("FAIL: 门球出球方向应是侧面(带 y 分量)，实际 dir=(%.2f,%.2f) 仍直线\n", pdirx, pdiry);
         return 1;
@@ -2051,10 +2241,12 @@ static int test_goalie_straight_clear() {
         return 1;
     }
 
-    // ② 对手正抢(<40cm) + 球 39cm(非贴门线) + 门将门侧 → 直线推出(抢得过对手)
-    wm.ball.x = 181.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
-    wm.opp[0].x = 150.0; wm.opp[0].y = 89.7;                              // 对手距球 31cm < 40
-    wm.home[0].x = 215.0; wm.home[0].y = 89.7; wm.home[0].rot = 180.0;   // 门侧，距球 34cm
+    // ② 对手正抢(<40cm) + 球 37cm(非贴门线) + 门将门侧 → 直线推出(抢得过对手)
+    //   2026-10-06：原摆 (181,89.7) 恰是真机罚球点 (180.8,89.7)，现被识别为对方点球（门将守线），
+    //   挪 2cm 避开罚球点，测试意图不变。
+    wm.ball.x = 183.0; wm.ball.y = 89.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    wm.opp[0].x = 152.0; wm.opp[0].y = 89.7;                              // 对手距球 31cm < 40
+    wm.home[0].x = 215.0; wm.home[0].y = 89.7; wm.home[0].rot = 180.0;   // 门侧，距球 32cm
     run_goalie(wm, 0);
     double v2 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
     if (v2 < 30.0) {
@@ -2095,6 +2287,82 @@ static int test_goalie_straight_clear() {
     }
     printf("goalie straight clear: OK (门球侧面推穿 v1=%.0f / 被抢球直线 v2=%.0f v3=%.0f 转正%df)\n",
            v1, v2, v3, conv3);
+    return 0;
+}
+
+// ============================================================
+// 2026-10-06（用户指令："门将发球要把球尽可能推远，别轻轻一下推太近"）
+//   真机现象：门球后球常停在自家门区边上，对手一步就推进来。
+//   机理：球出脚初速 ≈ 触球瞬间车速。两个旋钮：
+//     ① `roles.kGkAlignAcross`（3 → 6cm）：让门将"敢出脚"，不再一遍遍冲准备点来回蹭；
+//     ② `roles.kGkKickThrough`（30 → 45cm）：出脚后"顶着球跑"更久，球被带得更快。
+//   几何前提：真机门球点离门线仅 14.8cm、门将中心最多 ~215 ⇒ 直线助跑封顶 ~10cm，
+//    "加长助跑跑满速"在门球上不成立，所以只动上面两个数（+准备点不刹停）。
+//   断言（rot = 目标方向，v=(vl+vr)/2 = 车头方向速度）：
+//     ① 横向差 5cm（旧 3cm 门槛判"没对准"）→ 该帧必须直接朝前高速出脚（旧代码落进
+//        |te|∈(85°,95°) 死区原地打转，v≈0）—— 先红后绿；
+//     ② 无人抢、球 40cm 出门线、距准备点 20cm → 带速穿球不该刹停（≥135；
+//        旧口径 TM_STOP 被制动包线压到 ~122）—— 先红后绿；
+//     ③ 横向差 13cm（>2×门槛，真推也擦不到）→ 必须回去摆准备点（套包线 → ≤110），
+//        防止"放宽门槛"变成"闭眼乱冲"。
+// ============================================================
+// 2026-10-06：本用例由"横向门槛"改判"准备点带速"。
+//   原因（`test_gk_goal_kick_reach` 敏感性矩阵实测）：
+//     横向门槛 3→6cm 会让门将从"没对准"的位置就冲出去、擦不到球、来回空跑
+//     （y78/y66 直接变 -1）⇒ 这条杠杆被证伪，默认必须留在 3cm，本用例不能再拿它当断言。
+//   保留有效的那条杠杆：**准备点带速**。无人抢时，旧口径在准备点前 ~17cm 就按制动包线收油，
+//     到了是零速再起步，撞球那一下车头速度只剩 ~122；带速走则一路不刹（≥135）。
+static int test_goalie_kick_far() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 90;
+        wm.opp[i].x = 60; wm.opp[i].y = 90;        // 对手 >40cm 不抢 → 走"无人抢"分支
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+
+    // ① 球 40cm 出门线（无人抢）：距准备点 20cm、横向对准 → 必须带速穿球（不刹停）
+    wm.ball.x = 220.0 - 40.0; wm.ball.y = 90.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    double dx = 0.0, dy = 0.0;
+    gk_restart_direction(wm, 0, wm.ball.x, wm.ball.y, dx, dy);
+    wm.home[0].x = wm.ball.x - dx * 28.0;          // 准备点在球后 8cm ⇒ 距它 20cm
+    wm.home[0].y = wm.ball.y - dy * 28.0;
+    wm.home[0].rot = angle_to(0.0, 0.0, dx, dy);
+    run_goalie(wm, 0);
+    double v1 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v1 < 135.0) {
+        printf("FAIL: 带速穿球应在准备点前不刹车（v=%.0f，应≥135；旧 TM_STOP 包线只给 ~122）\n", v1);
+        return 1;
+    }
+
+    // ② 横向差 13cm（>4×门槛，真推也擦不到球）：绝不高速直冲，回去摆准备点（套制动包线）
+    double px = wm.ball.x - dx * 8.0, py = wm.ball.y - dy * 8.0;
+    wm.home[0].x = px - dy * 13.0;
+    wm.home[0].y = py + dx * 13.0;
+    wm.home[0].rot = angle_to(0.0, 0.0, dy, -dx);   // 机头对着准备点，避免落进自转死区
+    run_goalie(wm, 0);
+    double v2 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    if (v2 > 110.0) {
+        printf("FAIL: 横向差 13cm 擦不到球，不该高速直冲（v=%.0f，应≤110 回准备点套包线）\n", v2);
+        return 1;
+    }
+
+    // ③ 准备点带速的总开关：关掉后同一局面必须回到旧的"刹停"口径
+    ::simuro5::set_param("roles.kGkPrepPass", 0.0);
+    wm.home[0].x = wm.ball.x - dx * 28.0;
+    wm.home[0].y = wm.ball.y - dy * 28.0;
+    run_goalie(wm, 0);
+    double v3 = 0.5 * (wm.home[0].vl + wm.home[0].vr);
+    ::simuro5::set_param("roles.kGkPrepPass", 1.0);
+    if (v3 > 130.0) {
+        printf("FAIL: 关掉 kGkPrepPass 后应回到刹停口径（v=%.0f，应≤130 对应包线 ~122）\n", v3);
+        return 1;
+    }
+
+    printf("goalie kick far: OK (带速准备点 v=%.0f / 横偏13cm 回摆 v=%.0f / 关旋钮 v=%.0f 回旧口径)\n",
+           v1, v2, v3);
     return 0;
 }
 
@@ -3708,6 +3976,118 @@ static int test_own_goalarea_guard() {
 }
 
 // ============================================================
+// 2026-10-06：己方大禁区人数闸（规则 7.10.4）
+//   规则：除守门员外，**4 个机器人在禁区内（A+B，球门前 80×35）防守 → 直接判点球**。
+//   （7.10.3 的"3 个在禁区内"只在"在球门区里停留 >20 周期"时才罚，而门区已被
+//    enforce_own_goal_area 每帧清空 ⇒ 只要大禁区里非门将 ≤3 人就安全。）
+//   为什么需要独立闸：`own_box_clamp`（roles.cpp，"只放离球最近的一个分区球员进大禁区"）
+//   挂在 run_zone 上，而 `strategy.kZoneMode` 默认 0（第 93 轮用户指令关闭）⇒ 那条纪律
+//   已是死代码；plan_defense 只把断球/护门点推到 85cm 线，管不住 ACTIVE 追球、盯人跟防、
+//   护门点回撤同时涌入大禁区。
+//   断言：① 4 台在己方大禁区里 → 顶出**离球最远**的那台（其余不动）；
+//        ② 只有 3 台 → 一个人都不动；③ 门将豁免（门将也在里面不额外顶人）；
+//        ④ 黄队镜像：顶出方向朝 +x（场地中心侧）。
+// ============================================================
+static int test_own_penalty_count() {
+    auto scene = [](TeamContext ctx, double ball_x, double ball_y) {
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = ball_x; wm.ball.y = ball_y;
+        wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+        for (int i = 0; i < 5; ++i) { wm.home[i].vl = 0.0; wm.home[i].vr = 0.0; }
+        wm.home[0].x = ctx.our_goal_x() + ctx.attack_dir() * 5.0;   // 门将贴门线（在禁区里）
+        wm.home[0].y = 90.0;
+        return wm;
+    };
+    const TeamContext blue{true}, yellow{false};
+
+    // ① 4 台非门将都在禁区内（球在中路 x=150 → 离球最远的是贴门线的 1 号）
+    WorldModel wm = scene(blue, 150.0, 90.0);
+    wm.home[1].x = 212.0; wm.home[1].y = 90.0;      // 距球 62cm（最远）
+    wm.home[2].x = 160.0; wm.home[2].y = 90.0;      // 距球 10cm
+    wm.home[3].x = 165.0; wm.home[3].y = 80.0;
+    wm.home[4].x = 150.0; wm.home[4].y = 100.0;     // 距球 ~10cm
+    enforce_own_penalty_count(wm);
+    if (std::fabs(wm.home[1].vl) < 1.0 && std::fabs(wm.home[1].vr) < 1.0) {
+        printf("FAIL: 大禁区 4 台非门将，离球最远的 1 号应被顶出去（实际没动作）\n");
+        return 1;
+    }
+    // 顶出方向必须指向"大禁区前缘外"：蓝队目标 x = 220−85 = 135（在 212 的 −x 侧）。
+    //   rot=0 → 前进方向 = +x，轮速和 (vl+vr) 为正表示朝 +x；用投影判方向，不写死符号。
+    {
+        const double want = (wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 85.0) - wm.home[1].x;
+        if ((wm.home[1].vl + wm.home[1].vr) * want <= 0.0) {
+            printf("FAIL: 顶出方向应朝大禁区前缘外(x=135)，实际 vl=%.1f vr=%.1f\n",
+                   wm.home[1].vl, wm.home[1].vr);
+            return 1;
+        }
+    }
+    for (int i = 2; i < 5; ++i)
+        if (std::fabs(wm.home[i].vl) > 0.01 || std::fabs(wm.home[i].vr) > 0.01) {
+            printf("FAIL: 只该顶出离球最远的那台，robot[%d] 不该被动\n", i);
+            return 1;
+        }
+
+    // ② 只有 3 台在禁区内（+门将）→ 谁都不动
+    wm = scene(blue, 150.0, 90.0);
+    wm.home[1].x = 212.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 160.0; wm.home[2].y = 90.0;
+    wm.home[3].x = 165.0; wm.home[3].y = 80.0;
+    wm.home[4].x = 120.0; wm.home[4].y = 90.0;      // 大禁区外（x<140）
+    enforce_own_penalty_count(wm);
+    for (int i = 1; i < 5; ++i)
+        if (std::fabs(wm.home[i].vl) > 0.01 || std::fabs(wm.home[i].vr) > 0.01) {
+            printf("FAIL: 只有 3 台非门将在禁区内不该动任何人，robot[%d] 被动\n", i);
+            return 1;
+        }
+
+    // ③ 门将豁免：4 台非门将 + 门将全在禁区内 → 仍只顶出非门将里离球最远的那台
+    wm = scene(blue, 150.0, 90.0);
+    wm.home[0].x = 218.0; wm.home[0].y = 90.0;      // 门将贴线（也在禁区里，不该被这个闸驱动）
+    wm.home[1].x = 212.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 160.0; wm.home[2].y = 90.0;
+    wm.home[3].x = 165.0; wm.home[3].y = 80.0;
+    wm.home[4].x = 150.0; wm.home[4].y = 100.0;
+    enforce_own_penalty_count(wm);
+    if (std::fabs(wm.home[0].vl) > 0.01 || std::fabs(wm.home[0].vr) > 0.01) {
+        printf("FAIL: 门将不该被大禁区人数闸驱动 (vl=%.1f vr=%.1f)\n", wm.home[0].vl, wm.home[0].vr);
+        return 1;
+    }
+    if (std::fabs(wm.home[1].vl) < 1.0 && std::fabs(wm.home[1].vr) < 1.0) {
+        printf("FAIL: 门将在内也照样要顶出非门将里离球最远的那台\n");
+        return 1;
+    }
+
+    // ④ 黄队镜像：己方门线 x=0 → 禁区 x∈[0,80]；顶出方向朝 +x（场地中心侧）
+    wm = scene(yellow, 70.0, 90.0);
+    wm.home[1].x = 8.0;  wm.home[1].y = 90.0;       // 距球 62cm（最远）
+    wm.home[2].x = 60.0; wm.home[2].y = 90.0;
+    wm.home[3].x = 55.0; wm.home[3].y = 80.0;
+    wm.home[4].x = 70.0; wm.home[4].y = 100.0;
+    enforce_own_penalty_count(wm);
+    if (wm.home[1].vl + wm.home[1].vr <= 0.0) {
+        printf("FAIL: 黄队镜像下顶出方向应朝 +x，实际 vl=%.1f vr=%.1f\n", wm.home[1].vl, wm.home[1].vr);
+        return 1;
+    }
+    // ⑤ 黄队只有 3 台 → 不动
+    wm = scene(yellow, 70.0, 90.0);
+    wm.home[1].x = 8.0;  wm.home[1].y = 90.0;
+    wm.home[2].x = 60.0; wm.home[2].y = 90.0;
+    wm.home[3].x = 55.0; wm.home[3].y = 80.0;
+    wm.home[4].x = 100.0; wm.home[4].y = 90.0;      // 大禁区外（x>80）
+    enforce_own_penalty_count(wm);
+    for (int i = 1; i < 5; ++i)
+        if (std::fabs(wm.home[i].vl) > 0.01 || std::fabs(wm.home[i].vr) > 0.01) {
+            printf("FAIL: 黄队 3 台不该动任何人，robot[%d] 被动\n", i);
+            return 1;
+        }
+
+    printf("own penalty count: OK (4 台顶出离球最远者/3 台不动/门将豁免/黄队镜像)\n");
+    return 0;
+}
+
+// ============================================================
 // 2026-09-26：裁判口径门区（官方 Judge_PENALTY_KICK：门线内 15cm × y∈[65,115]）
 //   旧 in_goal_area（50×30，y∈[75,105]）漏掉门柱两侧 y∈[65,75)∪(105,115]，
 //   而裁判计数离开不清零 → magic_rob vs demo 场均 14 个点球的主因。
@@ -3786,17 +4166,25 @@ static int test_swarm_attack() {
     //     用例只考蜂群几何、与射门调参解耦（射门自己的行为由 test_shoot_plan/test_bank_shot 守）。
     //   用 save/restore 而非 reset_params()：后者会清掉 --params 注入（见 test_shoot_push_limit 的坑）。
     //   用 RAII 保证早退路径也复原。
+    //   ⚠️ 2026-10-06 补记：远射开口门槛 `shoot.kMinOpen` 9°→5°（见 docs/06 该轮）后，本场景的
+    //   `plan_shoot` 由"恒不可行"变成"可行"（净开口落在 5°~9° 之间），而它的方向依赖队员当前位置 ⇒
+    //   用例把 (ux,uy) 算在**旧位置**、实现算在**新位置**，② 横绕的期望目标失配（实测 vl 差 4.4）。
+    //   这与"蜂群逻辑坏了"无关，是同一类射门耦合 ⇒ 同样把远射闸门临时关死（kMinOpen=90 ⇒ 恒不可行），
+    //   退回"朝门心"兜底方向。射门门槛自己的行为由 test_shoot_plan 守。
     struct BankOffGuard {
-        double carry_save, minq_save;
+        double carry_save, minq_save, minopen_save;
         BankOffGuard() {
             carry_save = get_param("shoot.kBankCarryMax", 160.0);
             minq_save  = get_param("shoot.kBankMinQ", 0.42);
+            minopen_save = get_param("shoot.kMinOpen", 5.0);
             set_param("shoot.kBankCarryMax", 1.0);   // 借墙推进射程压到 1cm → 恒不可行
             set_param("shoot.kBankMinQ", 2.0);       // 借墙接管门槛拉到 2.0 → 恒不接管
+            set_param("shoot.kMinOpen", 90.0);       // 远射闸门拉到 90° → 恒不可行（本条测蜂群几何）
         }
         ~BankOffGuard() {
             set_param("shoot.kBankCarryMax", carry_save);
             set_param("shoot.kBankMinQ", minq_save);
+            set_param("shoot.kMinOpen", minopen_save);
         }
     } bank_off_guard;
     (void)bank_off_guard;
@@ -3925,8 +4313,15 @@ static int test_contest_charge() {
 //   ③ 上翼（ASSIST）球在下路 → 站 (球fx-8, y=120)。期望动作与直接调 motion 同目标逐位一致。
 // 第 92 轮：门球静止球门将够得着 —— 球 y=72 时准备点被 kGkYLo=74 夹住、永远对不准
 //   （真机 s53 门将 y 62↔88 来回冲 197+ 帧不触球）。简易运动学闭环：N 帧内必须把球推出 x<195。
-static int gk_kick_touch_frames(double by, double reach) {
+// 2026-10-06：reset_params() → save/restore。reset 会清掉 --params 注入和其他旋钮
+//   （本文件 L1078 已记过这个坑）；顺带把"门将推远"两个旋钮做成入参，好打印敏感性矩阵。
+static int gk_kick_touch_frames(double by, double reach, double across = -1.0, double through = -1.0) {
+    const double save_reach   = get_param("roles.kGkKickReach", 1.0);
+    const double save_across  = get_param("roles.kGkAlignAcross", 3.0);
+    const double save_through = get_param("roles.kGkKickThrough", 30.0);
     ::simuro5::set_param("roles.kGkKickReach", reach);
+    if (across  >= 0.0) ::simuro5::set_param("roles.kGkAlignAcross", across);
+    if (through >= 0.0) ::simuro5::set_param("roles.kGkKickThrough", through);
     WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
     wm.ball.valid = wm.ball_pred.valid = true;
     wm.ball.x = wm.ball_pred.x = 205.1; wm.ball.y = wm.ball_pred.y = by;
@@ -3945,16 +4340,32 @@ static int gk_kick_touch_frames(double by, double reach) {
             wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
         }
         wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
-        if (wm.ball.x > 219.0) return -2;          // 顶进自家门
-        if (wm.ball.x < 195.0) hit = f;            // 推出门区一带
+        if (wm.ball.x > 219.0) { hit = -2; break; }   // 顶进自家门
+        if (wm.ball.x < 195.0) hit = f;               // 推出门区一带
     }
-    ::simuro5::reset_params();
+    ::simuro5::set_param("roles.kGkKickReach", save_reach);
+    ::simuro5::set_param("roles.kGkAlignAcross", save_across);
+    ::simuro5::set_param("roles.kGkKickThrough", save_through);
     return hit;
 }
 static int test_gk_goal_kick_reach() {
     int old72 = gk_kick_touch_frames(72.0, 0.0), new72 = gk_kick_touch_frames(72.0, 1.0),
         new78 = gk_kick_touch_frames(78.0, 1.0), new66 = gk_kick_touch_frames(66.0, 1.0);
     printf("gk goal kick reach: 旧 y72=%d / 新 y72=%d y78=%d y66=%d（帧，-1=没推出 -2=乌龙）\n", old72, new72, new78, new66);
+    // 敏感性矩阵（只打印，不改判定）：横向门槛 × 穿球目标，每格 = y66/72/78 的推出帧数。
+    //   用途：2026-10-06 加长穿球目标后 y78/y66 变 -1，用矩阵定位"哪个旋钮在哪个球位上翻车"。
+    const double acs[3] = {3.0, 6.0, 8.0};
+    const double ths[3] = {30.0, 36.0, 42.0};
+    for (int i = 0; i < 3; ++i) {
+        printf("  [矩阵] ac=%.0f:", acs[i]);
+        for (int j = 0; j < 3; j++) {
+            printf("  th=%.0f→%3d/%3d/%3d", ths[j],
+                   gk_kick_touch_frames(66.0, 1.0, acs[i], ths[j]),
+                   gk_kick_touch_frames(72.0, 1.0, acs[i], ths[j]),
+                   gk_kick_touch_frames(78.0, 1.0, acs[i], ths[j]));
+        }
+        printf("   (y66/72/78)\n");
+    }
     if (new72 < 0 || new78 < 0 || new66 < 0) { printf("FAIL: 门球静止球门将 200 帧内未触球\n"); return 1; }
     return 0;
 }
@@ -4334,10 +4745,12 @@ int main(int argc, char **argv) {
     rc |= test_strategy_run(300);
     rc |= test_formation();
     rc |= test_placement_semantics();
+    rc |= test_placement_rule_boxes();     // 摆位规则纪律：门区(7.10/7.17) + 争球 1/4 场(7.15)
     rc |= test_penalty_spot_detect();
     rc |= test_penalty_shot_prep();
     rc |= test_penalty_aim_offcenter();
     rc |= test_own_goalarea_guard();
+    rc |= test_own_penalty_count();        // 规则 7.10.4：己方大禁区非门将 ≤3 人
     rc |= test_rule_goal_area();
     rc |= test_swarm_attack();
     rc |= test_no_reverse_through_ball();
@@ -4355,6 +4768,7 @@ int main(int argc, char **argv) {
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
     rc |= test_goalie_straight_clear();
+    rc |= test_goalie_kick_far();          // 2026-10-06：门将发球推远（对齐门槛/穿球目标/带速准备点）
     rc |= test_passive_front_sweep();
     rc |= test_gk_on_line_no_push();
     rc |= test_goalie_challenge();
@@ -4381,6 +4795,7 @@ int main(int argc, char **argv) {
     rc |= test_pass();
     rc |= test_pass_threat_weight();
     rc |= test_goalie_scenarios();
+    rc |= test_goalie_og_fixes();        // 2026-10-06：点球守线/门球慢爬/贴线横移
     rc |= test_roles_spread();
     rc |= test_segment_circle();
     rc |= test_route_straight();
@@ -4398,6 +4813,7 @@ int main(int argc, char **argv) {
     rc |= test_no_push_zone();
     rc |= test_motion_brake_envelope();
     rc |= test_motion_stop_convergence();
+    rc |= test_motion_lateral_target();
     rc |= test_motion_pass_mode();
     rc |= test_motion_bounds();
     rc |= test_motion_aligned();

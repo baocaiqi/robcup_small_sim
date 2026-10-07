@@ -304,6 +304,21 @@ void gk_clear_direction(const WorldModel &wm, int id,
     diry = std::sin(rad);
 }
 
+// 门球朝前开（2026-10-05 真机门球专项）：真机 15 场 114 次门球 113 次 1 秒后球还在原地，
+//   19/52 个失球发生在门球后 5 秒内。逐帧看：gk_clear_direction 选的推球方向几乎垂直朝边墙
+//   （机头 -107°），门将要绕到球上方再对准 3cm，来回蹭到对手赶到。
+//   改为：无人抢的门前静止球直接朝前（进攻方向）推，只带 kGkKickFwdDy 的外侧斜度。
+namespace {
+TUNABLE(kGkKickFwd, 1.0);      // 回滚开关（0 = 原"朝侧面空当推"）
+TUNABLE(kGkKickFwdDy, 0.35);   // 往外侧（远离球门中线）的斜度，sin 值
+}
+void gk_restart_direction(const WorldModel &wm, int id,
+                          double bx, double by, double &dirx, double &diry) {
+    if (kGkKickFwd < 0.5) { gk_clear_direction(wm, id, bx, by, dirx, diry); return; }
+    diry = (by < 90.0 ? -1.0 : 1.0) * kGkKickFwdDy;
+    dirx = wm.ctx.attack_dir() * std::sqrt(1.0 - diry * diry);
+}
+
 namespace {
 
 constexpr double kGkGuardDist        = 10.0;   // 常规站位：门线前 cm
@@ -317,7 +332,30 @@ constexpr double kGkClearDist        = 20.0;   // 球进此距离 → 脚下清�
 constexpr double kGkClearAlignTol    = 20.0;   // 穿球前允许的机头偏差（度）
 constexpr double kGkPushDist         = 8.0;    // 推球准备点：球后 cm
 constexpr double kGkLateral          = 30.0;   // 静止球在门将身后时绕球侧移（cm）
-constexpr double kGkKickThrough      = 30.0;   // 穿球目标：球前 cm（越远出球越快）
+
+// —— 2026-10-06 门将发球"推不远"专项（用户指令：把球尽可能推远，别轻轻一下）——
+// 生活化比喻：门将发球现在像"站在球后面轻轻用脚尖碰一下"，球滚两步就停；
+//   要它像开大脚，得**先跑起来再撞球**——球出脚初速 ≈ 触球那一瞬间的车速
+//   （sim 定标：出球速 = 0.99×车速 + 0.43×旧球速，`kPushGain≈0.99`）。
+// 真机机理（19:46 那局"球被对手一步推进门区"）：
+//   ① 横向对齐门槛只有 3cm（`gk_aligned`）⇒ 真机门球点常差 4~8cm，判"没对准"→ 去摆准备点、
+//      到了又不合格又去摆，来回蹭（docs/06 记的"蹭到对手赶到"），一次也没真出脚；
+//   ② 穿球目标只有 30cm ⇒ 出脚后"顶着球跑"的路程短，球速还没被带起来就脱手。
+// 为什么不是"加长助跑"（几何硬约束）：真机门球点离门线只有 14.8cm（`kGkKickSpotDx`），
+//   门将中心最多站到 ~215 ⇒ 球后直线助跑天然封顶约 10cm，触球车速 sqrt(2×334.84×10)
+//   ≈82cm/s，只有满速 151 的 54%；想跑满速要 34cm 助跑，那得站到门线外 19cm ——不存在。
+//   （sim 里更严：kRobotR=10 ⇒ 车心 x≤210，"助跑"这条杠杆在门球上根本摆不出来。）
+// 所以只在"敢出脚"（门槛）和"多顶一段"（穿球目标）两处下手，两个数都留旋钮，
+//   真机手感靠 sim A/B 定标（见 docs/06「门将发球推远」一节）。
+// ⚠️ kGkAlignAcross 实测结论（2026-10-06，闭环测试 `test_gk_goal_kick_reach` 的敏感性矩阵）：
+//   默认必须留在 3cm。放宽到 6cm 时 y72 从 158 帧快到 26 帧（很香），但 y78/y66 直接变 **-1**
+//   （200 帧推不出去）——门将从"没对准"的位置就朝球前 45cm 冲，冲的直线擦不到球
+//   （横向偏 6cm 时路径离球 >7cm），冲过去人已经在球的场侧，回来再冲，来回空跑。
+//   放宽到 8cm 则三个球位全废。所以"让门将敢出脚"不能靠放门槛，只能靠"多顶一段"。
+//   ⚠️ 上限：车身半宽 6cm + 球半径 2.1cm ≈ 8.1cm ⇒ 门槛超过 ~8cm 物理上就擦不到球。
+TUNABLE(kGkAlignAcross, 3.0);   // 推球前允许的横向偏差 cm（3=原口径；>5 有擦不到球的风险）
+TUNABLE(kGkKickThrough, 45.0);  // 穿球目标：球前 cm（越远"顶着球跑"越久，球被带得越快；原 30）
+TUNABLE(kGkPrepPass, 1.0);      // 1=准备点带速走（TM_PASS，不刹停再起步）；0=旧口径（精确站位）
 constexpr double kGkBallBehindMargin = 6.0;    // 球比门将靠门超过此值 → 强制回门
 constexpr double kGkBallGoalSide     = 15.0;   // 强制回门：回到球的门侧 cm
 constexpr double kGkBallRetreatLat   = 30.0;   // 强制回门：绕球侧移 cm
@@ -342,6 +380,24 @@ struct GkView {
     double y_at_goal;    // 过门线时的 y
 };
 
+// 门球"慢爬"（2026-10-06 真机复盘）：平台摆好门球后球常以 0.2~0.4cm/帧 往场内爬
+//   （10-04/05 共 145 次门球 95 次如此），过不了 ball_still 的 0.2 门槛 → restart_kick 不触发，
+//   门将落到 clear 往侧墙蹭，门球后 5 秒丢球率 31%（真静止的门球 16%）。
+//   只放宽"门球点附近、慢、且背离己门"的球：第 81 轮要防的是慢速**朝门**滚的活球，不受影响。
+TUNABLE(kGkCreepStill, 1.0);     // 0 = 回滚（只认 <0.2cm/帧）
+constexpr double kGkCreepSpeed  = 0.5;    // cm/帧：慢爬上限
+constexpr double kGkKickSpotDx  = 14.8;   // 门球点离门线 cm（真机 (205.2, 77.7/102.3)）
+constexpr double kGkKickSpotDy  = 12.3;   // 门球点离中线 cm
+constexpr double kGkCreepRange  = 12.0;   // 离门球点多近才算
+
+bool gk_goal_kick_creep(const GkView &v) {
+    if (kGkCreepStill < 0.5) return false;
+    if (std::hypot(v.vx, v.vy) >= kGkCreepSpeed) return false;
+    if (v.vx * v.gside > 0.0) return false;                       // 朝门滚 → 活球
+    return std::hypot(v.ball_goal - kGkKickSpotDx, std::fabs(v.by - 90.0) - kGkKickSpotDy) <
+           kGkCreepRange;
+}
+
 GkView gk_view(const WorldModel &wm, int id) {
     const TeamContext &ctx = wm.ctx;
     const RobotState &r = wm.home[id];
@@ -353,7 +409,7 @@ GkView gk_view(const WorldModel &wm, int id) {
     v.ball_goal = ctx.dist_our_goal(v.bx);
     v.gside = ball_goal_side(ctx, v.bx);
     v.opp_dmin = opp_clear_dist(wm);
-    v.ball_still = std::hypot(v.vx, v.vy) < 0.2;
+    v.ball_still = std::hypot(v.vx, v.vy) < 0.2 || gk_goal_kick_creep(v);
     v.opp_has_ball = false;
     v.y_at_goal = 90.0;
     v.heading_goal = predict_y_at_x(v.bx, v.by, v.vx, v.vy, ctx.our_goal_x(), v.y_at_goal);
@@ -385,11 +441,18 @@ void gk_goto(const TeamContext &ctx, RobotState &r, double x, double y,
     motion::position(r, x, y, mode);
 }
 
-// 门将是否已在推球方向 (dx,dy) 的正后方（横向偏差 ≤3cm）——三点共线才能直线穿球
+// 门将相对推球方向 (dx,dy) 的横向偏差 cm（正负 = 球在门将哪一侧）
+inline double gk_across(const RobotState &r, const GkView &v, double dx, double dy) {
+    return (r.x - v.bx) * (-dy) + (r.y - v.by) * dx;
+}
+
+// 门将是否已在推球方向 (dx,dy) 的正后方（横向偏差 ≤ kGkAlignAcross）——三点共线才能直线穿球。
+//   2026-10-06：门槛由写死 3cm 改成旋钮（默认 6cm）。为什么：真机门球点常年差 4~8cm，
+//   卡 3cm 时门将会"冲准备点 → 判没对准 → 再冲"来回蹭，真正出脚那一下始终没发生。
+//   ⚠️ 上限：车身半宽 6cm + 球半径 2.1cm ≈ 8.1cm ⇒ 门槛别超过 ~8cm，否则会从球边擦过不触球。
 bool gk_aligned(const RobotState &r, const GkView &v, double dx, double dy) {
-    double along  = (r.x - v.bx) * dx + (r.y - v.by) * dy;
-    double across = (r.x - v.bx) * (-dy) + (r.y - v.by) * dx;
-    return (along <= 0.0) && (std::fabs(across) <= 3.0);
+    double along = (r.x - v.bx) * dx + (r.y - v.by) * dy;
+    return (along <= 0.0) && (std::fabs(gk_across(r, v, dx, dy)) <= kGkAlignAcross);
 }
 
 // 机头偏离推球方向太多时原地转正（返回 true = 本帧在转）。
@@ -430,9 +493,27 @@ void gk_block_ball_line(const TeamContext &ctx, RobotState &r, const GkView &v) 
 
 // ---------------- 规则：命中则写好动作并返回 true ----------------
 
+// 对方罚点球识别（2026-10-06 真机乌龙复盘）：执行期平台报的不是点球态（同 we_take_penalty_spot），
+//   只认 game_state 的旧判据从不生效 → 球静止在我方罚球点 39cm 处被 restart_kick 当成门球，
+//   门将走去球侧"准备推出"，把门让空（10-05 19:12/19:27 两个点球都是空门推进）。
+//   改认可观测量：球静止在我方罚球点上 → 当点球守。
+TUNABLE(kGkPenSpotGuard, 1.0);   // 0 = 回滚（只认 game_state）
+constexpr double kGkPenSpotDist  = 39.4;  // 罚球点到门线 cm（真机实测，见 strategy.cpp kPenaltySpotDist）
+constexpr double kGkPenSpotTol   = 0.4;   // 容差 cm：真机 10-04/05 共 6 次点球摆球全落在 (180.76, 89.72)，分毫不差；
+                                          //   放宽到 1.5 时 sim 100 场有 249 帧"活球恰好停在点附近"误判（sim 无点球），收到 0.4
+constexpr double kGkPenSpotStill = 0.05;  // cm/帧：真机摆好的点球速度 0.00
+
+bool gk_opp_penalty_spot(const WorldModel &wm, const GkView &v) {
+    if (kGkPenSpotGuard < 0.5) return false;
+    if (std::hypot(v.vx, v.vy) >= kGkPenSpotStill) return false;
+    return std::fabs(v.bx - gk_line_x(wm.ctx, kGkPenSpotDist)) < kGkPenSpotTol &&
+           std::fabs(v.by - 90.0) < kGkPenSpotTol;
+}
+
 // 点球：锁门线中央
-bool gk_rule_penalty(WorldModel &wm, int id, const GkView &) {
-    if (wm.game_state == PM_PenaltyKick_Blue || wm.game_state == PM_PenaltyKick_Yellow) {
+bool gk_rule_penalty(WorldModel &wm, int id, const GkView &v) {
+    if (wm.game_state == PM_PenaltyKick_Blue || wm.game_state == PM_PenaltyKick_Yellow ||
+        gk_opp_penalty_spot(wm, v)) {
         motion::position(wm.home[id], gk_line_x(wm.ctx, 3.0), 90.0);
         return true;
     }
@@ -553,6 +634,7 @@ void gk_reachable_dir(const TeamContext &ctx, const GkView &v, double &dx, doubl
 }
 
 // 门前静止球（门球/定位球重启）：门将主动穿球推出，否则球滚回门线外反复触发门球。
+//   无人抢时的推球方向见 gk_restart_direction（2026-10-05 起默认朝前）。
 bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 45.0 && v.ball_still)) return false;
     const TeamContext &ctx = wm.ctx;
@@ -564,7 +646,9 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     //   被抢 → 直线远离己门抢时间；无人抢 → 往侧面空当推。
     if ((v.ball_goal < 20.0 || contested) && goal_side) {
         double dx = ctx.attack_dir(), dy = 0.0;
-        if (!contested) gk_clear_direction(wm, id, v.bx, v.by, dx, dy);
+        if (!contested) {
+            gk_restart_direction(wm, id, v.bx, v.by, dx, dy);
+        }
         gk_reachable_dir(ctx, v, dx, dy);
         if (v.db < 25.0 && gk_aligned(r, v, dx, dy)) {
             if (!gk_turn_to(r, dx, dy))
@@ -576,7 +660,7 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
         return true;
     }
     double dx = 0.0, dy = 0.0;
-    gk_clear_direction(wm, id, v.bx, v.by, dx, dy);
+    gk_restart_direction(wm, id, v.bx, v.by, dx, dy);   // 推出 20cm 外后同样朝前
     gk_reachable_dir(ctx, v, dx, dy);
     bool ready = v.db < 25.0 && gk_aligned(r, v, dx, dy);
     if (ready && gk_turn_to(r, dx, dy)) return true;
@@ -588,6 +672,12 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     }
     if (ready) {
         gk_goto(ctx, r, v.bx + dx * kGkKickThrough, v.by + dy * kGkKickThrough, motion::TM_PASS);
+    } else if (kGkPrepPass > 0.5 && std::fabs(gk_across(r, v, dx, dy)) <= kGkAlignAcross * 2.0) {
+        // L1 带速穿球（2026-10-06）：横向差得不多就别"刹停再起步"——TM_STOP 在最后 ~17cm
+        //   按制动包线收油，到准备点速度已归零，再起步 8cm 只挣到 sqrt(2×334.84×8)≈73cm/s
+        //   （满速的一半）；TM_PASS 无包线，带着车速冲过去，撞球那一下才接近满速。
+        //   横向差 >2×门槛（擦不到球）时仍走 TM_STOP 老口径，避免闭眼乱冲把球顶歪。
+        gk_goto(ctx, r, v.bx - dx * kGkPushDist, v.by - dy * kGkPushDist, motion::TM_PASS);
     } else {
         gk_goto(ctx, r, v.bx - dx * kGkPushDist, v.by - dy * kGkPushDist, motion::TM_STOP);
     }
@@ -623,11 +713,23 @@ bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
 //   会把球拖进自家门（真机 6:1 复盘 5 个疑似乌龙全是这样，门将前后 -6~-15cm = 站球外侧）。
 //   —— 对齐 run_passive 第37轮"门线球站定防乌龙"，补齐门将缺的这条兜底。
 //   排在 clear 之前：对手贴球时 press_door 已在上游封连线，此处只管"自由球贴门线"。
+// 2026-10-06 补（真机 19:27 @643/@4732）：门将已在球门侧但横向偏开球路 6~13cm 时站定 = 目送
+//   慢球（0.1~0.9cm/帧）从身侧滚进门。球在朝门滚且门将身体没挡在进门点上 → 原地 x 不动、
+//   只沿 y 横移到进门点（不往场内走，不会把球顶进门）。
+TUNABLE(kGkHoldSlide, 1.0);              // 0 = 回滚（贴球一律站定）
+constexpr double kGkHoldSlideDanger = 0.1;   // cm/帧：朝门速度高于此才算"在滚进门"
+constexpr double kGkHoldCover       = 5.0;   // cm：门将中心离进门点小于此 = 已挡住
 bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 15.0 && v.db < 14.0)) return false;
     TRACE_MARK(wm.home[id]);
-    wm.home[id].vl = 0.0;
-    wm.home[id].vr = 0.0;
+    RobotState &r = wm.home[id];
+    if (kGkHoldSlide > 0.5 && v.danger > kGkHoldSlideDanger && v.on_target &&
+        (r.x - v.bx) * v.gside > 0.0 && std::fabs(r.y - v.y_at_goal) > kGkHoldCover) {
+        motion::position(r, r.x, clamp(v.y_at_goal, kGkYLo, kGkYHi), motion::TM_STOP);
+        return true;
+    }
+    r.vl = 0.0;
+    r.vr = 0.0;
     return true;
 }
 
@@ -744,12 +846,19 @@ const GkRule kGoalieRules[] = {
 };
 
 // 临时诊断（第101轮单刀复盘，用完删）：记录门将每帧命中规则到 C:\Strategy\goalie_trace.csv
+// ⚠️ 2026-10-05 改：这段以前**没有任何开关**，任何含 roles.cpp 的产物（连 offline_test 也是）
+//    一跑就往 C:\Strategy 追加写，实测 goalie_trace.csv 已涨到 **1.09 GB**。
+//    现在整段包在 SIMURO5_HNNU_TRACE 里（CMake 选项 HNNU_TRACE，**默认 OFF**）：
+//    关掉时符号表里连 kGoalieRuleNames / gk_trace 都不存在，DLL 里也没有那个路径字符串。
+#if defined(SIMURO5_HNNU_TRACE) || defined(SIMURO5_GK_PROBE)
 const char *const kGoalieRuleNames[] = {
     "no_push", "side_step", "opp_ball_lock", "restart_kick", "cover_line",
     "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
     "shot_block", "default",
 };
+#endif
 
+#ifdef SIMURO5_HNNU_TRACE
 static void gk_trace(const char *rule, const WorldModel &wm, int id, const GkView &v) {
     static FILE *fp = nullptr;
     static long frame = 0;
@@ -762,23 +871,46 @@ static void gk_trace(const char *rule, const WorldModel &wm, int id, const GkVie
     if ((frame % 40) == 0) std::fflush(fp);
 }
 
+// 打点宏：诊断关闭时展开成空语句，调用点写法保持一致
+#define GK_HIT(lit) hit = (lit)
+#elif defined(SIMURO5_GK_PROBE)
+// sim_bench 专用（2026-10-05 乌龙诊断）：把本帧命中的门将规则名留给仿真器读，比赛 DLL 不定义此宏
+#define GK_HIT(lit) g_gk_rule_probe = (lit)
+#else
+#define GK_HIT(lit) ((void)0)
+#endif  // SIMURO5_HNNU_TRACE
+
 }  // anonymous namespace
 
+#ifdef SIMURO5_GK_PROBE
+const char *g_gk_rule_probe = "none";
+#endif
+
 void run_goalie(WorldModel &wm, int id) {
+    motion::LegacyDriveScope legacy_drive;   // 门将保持旧驱动口径（见 motion.hpp）
     GkView v = gk_view(wm, id);
+#ifdef SIMURO5_GK_PROBE
+    g_gk_rule_probe = "none";
+#endif
+#ifdef SIMURO5_HNNU_TRACE
     const char *hit = "none";
+#endif
     // 点球和"球被甩到身后"排在对方持球滞回更新之前：命中的帧不推进滞回计数。
-    if (gk_rule_penalty(wm, id, v)) { hit = "penalty"; }
-    else if (gk_rule_line_block(wm, id, v)) { hit = "line_block"; }
-    else if (gk_rule_ball_behind(wm, id, v)) { hit = "ball_behind"; }
+    // 分支判定逻辑本身一字未动，只是"记下命中哪条规则"这个动作在关掉诊断时变成空语句。
+    if (gk_rule_penalty(wm, id, v)) { GK_HIT("penalty"); }
+    else if (gk_rule_line_block(wm, id, v)) { GK_HIT("line_block"); }
+    else if (gk_rule_ball_behind(wm, id, v)) { GK_HIT("ball_behind"); }
     else {
         gk_update_opp_hold(wm, v);
         for (int i = 0; i < (int)(sizeof(kGoalieRules) / sizeof(kGoalieRules[0])); ++i) {
-            if (kGoalieRules[i](wm, id, v)) { hit = kGoalieRuleNames[i]; break; }
+            if (kGoalieRules[i](wm, id, v)) { GK_HIT(kGoalieRuleNames[i]); break; }
         }
     }
+#ifdef SIMURO5_HNNU_TRACE
     gk_trace(hit, wm, id, v);
+#endif
 }
+#undef GK_HIT
 
 // 对方门区停留红线（docs/13 方案 C）：规则"门区除门将外停留 >20 周期 → 罚点球"。
 //   纯停留限 8 帧：人在门区且（球不在门区 或 球不在脚下>25cm）= 明显滞留。
@@ -839,6 +971,12 @@ TUNABLE(kChargeOwnGuard, 70.0);    // cm
 TUNABLE(kChargeThrough, 20.0);     // 目标 = 球心沿冲撞方向再过 20cm（穿球，不在球前停）
 TUNABLE(kPassivePress, 1.0);   // PASSIVE 争抢时从球门侧上抢（run_passive 末尾）
 TUNABLE(kPassivePressDepth, 130.0);   // 深度扫 110/130/150/170/全场：130 为拐点（净胜 +4~5，单人滞留不增）
+// 护门点绕球（2026-10-05 乌龙定性）：sim_trace 显示乌龙第一大来源是 PASSIVE 去「球-门连线护门点」
+//   （run_passive 的 goal_cover_point 分支）——护门点在球的门侧，人从场侧直线开过去 = 穿过球把它推向自家门
+//   （该分支的乌龙 82~91% 是"触球后球朝自家门加速"）。直线路线离球 < kCoverClear 时先去球侧面的绕行点。
+TUNABLE(kCoverDetour, 1.0);        // 回滚开关
+TUNABLE(kCoverClear, 12.0);        // cm：路线离球心小于此值算"会撞球"
+TUNABLE(kCoverDetourLat, 22.0);    // cm：绕行点在球侧面的横向距离
 // 防守到位迎球（第 103 轮，用户指令："防守不能对准球冲过来的方向"）：
 //   断球点在球来路上时，走位到点后原地转正、让机头朝球来的方向（-v）站定。
 //   本平台球被撞出去的方向 ≈ 机头方向 ⇒ 斜着迎球只会把球横着顶出去、动量照旧。
@@ -1828,6 +1966,24 @@ void run_passive(WorldModel &wm, int id) {
             }
             double cx = 0.0, cy = 0.0;
             goal_cover_point(wm, cx, cy);
+            const RobotState &me = wm.home[id];
+            if (kCoverDetour > 0.5 &&
+                wm.ctx.dist_our_goal(me.x) > wm.ctx.dist_our_goal(wm.ball.x) - 3.0 &&   // 人在球的场侧
+                seg_point_dist(me.x, me.y, cx, cy, wm.ball.x, wm.ball.y) < kCoverClear) {
+                double side = (std::fabs(me.y - wm.ball.y) > 1.0) ? (me.y > wm.ball.y ? 1.0 : -1.0)
+                                                                  : (wm.ball.y < 90.0 ? 1.0 : -1.0);
+                const double g = -wm.ctx.attack_dir();   // 朝己门
+                double wx = wm.ball.x + g * 6.0, wy = wm.ball.y + side * kCoverDetourLat;
+                if (wy < 5.0 || wy > 175.0) wy = wm.ball.y - side * kCoverDetourLat;   // 贴边：换另一侧绕
+                if (in_goal_area_rule(wm.ctx, wx, wy)) {   // 绕行点进裁判门区：宁可停车也不穿球
+                    TRACE_MARK(wm.home[id]);
+                    wm.home[id].vl = 0.0;
+                    wm.home[id].vr = 0.0;
+                    return;
+                }
+                motion::position(wm.home[id], wx, wy);
+                return;
+            }
             motion::position(wm.home[id], cx, cy);
             return;
         }

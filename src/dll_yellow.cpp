@@ -23,12 +23,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     return TRUE;
 }
 
-// ⚠️ 黄队报「DEMO Yellow」——2026-09-30 用户指令：这份黄队 DLL 就是用来**替换官方 demo** 的
-//    （平台黄队槽位 `C:\Strategy\Strategy4Yellow.dll` 原来是官方 DEMO Yellow），
-//    保留 demo 队名 ⇒ 平台控制台显示与 `.rlg` 命名习惯（`…-5-DEMO Yellow-Hnnu.rlg`）完全不变。
-//    ⚠️ 但此后带此名的比赛跑的是**我们的策略**，别再当成官方 demo 的成绩来读。
+// 黄队报「Hnnu」——2026-10-06 晚用户指令：「是 HNNU 替换到黄队」（原话）。
+//    历史：2026-09-30 用户指令曾让我们"替换官方 demo 并沿用 demo 队名（DEMO Yellow）"，
+//    目的是让平台控制台/`.rlg` 命名与以前一样（`…-5-DEMO Yellow-Hnnu.rlg`）。
+//    ⚠️ 但那个名字会让**我们自己的黄位成绩被误读成官方 demo 的成绩**（2026-10-06 晚真出过
+//    这次误会：黄位换成本构建后日志变 `DEMO Yellow-Hnnu`，被当成"官方 demo 混进来了"）。
+//    ⇒ 2026-10-06 晚改成与蓝位一致的 `Hnnu`：黄位日志从此读作 `Hnnu-<对手名>`，一眼看得出是我们。
+//    注意：改这个只影响**平台显示的队名**，不影响任何战术逻辑。
 STRATEGY4YELLOW_API void SetYellowTeamName(char* teamName) {
-    strcpy(teamName, "DEMO Yellow");   // 用户指令（2026-09-30）：替换官方 demo，沿用 demo 队名
+    strcpy(teamName, "Hnnu");   // 用户指令（2026-10-06）：我方黄位也报 Hnnu
 }
 
 STRATEGY4YELLOW_API void SetFormerRobots(PlayMode gameState, Robot robots[]) {

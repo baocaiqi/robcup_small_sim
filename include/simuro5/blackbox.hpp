@@ -1,15 +1,33 @@
-// blackbox.hpp — 临时测量仪器（仅测试用，比赛版不带）
+// blackbox.hpp — 临时测量仪器（仅诊断构建 SIMURO5_HNNU_TRACE 生效）
 // 每帧写一行 F 行 + 每次摆位回调写 P/B 行到 C:\\Strategy\\hnnu_blackbox.csv
 // 绝不影响决策：文件打不开就静默放弃，最多试 3 次。
+//
+// ⚠️ 2026-10-05 改：本文件以前是**无条件**编译进比赛 DLL 的 —— 40Hz 往 CSV 追加写，
+//    实测 C:\\Strategy\\hnnu_blackbox.csv 已涨到 105.9 MB，比赛现场有拖慢帧率/占满磁盘的风险。
+//    现在加了编译开关 SIMURO5_HNNU_TRACE，**默认关**（CMake 选项 HNNU_TRACE=OFF）：
+//      · 关：kEnabled=false ⇒ fp() 第一行就返回 nullptr，下面每个函数照旧 early-return，
+//            既不打开文件也不写盘 —— 零 I/O、零行为影响；
+//      · 开：cmake -S . -B build -DHNNU_TRACE=ON 重新构建即可。
+//    为什么用"运行期常量的 constexpr 门"而不是整份 #ifdef：dll_blue.cpp 的调用点无需改动，
+//    且关掉时编译器会把函数体连同那个文件名字符串一起消除，比赛版 DLL 里不留诊断代码。
 #ifndef SIMURO5_BLACKBOX_HPP
 #define SIMURO5_BLACKBOX_HPP
 #include <cstdio>
 #include "simuro5/simuro_interface.hpp"
 
 namespace simuro5 { namespace bb {
+
+// 总开关：由 CMake 的 HNNU_TRACE 选项决定，默认 false（比赛版）
+#ifdef SIMURO5_HNNU_TRACE
+inline constexpr bool kEnabled = true;
+#else
+inline constexpr bool kEnabled = false;
+#endif
+
 struct State { std::FILE *fp = nullptr; long frame = 0; int fails = 0; };
 inline State &st() { static State s; return s; }        // 全程序唯一实例（inline + 局部 static）
 inline std::FILE *fp() {
+    if (!kEnabled) return nullptr;      // ← 关掉时唯一会执行的一行
     State &s = st();
     if (!s.fp && s.fails < 3) {
         s.fp = std::fopen("C:\\Strategy\\hnnu_blackbox.csv", "a");

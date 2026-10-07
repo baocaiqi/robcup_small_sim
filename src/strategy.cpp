@@ -179,6 +179,10 @@ void Strategy::run(WorldModel &wm) {
 
     // 5.6 我方门区"只能有门将"硬闸（见函数注释）：除门将外任何人进小禁区当场顶出去
     enforce_own_goal_area(wm);
+
+    // 5.7 我方大禁区人数闸（规则 7.10.4）：非门将在己方大禁区内同时最多 3 人，超限顶出
+    //     **离球最远**的那台（角色已写完命令，这里按实际位置兜底；见函数头注释）
+    enforce_own_penalty_count(wm);
 }
 
 // ============================================================
@@ -192,6 +196,21 @@ void Strategy::run(WorldModel &wm) {
 // ============================================================
 TUNABLE(kRuleBoxMarginX, 8.0);   // 裁判门区向场内余量 cm（抗惯性过冲）
 TUNABLE(kRuleBoxMarginY, 6.0);   // 裁判门区向两侧余量 cm
+
+// ============================================================
+// 己方大禁区人数闸（规则 7.10.4，2026-10-06）：除门将外，己方禁区内（A+B = 球门前 80×35）
+//   **同时最多 3 人**。规则红线：除守门员外 **4 个机器人在禁区内防守 → 直接判点球**。
+//   （7.10.3 的"3 个在禁区内"只在"在球门区里停留 >20 连续周期"时才罚，而门区已被
+//    enforce_own_goal_area 每帧清空 ⇒ 非门将 ≤3 人即安全。）
+//   为什么必须独立成闸：roles.cpp 的 `own_box_clamp`（"只放离球最近的一个分区球员进大禁区"）
+//   挂在 run_zone 上，而 `strategy.kZoneMode` 默认 0（第 93 轮用户指令关闭）⇒ 那条纪律
+//   是**死代码**；plan_defense 只把断球/护门点推到 85cm 线，管不住 ACTIVE 追球、盯人跟防、
+//   护门点回撤同时涌入（球被压到自家门前时的蜂群场景）。
+//   做法：按**实际位置**数人（角色已写完命令，这里是兜底）；超限时只顶**离球最远**的那台
+//   ——留住离球近的（抢球/封门），顶走最不相关的。不引入跨帧状态、不动角色逻辑。
+// ============================================================
+TUNABLE(kOwnBoxMaxOutfield, 3);   // 己方大禁区内非门将人数上限（规则 7.10.4 红线 = 4）
+TUNABLE(kOwnBoxMarginOut, 5.0);   // 顶到"大禁区前缘(球门前 80cm) + 此余量"cm
 
 void enforce_own_goal_area(WorldModel &wm) {
     if (!wm.ball.valid) return;
@@ -209,6 +228,24 @@ void enforce_own_goal_area(WorldModel &wm) {
             motion::position(r, out_x, r.y, motion::TM_PASS);
         }
     }
+}
+
+void enforce_own_penalty_count(WorldModel &wm) {
+    if (!wm.ball.valid) return;
+    const TeamContext &ctx = wm.ctx;
+    int inside = 0, far_id = -1;
+    double far_d = -1.0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {          // 0 号门将豁免（不算人、也不被驱动）
+        const RobotState &r = wm.home[i];
+        if (!in_penalty_area(ctx, r.x, r.y)) continue;
+        ++inside;
+        const double d = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+        if (d > far_d) { far_d = d; far_id = i; }
+    }
+    if (inside <= (int)kOwnBoxMaxOutfield || far_id < 0) return;
+    RobotState &r = wm.home[far_id];
+    const double out_x = ctx.our_goal_x() + ctx.attack_dir() * (80.0 + kOwnBoxMarginOut);
+    motion::position(r, out_x, clamp(r.y, 72.5, 107.5), motion::TM_PASS);
 }
 
 void Strategy::update_team_state(WorldModel &wm) {

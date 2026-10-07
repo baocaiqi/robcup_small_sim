@@ -56,6 +56,9 @@ bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty);
 //   门球重启推球(branch 8) 与 脚下清球(clear branch) 共用。
 void gk_clear_direction(const WorldModel &wm, int id,
                         double bx, double by, double &dirx, double &diry);
+// 门前静止球（门球）无人抢时的推球方向：默认朝前带少许外侧斜度；roles.kGkKickFwd=0 回到 gk_clear_direction。
+void gk_restart_direction(const WorldModel &wm, int id,
+                          double bx, double by, double &dirx, double &diry);
 
 // 射门助跑距离（cm）：球后多远开始冲，决定撞球瞬间的机头速度 ⇒ 决定出球速度
 // ------------------------------------------------------------

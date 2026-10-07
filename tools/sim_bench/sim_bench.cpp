@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <map>
+#include <algorithm>
 #include <chrono>
 #include "simuro5/simuro_interface.hpp"
 #include "simuro5/team.hpp"
@@ -38,6 +40,8 @@
 #include "simuro5/tunable.hpp"        // 参数注入（--params / --dump-params，见 docs/work/RL参数搜索规格.md）
 
 using namespace simuro5;
+
+namespace simuro5 { extern const char *g_gk_rule_probe; }   // roles.cpp，SIMURO5_GK_PROBE 下才有
 
 // 简单确定性 PRNG（xorshift64*）：可复现、够快
 struct Rng {
@@ -97,6 +101,20 @@ struct SimState {
     double bx = 110, by = 90, bvx = 0, bvy = 0;
     double p_bx = 110, p_by = 90;      // 上一帧球位（WorldModel 用它算球速）
     int score_blue = 0, score_yellow = 0;
+    // 触球方归属（诊断，2026-10-05）：touch_blue/touch_yellow（位掩码，上面已声明）记为"本帧碰过球"，
+    //   下面 last_touch_* 记"最近一次触球是谁"。用来给每个失球定性：
+    //   最后触球是蓝队(我们) = 乌龙（真机 10-04 实测 88% 失球是乌龙）。
+    int last_touch_team = -1, last_touch_id = -1;   // 0=蓝(我们), 1=黄(对手)
+    int own_goals_by[5] = {0,0,0,0,0};             // 乌龙按"最后触球那台的编号"分类（0=门将 … 4=后卫）
+    int own_goals = 0, own_goals_gk = 0;            // 乌龙数 / 其中门将顶进去的（按"我们"归一，两侧都算）
+    int own_goals_y = 0, own_goals_gk_y = 0;        // opp_mode=2（我们守 x=0）时的乌龙
+    long gk_own_episodes = 0;                       // 门将乌龙"片段"数（连续触球算一次）
+    bool gk_own_prev = false;
+    // 乌龙定性（诊断）：蓝队最后一次触球时的"当时在干什么"——门将=命中的门将规则名，场上=角色名；
+    //   lt_dv = 这次触球让球"朝 x=220（蓝门）"的速度增加了多少 cm/s（>40 ≈ >1cm/帧 = 主动往自家门送）
+    std::string lt_rule;
+    double lt_dv = 0.0;
+    int lt_frame = 0;
     int frames = 0;
     long poss_blue = 0, poss_yellow = 0;   // 球权帧数（距球<15cm）
     int shots_blue = 0, shots_yellow = 0;  // 射门（球进入对方门区 30cm 内）
@@ -220,6 +238,13 @@ static void traj_write_row(FILE *fp, const SimState &s) {
     fprintf(fp, ",%.2f,%.2f\n", s.bx, s.by);
 }
 
+// 门球演练（诊断，2026-10-05）：--goalkick-drill 时除开场外每次复位都摆成「我方门球」，
+//   摆位抄真机 rlg 实测（球 (205,78)，门将 (215,90) 朝 -90°，对手在 80~100cm 外）。
+//   真机 15 场 114 次门球 113 次 1 秒后球没离开 15cm —— 原 sim 从不复位成门球，测不到。
+static bool g_gk_drill = false;
+static long g_gkd_n = 0, g_gkd_out1s = 0, g_gkd_out2s = 0, g_gkd_conceded = 0;
+static std::map<std::string, long> g_gkd_rules;   // 门球后前 80 帧门将命中的规则
+
 // 初始摆位（简单开局阵型）；seed 用于引入摆位微扰（模拟真实开局差异）
 static void init_formation(SimState &s, Rng *rng = nullptr) {
     ++s.reset_epoch;
@@ -251,6 +276,16 @@ static void init_formation(SimState &s, Rng *rng = nullptr) {
     }
     // 补充实验：复位不冒充球速。默认模式保持历史行为。
     if (g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
+    if (g_gk_drill && s.reset_epoch > 1) {
+        const double gbx[5] = {215, 190, 170, 150, 130}, gby[5] = {90, 100, 65, 40, 130};
+        const double gyx[5] = {5, 81, 81, 100, 100},     gyy[5] = {90, 49, 131, 59, 91};
+        for (int i = 0; i < 5; ++i) {
+            s.blue[i].x = gbx[i]; s.blue[i].y = gby[i]; s.blue[i].rot = i == 0 ? -90 : 180;
+            s.yellow[i].x = gyx[i]; s.yellow[i].y = gyy[i]; s.yellow[i].rot = 0;
+            if (rng && i > 0) { s.yellow[i].x += rng->range(-3, 3); s.yellow[i].y += rng->range(-3, 3); }
+        }
+        s.bx = s.p_bx = 205.2; s.by = s.p_by = 77.7;
+    }
 }
 
 // 把 SimState 填进 Environment（给 WorldModel::update 用）
@@ -402,6 +437,7 @@ static void step_physics(SimState &s) {
         // 窄携带区(9cm/40°)保证只有"对准球门方向推"时才携带，不会提前斜推。
         if (rv > bv * 0.9) {
             s.push_applied = true;
+            (carry_blue ? s.touch_blue : s.touch_yellow) |= 1u << carry_i;   // 携带推球也算触球
             if (s.dbg_contacts) printf("  [接触] %s%d 携带推球 rv%.0f\n",
                                        carry_blue ? "蓝" : "黄", carry_i, rv);
             s.bvx = s.bvx * kPushKeep + rvx * kPushGain;
@@ -442,18 +478,42 @@ static void step_physics(SimState &s) {
     }
 }
 
+// 乌龙定性统计（诊断，只统计蓝队=我们的乌龙，即 scripted/wall 模式）
+static std::map<std::string, std::pair<long, long>> g_og_tags;   // 标签 -> (个数, 其中主动)
+static long g_og_active = 0, g_og_age[3] = {0, 0, 0};   // 主动送进；触球后 <10 / 10~40 / >40 帧进门
+static void og_record(const SimState &s) {
+    const bool active = s.lt_dv > 40.0;
+    g_og_active += active;
+    const int age = s.frames - s.lt_frame;
+    ++g_og_age[age < 10 ? 0 : (age <= 40 ? 1 : 2)];
+    auto &t = g_og_tags[s.lt_rule];
+    ++t.first; t.second += active;
+}
+
 // 进球判定 + 重置（带随机摆位）；debug>0 时打印进球详情
 static bool check_goal(SimState &s, Rng *rng, int debug) {
     if (s.bx > 220 && s.by >= kGoalLo && s.by <= kGoalHi) {   // 蓝队失球(黄得分)
         s.score_yellow++;
-        if (debug) printf("  [失球] 帧%d 蓝失: 球(%.0f,%.0f)v(%.0f,%.0f) 门将(%.0f,%.0f) 蓝1(%.0f,%.0f) 黄近球(%.0f,%.0f)\n",
+        // 乌龙判定：本帧或近几帧最后触球是我方（touch_* 每帧清空，所以用 last_touch_*）
+        if (s.last_touch_team == 0) {
+            ++s.own_goals;
+            if (s.last_touch_id >= 0 && s.last_touch_id < 5) ++s.own_goals_by[s.last_touch_id];
+            if (s.last_touch_id == 0) ++s.own_goals_gk;
+            og_record(s);
+        }
+        if (debug) printf("  [失球] 帧%d 蓝失: 球(%.0f,%.0f)v(%.0f,%.0f) 门将(%.0f,%.0f) 蓝1(%.0f,%.0f) 黄近球(%.0f,%.0f) 最后触球=%s%d\n",
                           s.frames, s.bx, s.by, s.bvx, s.bvy, s.blue[0].x, s.blue[0].y,
                           s.blue[1].x, s.blue[1].y,
-                          s.yellow[0].x, s.yellow[0].y);
+                          s.yellow[0].x, s.yellow[0].y,
+                          s.last_touch_team < 0 ? "无" : (s.last_touch_team == 0 ? "蓝" : "黄"), s.last_touch_id);
         init_formation(s, rng); return true;
     }
     if (s.bx < 0 && s.by >= kGoalLo && s.by <= kGoalHi) {     // 黄队失球(蓝得分)
         s.score_blue++;
+        if (s.last_touch_team == 1) {                          // opp_mode=2 时我们执黄队
+            ++s.own_goals_y;
+            if (s.last_touch_id == 0) ++s.own_goals_gk_y;
+        }
         if (debug) printf("  [进球] 帧%d 蓝进: 球(%.0f,%.0f)\n", s.frames, s.bx, s.by);
         init_formation(s, rng); return true;
     }
@@ -602,12 +662,26 @@ static void wall_opponent(SimState &s) {
     }
 }
 
+// 主攻交接计数（诊断，2026-10-05）：只数比赛进行中我方 active_id 的变化，
+//   死球/点球时 RoleAssignment 复位到 1 号不算交接。对齐真机 role_dynamics.py 的"交接"口径。
+static long g_active_swaps = 0;
+static long g_og_by_id[5] = {0,0,0,0,0};
+// 控球拆解（诊断，2026-10-05）：20cm 内 只有我方 / 只有对方 / 双方都在(争抢) / 都不在 的帧数，
+//   争抢帧里再分谁更近。用来看 34% 控球是"人不在球边"还是"挤在一起输了距离"。
+static long g_pz_us = 0, g_pz_opp = 0, g_pz_both = 0, g_pz_none = 0, g_pz_both_us = 0;
+static long g_pz_opp_gk = 0, g_pz_opp_zone[3] = {0, 0, 0};   // 仅对方帧：对方门将 / 球在对方门前40·对方半场·我方半场
+static void count_active_swap(const WorldModel &wm, int &prev_id, bool &prev_live) {
+    if (prev_live && wm.live_play && wm.active_id != prev_id) ++g_active_swaps;
+    prev_id = wm.active_id; prev_live = wm.live_play;
+}
+
 // 一场比赛
 // opp_mode: 0=脚本对手打黄队(我们守x=220, 默认)  1=自我博弈  2=脚本对手打蓝队(我们守x=0, 测半场对称)
 static void play_match(int frames, int opp_mode, int debug, double opp_strength, Rng &rng, long &r_blue, long &r_yellow,
                        double &r_poss, int &r_shots, long r_zones[3], long &r_ga_frames, long &r_ga_eps,
                        long &r_ga_solo_frames, long &r_ga_solo_eps, long &r_freeball,
-                       long &r_freeball_corner, long &r_corner_rescue) {
+                       long &r_freeball_corner, long &r_corner_rescue,
+                       long &r_own_goals, long &r_own_goals_gk, long &r_gk_own_episodes) {
     SimState s;
     SimState last_decision_state;
     init_formation(s, &rng);
@@ -618,6 +692,8 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
     wm_b.coop_observer = wm_y.coop_observer = coop_csv_row;
     Strategy strat_b, strat_y;
     Environment env_b, env_y;
+    int swap_prev_id = 1; bool swap_prev_live = false;
+    int drill_t = -1, drill_epoch = s.reset_epoch;   // 门球演练：门球后第几帧（-1 = 不在演练窗口）
 
     for (int f = 0; f < frames; ++f) {
         g_coop_frame = f;
@@ -637,6 +713,8 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             hes_sample(wm_b, s);
 #endif
             coop_sample(wm_b);
+            if (drill_t >= 0 && drill_t < 80) ++g_gkd_rules[g_gk_rule_probe];
+            count_active_swap(wm_b, swap_prev_id, swap_prev_live);
             for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
         }
 
@@ -650,6 +728,7 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             wm_y.update(&env_y, ctx_yellow);
             strat_y.run(wm_y);
             coop_sample(wm_y);
+            if (opp_mode == 2) count_active_swap(wm_y, swap_prev_id, swap_prev_live);
             for (int i = 0; i < 5; ++i) { s.yellow[i].vl = wm_y.home[i].vl; s.yellow[i].vr = wm_y.home[i].vr; }
         }
 
@@ -670,10 +749,51 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         }
 
         if (g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
+        s.touch_blue = 0; s.touch_yellow = 0;
+        const double pre_bvx = s.bvx;
         step_physics(s);
 
         // 记录本帧球位作为下一帧的 lastBall（WorldModel 用差分算球速）
         if (!g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
+
+        // 更新"最近一次触球"（乌龙判定用；双方同帧触球时取离球更近的一方）
+        if (s.touch_blue || s.touch_yellow) {
+            int bt = -1, yt = -1;
+            for (int i = 0; i < 5; ++i) {           // 取触球方位掩码里编号最小的一台（不依赖 __builtin_ctz）
+                if (bt < 0 && (s.touch_blue & (1u << i))) bt = i;
+                if (yt < 0 && (s.touch_yellow & (1u << i))) yt = i;
+            }
+            bool take_blue = false;
+            if (bt >= 0 && yt >= 0) {
+                double db = std::hypot(s.bx - s.blue[bt].x, s.by - s.blue[bt].y);
+                double dy = std::hypot(s.bx - s.yellow[yt].x, s.by - s.yellow[yt].y);
+                take_blue = db <= dy;
+            } else take_blue = (bt >= 0);
+            s.last_touch_team = take_blue ? 0 : 1;
+            s.last_touch_id = take_blue ? bt : yt;
+            if (take_blue) {
+                static const char *const kRoleName[] = {"场上:GOALIE", "场上:ACTIVE", "场上:PASSIVE", "场上:ASSIST", "场上:MIDFIELD"};
+                const int role = (opp_mode == 2) ? -1 : wm_b.role[bt];
+                s.lt_rule = opp_mode == 2 ? "脚本" : (bt == 0 ? g_gk_rule_probe
+                            : (role >= 0 && role < 5 ? kRoleName[role] : "场上:?"));
+#ifdef SIMURO5_BRANCH_TRACE
+                if (opp_mode != 2) {   // sim_trace：再附上这台本帧运动指令来自哪一行源码
+                    const trace::Mark *m = trace::find(&wm_b.home[bt]);
+                    if (m && m->file) {
+                        const char *fn = std::strrchr(m->file, '\\'); if (!fn) fn = std::strrchr(m->file, '/');
+                        s.lt_rule += std::string(" ") + (fn ? fn + 1 : m->file) + ":" + std::to_string(m->line);
+                    }
+                }
+#endif
+                s.lt_dv = s.bvx - pre_bvx;
+                s.lt_frame = s.frames;
+            }
+            bool gk_now = take_blue && bt == 0;
+            if (gk_now && !s.gk_own_prev) ++s.gk_own_episodes;
+            s.gk_own_prev = gk_now;
+        } else {
+            s.gk_own_prev = false;   // 连续触球才叫一个"片段"，断一次就算新的
+        }
 
         if (g_traj) traj_write_row(g_traj, s);   // docs/18：轨迹导出（仅第一场）
 
@@ -685,6 +805,22 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         }
         if (d_b < 20.0 && d_b <= d_y) s.poss_blue++;
         else if (d_y < 20.0 && d_y < d_b) s.poss_yellow++;
+        {
+            double d_us = opp_mode == 2 ? d_y : d_b, d_op = opp_mode == 2 ? d_b : d_y;
+            bool nu = d_us < 20.0, no = d_op < 20.0;
+            if (nu && no) { ++g_pz_both; if (d_us <= d_op) ++g_pz_both_us; }
+            else if (nu) ++g_pz_us;
+            else if (no) {
+                ++g_pz_opp;
+                const SimRobot *O = opp_mode == 2 ? s.blue : s.yellow;
+                int k = 0; double dk = 1e9;
+                for (int i = 0; i < 5; ++i) { double d = std::hypot(s.bx - O[i].x, s.by - O[i].y); if (d < dk) { dk = d; k = i; } }
+                if (k == 0) ++g_pz_opp_gk;
+                double depth = opp_mode == 2 ? 220.0 - s.bx : s.bx;   // 球离"对方门线"
+                ++g_pz_opp_zone[depth < 40.0 ? 0 : depth < 110.0 ? 1 : 2];
+            }
+            else ++g_pz_none;
+        }
         // 射门统计（球进入对方门区 30cm）
         if (s.bx < 30.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_blue++;
         if (s.bx > 190.0 && s.by >= kGoalLo && s.by <= kGoalHi) s.shots_yellow++;
@@ -745,8 +881,22 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             }
         }
 
+        const int pre_sy = s.score_yellow;
         check_goal(s, &rng, debug);
         s.frames++;
+        if (g_gk_drill && opp_mode != 2) {   // 门球演练统计（只在我们守 x=220 时）
+            if (drill_t >= 0) {
+                ++drill_t;
+                double mv = std::hypot(s.bx - 205.2, s.by - 77.7);
+                if (drill_t == 40 && mv > 15.0) ++g_gkd_out1s;
+                if (drill_t == 80 && mv > 15.0) ++g_gkd_out2s;
+                if (s.score_yellow > pre_sy && drill_t <= 200) ++g_gkd_conceded;
+                if (drill_t > 200 || s.reset_epoch != drill_epoch) drill_t = -1;
+            }
+            if (s.reset_epoch != drill_epoch && s.reset_epoch > 1) {
+                drill_epoch = s.reset_epoch; drill_t = 0; ++g_gkd_n;
+            }
+        }
 
         // 僵局规则（平台同款）：60 帧(1.5s)内球位移 <25cm → 判争球重置中圈
         // 防球卡死在墙边/角落（2007 论文怪癖：球常卡进四角）；
@@ -795,6 +945,10 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
     r_ga_frames = s.ga_we_frames; r_ga_eps = s.ga_we_episodes;
     r_ga_solo_frames = s.ga_solo_frames; r_ga_solo_eps = s.ga_solo_episodes;
     r_freeball = s.freeball_count;
+    for (int i = 0; i < 5; ++i) g_og_by_id[i] += s.own_goals_by[i];
+    r_own_goals = opp_mode == 2 ? s.own_goals_y : s.own_goals;
+    r_own_goals_gk = opp_mode == 2 ? s.own_goals_gk_y : s.own_goals_gk;
+    r_gk_own_episodes = s.gk_own_episodes;
     r_freeball_corner = s.freeball_corner;
     r_corner_rescue = wm_b.corner_rescue_events + wm_y.corner_rescue_events;
 }
@@ -815,6 +969,7 @@ int main(int argc, char **argv) {
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
         else if (a == "--coop-csv" && i + 1 < argc) coop_path = argv[++i];
         else if (a == "--correct-ball-history") g_correct_ball_history = true;
+        else if (a == "--goalkick-drill") g_gk_drill = true;
         else if (a == "--strength" && i + 1 < argc) opp_strength = std::atof(argv[++i]);
         else if (a == "--opp" && i + 1 < argc) {
             std::string o = argv[++i];
@@ -869,6 +1024,7 @@ int main(int argc, char **argv) {
     double t_poss = 0;
     int t_shots = 0;
     long t_ga = 0, t_ga_eps = 0, t_ga_solo = 0, t_ga_solo_eps = 0, t_fb = 0, t_fb_corner = 0, t_rescue = 0;
+    long t_og = 0, t_og_gk = 0, t_gk_ep = 0;   // 乌龙 / 门将乌龙 / 门将触球片段
     auto t0 = std::chrono::steady_clock::now();
     for (int g = 0; g < games; ++g) {
         // 修复：--seed N 时每场要用不同种子（seed + 场次偏移），
@@ -880,7 +1036,9 @@ int main(int argc, char **argv) {
         g_coop_game = g + 1; g_coop_seed = gs;
         long b, y; double poss; int shots; long zones[3] = {0,0,0};
         long ga_frames = 0, ga_eps = 0, ga_solo = 0, ga_solo_eps = 0, fb = 0, fb_corner = 0, rescue = 0;
-        play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue);
+        long og = 0, og_gk = 0, gk_ep = 0;
+        play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue, og, og_gk, gk_ep);
+        t_og += og; t_og_gk += og_gk; t_gk_ep += gk_ep;
         if (g_traj) { fclose(g_traj); g_traj = nullptr; }   // 轨迹只导第一场
         // play_match 已按 opp_mode 归一化：返回的 b=我们进球、y=对手进球
         printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次 单人>20帧 %ld帧/%ld次 争球重置 %ld次(角区%ld) 救球%ld次\n",
@@ -900,6 +1058,47 @@ int main(int argc, char **argv) {
            (double)t_ga_solo / games, (double)t_ga_solo_eps / games,
            (double)t_fb / games, (double)t_fb_corner / games,
            (double)t_rescue / games);
+    printf("=== 主攻交接(我们): 均 %.1f 次/场, %.2f 次/秒 ===\n",
+           (double)g_active_swaps / games, (double)g_active_swaps / ((double)games * frames / 40.0));
+    printf("=== 乌龙归属(我们，编号1主攻/2助攻/3中场/4后卫): %.2f / %.2f / %.2f / %.2f 个/场 ===\n",
+           (double)g_og_by_id[1] / games, (double)g_og_by_id[2] / games,
+           (double)g_og_by_id[3] / games, (double)g_og_by_id[4] / games);
+    printf("=== 乌龙(我们): 均 %.2f 个/场 (占总失球 %.0f%%)，其中门将 %.2f 个/场；门将门前触球片段 %.1f 次/场 ===\n",
+           (double)t_og / games, 100.0 * t_og / (t_yellow + 1e-9), (double)t_og_gk / games, (double)t_gk_ep / games);
+    {
+        long n = 0;
+        std::vector<std::pair<long, std::string>> order;
+        for (const auto &kv : g_og_tags) { n += kv.second.first; order.emplace_back(-kv.second.first, kv.first); }
+        std::sort(order.begin(), order.end());
+        if (n > 0) {
+            printf("=== 乌龙定性(仅蓝=我们时有效): 主动送进(球朝自家门加速>1cm/帧) %.0f%%；触球后进门 <10帧 %.0f%% / 10~40帧 %.0f%% / >40帧 %.0f%% ===\n",
+                   100.0 * g_og_active / n, 100.0 * g_og_age[0] / n, 100.0 * g_og_age[1] / n, 100.0 * g_og_age[2] / n);
+            for (const auto &o : order) {
+                const auto &t = g_og_tags[o.second];
+                if (t.first * 100 < n) continue;   // <1% 的不列
+                printf("    最后触球时在做[%s]: %.2f 个/场 (%.0f%%)，其中主动 %.0f%%\n", o.second.c_str(),
+                       (double)t.first / games, 100.0 * t.first / n, 100.0 * t.second / (t.first + 1e-9));
+            }
+        }
+    }
+    if (g_gk_drill && g_gkd_n > 0) {
+        printf("=== 门球演练: %ld 次门球；1 秒后球离开 15cm %.0f%%，2 秒后 %.0f%%；门球后 5 秒内失球 %.0f%% ===\n",
+               g_gkd_n, 100.0 * g_gkd_out1s / g_gkd_n, 100.0 * g_gkd_out2s / g_gkd_n, 100.0 * g_gkd_conceded / g_gkd_n);
+        long tot = 0;
+        for (const auto &kv : g_gkd_rules) tot += kv.second;
+        for (const auto &kv : g_gkd_rules)
+            printf("    门球后 2 秒内门将规则 [%s] %.0f%%\n", kv.first.c_str(), 100.0 * kv.second / (tot + 1e-9));
+    }
+    {
+        double tot = (double)(g_pz_us + g_pz_opp + g_pz_both + g_pz_none) + 1e-9;
+        printf("=== 控球拆解: 仅我方 %.1f%%  仅对方 %.1f%%  争抢 %.1f%%(其中我方更近 %.1f%%)  无人 %.1f%% ===\n",
+               100.0 * g_pz_us / tot, 100.0 * g_pz_opp / tot, 100.0 * g_pz_both / tot,
+               100.0 * g_pz_both_us / (g_pz_both + 1e-9), 100.0 * g_pz_none / tot);
+        double po = (double)g_pz_opp + 1e-9;
+        printf("=== 仅对方帧里: 对方门将 %.1f%%；球在 对方门前40cm %.1f%% / 对方半场 %.1f%% / 我方半场 %.1f%% ===\n",
+               100.0 * g_pz_opp_gk / po, 100.0 * g_pz_opp_zone[0] / po,
+               100.0 * g_pz_opp_zone[1] / po, 100.0 * g_pz_opp_zone[2] / po);
+    }
     printf("=== 耗时 %.2fs, 场均 %.2fs (%.1f 帧/秒) ===\n", sec, sec / games, games * (double)frames / sec);
     // 借墙射门（docs/06 第 65 轮）：机会次数（连续采纳算 1 次）+ 采纳帧数
     printf("=== 借墙射门: 机会 %.1f 次/场, 采纳 %ld 帧 (%.1f 帧/场) ===\n",

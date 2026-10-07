@@ -14,11 +14,17 @@ namespace simuro5 {
 //   换人后 kActSwapHold 帧内不再换；配合传球/控球、点球、死球期间冻结。
 TUNABLE(kActDynamic, 1.0);      // 第 94 轮用户指令开启真机试（sim 犯规 ×5，盯点球）；0 = 回滚
 TUNABLE(kActSwapMargin, 20.0);   // cm 等效
-TUNABLE(kActSwapFrames, 4.0);
+TUNABLE(kActSwapFrames, 8.0);      // 2026-10-05: 4 -> 8（sim 交接 0.77 -> 0.52 次/秒，比分持平）
 TUNABLE(kActSwapHold, 25.0);
 TUNABLE(kActTurnCost, 12.0);     // 每 90° 转向折算 cm
 TUNABLE(kActAheadCost, 30.0);    // 人在球的进攻方向前面（要绕回球后）折算 cm
 TUNABLE(kActSwapPassive, 1.0);   // PASSIVE 能否接任（0=只在 ASSIST/MID 间换）
+// 分区冻结（2026-10-05，交接文档 §5.3#1）：真机主攻平均约 1 秒交接一次，丢球前 2 秒还在翻。
+//   球离己方门线 < kActDangerDepth（危险区）时，换人后冻结 kActSwapHoldDanger 帧；
+//   其余区域用 kActSwapHoldAttack 帧。取负值 = 沿用 kActSwapHold（旧行为）。
+TUNABLE(kActDangerDepth, 110.0);     // cm，110 = 己方半场
+TUNABLE(kActSwapHoldDanger, 70.0);  // 2026-10-05: 己方半场换人后冻结 1.75s
+TUNABLE(kActSwapHoldAttack, -1.0);
 
 static const int kFixedRole[PLAYERS_PER_SIDE] = {ROLE_GOALIE, ROLE_ACTIVE, ROLE_ASSIST, ROLE_MIDFIELD, ROLE_PASSIVE};
 
@@ -57,7 +63,9 @@ void RoleAssignment::assign(WorldModel &wm) {
     if (wm.active_cand_frames < kActSwapFrames) return;
     std::swap(wm.role[cur], wm.role[best]);
     wm.active_id = best; wm.active_cand = -1; wm.active_cand_frames = 0;
-    wm.active_hold = static_cast<int>(kActSwapHold);
+    const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();   // 球离己方门线
+    const double zone_hold = depth < kActDangerDepth ? kActSwapHoldDanger : kActSwapHoldAttack;
+    wm.active_hold = static_cast<int>(zone_hold < 0.0 ? kActSwapHold : zone_hold);
     wm.shoot_align_frames = 0; wm.shoot_push_count = 0;
     wm.active_ga_frames = 0; wm.active_ga_total = 0;
 }

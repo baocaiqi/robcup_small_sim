@@ -9,6 +9,17 @@ namespace motion {
 
 void stop(RobotState &r) { r.vl = 0.0; r.vr = 0.0; }
 
+// —— 侧向目标"直线来回蹭"修复（2026-10-06 真机 rlg：球在车侧 7cm，车头 50 帧不转，
+//    前冲 2cm → te 越过 95° 挂倒挡 → 倒 2cm 又翻回，走 127cm 净移 3cm）——
+namespace {
+TUNABLE(kWheelScaleSat, 1.0);  // 1=超上限时两轮等比缩放（保住转向差）；0=旧的单轮截断
+TUNABLE(kLatDamp, 0.5);        // 0~1：目标偏离车头越多越收油门（drive×(1−k+k·cosθ)）；0=关。sim 0.3/0.5/0.7 → 净胜 +2.50/+2.80/+2.25
+int g_legacy_drive = 0;        // LegacyDriveScope 嵌套深度：>0 时上面两项都按旧口径
+}
+
+LegacyDriveScope::LegacyDriveScope() { ++g_legacy_drive; }
+LegacyDriveScope::~LegacyDriveScope() { --g_legacy_drive; }
+
 void position(RobotState &r, double tx, double ty, TargetMode mode) {
     // —— 移植官方 demo Position()：以 sigmoid(d) 控制车速 + Ka*theta_e 修正转向 ——
     // docs/18 P1 改造：TM_STOP 目标加"制动包线"，见函数末注释。
@@ -60,14 +71,20 @@ void position(RobotState &r, double tx, double ty, TargetMode mode) {
     // 注：旧条款 `if (de < 12.0 && fabs(te) > 30.0) drive *= 0.25;` 已删除——
     //     它要求"朝向没对准才减速"，恰好与停点任务相反，且与包线叠加会双重减速。
 
+    // 目标偏在侧面时先转后冲：差速轮直冲只会沿车头直线来回越过侧向目标
+    auto lat_damp = [&](double t) {
+        if (kLatDamp > 0.0 && g_legacy_drive == 0) drive *= 1.0 - kLatDamp + kLatDamp * std::cos(t * SIMURO5_PI / 180.0);
+    };
     if (te > 95.0 || te < -95.0) {
         // 目标在正后方：倒着走
         te += (te > 0) ? -180.0 : 180.0;
         te = clamp(te, -80.0, 80.0);
+        lat_damp(te);
         if (de < 5.0 && std::fabs(te) < 40.0) Ka = 0.1;
         r.vr = (-drive + Ka * te);
         r.vl = (-drive - Ka * te);
     } else if (te > -85.0 && te < 85.0) {
+        lat_damp(te);
         if (de < 5.0 && std::fabs(te) < 40.0) Ka = 0.1;
         r.vr = (drive + Ka * te);
         r.vl = (drive - Ka * te);
@@ -75,6 +92,9 @@ void position(RobotState &r, double tx, double ty, TargetMode mode) {
         r.vr = (0.17 * te);
         r.vl = (-0.17 * te);
     }
+    // 超上限等比缩放：单轮截断会吃掉转向差（实测 175/125 截成 150/125，转向力减半）
+    const double vmax = std::max(std::fabs(r.vl), std::fabs(r.vr));
+    if (kWheelScaleSat > 0.5 && g_legacy_drive == 0 && vmax > kMaxWheel) { r.vl *= kMaxWheel / vmax; r.vr *= kMaxWheel / vmax; }
     // 安全网：夹取只防异常数值（自然命令上限 ≈139），不参与调速。
     r.vl = clamp(r.vl, -kMaxWheel, kMaxWheel);
     r.vr = clamp(r.vr, -kMaxWheel, kMaxWheel);

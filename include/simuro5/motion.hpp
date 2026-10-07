@@ -39,6 +39,13 @@ constexpr double kMaxWheel   = 150.0;   // 轮速命令安全上限（自然命�
 // 到 de<kStopEps 停车——根治"满速冲到目标点、物理刹不住 → 过冲 → 倒车 → 极限环"（docs/18）。
 void position(RobotState &r, double tx, double ty, TargetMode mode = TM_STOP);
 
+// 作用域内 position() 用旧的"单轮截断、不收侧向油门"（2026-10-06 修复前口径）。
+//   门将门球推球是按旧手感调出来的（offline_test 门球闭环 y=66 换新口径推不出），门将保持旧口径。
+struct LegacyDriveScope {
+    LegacyDriveScope();
+    ~LegacyDriveScope();
+};
+
 // ============================================================
 // 到点定向（docs/18 P2）：走到 (tx,ty) **并且**把机头转到 desired_rot（度）
 // 返回 true = 已到位(pos_tol 内) 且 已对准(ang_tol 内) → 调用方可执行后续动作

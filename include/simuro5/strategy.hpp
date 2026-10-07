@@ -48,5 +48,10 @@ private:
 //   都被顶到门区前缘外 8cm。独立成函数是为了能单测（不依赖角色决策）。
 void enforce_own_goal_area(WorldModel &wm);
 
+// 我方大禁区人数闸（规则 7.10.4，2026-10-06）：除门将外，己方禁区内（A+B，球门前 80×35）
+//   同时最多 `strategy.kOwnBoxMaxOutfield`(=3) 人 —— 规则红线是 4 个非门将在禁区内防守
+//   → 直接判点球。与 enforce_own_goal_area 同层（角色写完命令后按实际位置兜底）。
+void enforce_own_penalty_count(WorldModel &wm);
+
 }  // namespace simuro5
 #endif

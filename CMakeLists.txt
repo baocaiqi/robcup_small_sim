@@ -13,6 +13,15 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(FATAL_ERROR "官方平台是 32 位(i386)。请用 VS 生成器 + -A Win32 或 32 位工具链构建！")
 endif()
 
+# ---- 写盘诊断开关（默认 OFF —— 比赛版必须保持 OFF）----
+#   打开后：门将每帧规则轨迹写 C:\Strategy\goalie_trace.csv、
+#           黑匣子每帧 F/R/O 三行写 C:\Strategy\hnnu_blackbox.csv。
+#   ⚠️ 真机 40Hz 追加写，单局能长到上百 MB（2026-10-05 实测 1.09 GB / 105.9 MB），
+#      会拖慢帧率、占满磁盘 —— 只在需要复盘时临时打开。
+#   打开：cmake -S . -B build -DHNNU_TRACE=ON
+#   关闭：cmake -S . -B build -DHNNU_TRACE=OFF（或直接删掉 build/ 重新配置）
+option(HNNU_TRACE "编译进写盘诊断（goalie_trace.csv / hnnu_blackbox.csv）；比赛版必须 OFF" OFF)
+
 # ---- 共享核心源码(编译进两个 DLL) ----
 set(CORE_SOURCES
   src/geometry.cpp
@@ -49,6 +58,10 @@ set_target_properties(Strategy4Yellow PROPERTIES
 
 foreach(tgt Strategy4Blue Strategy4Yellow)
   target_include_directories(${tgt} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  if(HNNU_TRACE)
+    # 只给两个平台 DLL 打开；offline_test / sim_bench 保持零副作用（不写盘）
+    target_compile_definitions(${tgt} PRIVATE SIMURO5_HNNU_TRACE)
+  endif()
   if(MSVC)
     # 关键: 导出符号必须是 MSVC C++ mangled 名(与官方模板一致),
     # 平台按这些名字加载, 因此禁止 extern "C"。
@@ -72,7 +85,7 @@ if(BUILD_TEST)
   # ---- 快速无头仿真器（大量样本/回归测试/参数搜索）----
   add_executable(sim_bench tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
   target_include_directories(sim_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(sim_bench PRIVATE STRATEGY4BLUE_EXPORTS)
+  target_compile_definitions(sim_bench PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_GK_PROBE)
   if(MSVC)
     target_compile_options(sim_bench PRIVATE /W3 /utf-8)
     set_property(TARGET sim_bench PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -81,7 +94,7 @@ if(BUILD_TEST)
   # ---- 诊断构建：sim_bench + 决策分支追踪（include/simuro5/branch_trace.hpp）----
   add_executable(sim_trace tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
   target_include_directories(sim_trace PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(sim_trace PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_BRANCH_TRACE)
+  target_compile_definitions(sim_trace PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_BRANCH_TRACE SIMURO5_GK_PROBE)
   if(MSVC)
     target_compile_options(sim_trace PRIVATE /W3 /utf-8)
     set_property(TARGET sim_trace PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
