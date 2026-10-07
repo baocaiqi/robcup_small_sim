@@ -1,9 +1,4 @@
-// ============================================================
-// branch_trace.hpp — 决策分支追踪（仅诊断构建 SIMURO5_BRANCH_TRACE 生效）
-//   记录每个机器人本帧"最后一次"运动指令来自哪一行源码，供 sim_bench 统计
-//   "争抢时犹豫"等现象落在哪个分支。未定义宏时本文件为空，DLL 行为与体积不变。
-//   用法：在 motion.hpp 之后 include；motion::position/stop/... 调用自动带上行号。
-// ============================================================
+// branch_trace.hpp — 记录每台机器人本帧最后一条运动指令的源码行号（仅 SIMURO5_BRANCH_TRACE 生效）
 #ifndef SIMURO5_BRANCH_TRACE_HPP
 #define SIMURO5_BRANCH_TRACE_HPP
 #ifdef SIMURO5_BRANCH_TRACE
@@ -49,7 +44,6 @@ template <class... A> void follow_route_tr(const char *f, int l, RobotState &r, 
 #define stop(r)                  stop_tr(__FILE__, __LINE__, r)
 #define chase_ball(r, p)         chase_ball_tr(__FILE__, __LINE__, r, p)
 #define follow_route(r, ...)     follow_route_tr(__FILE__, __LINE__, r, __VA_ARGS__)
-// 直接写轮速的地方用它显式打点
 #define TRACE_MARK(r)            ::simuro5::trace::mark(&(r), __FILE__, __LINE__)
 #endif  // SIMURO5_TRACE_NO_MACROS
 

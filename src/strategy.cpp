@@ -1,4 +1,4 @@
-﻿#include "simuro5/strategy.hpp"
+#include "simuro5/strategy.hpp"
 #include "simuro5/roles.hpp"
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
@@ -6,75 +6,43 @@
 #define TUNABLE_PREFIX "strategy."
 #include "simuro5/tunable.hpp"
 #include <cmath>
-#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后（诊断构建才生效）
+#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后
 
 namespace simuro5 {
 
-// ============================================================
-// 攻防状态机（队员 A：全局调度）
-//
-// 给全队加「记忆 + 滞回 + 事件」：
-//   1. 滞回：持球/失球需连续 kStateHysteresisFrames 帧才翻转状态，
-//      消除球在双方都能抢到时进攻/防守的每帧横跳（治"角色/阵型抖动"）；
-//   2. 事件：state_transition 标记本帧切换，供后续模块做即时响应
-//      （丢球→立即收缩，夺球→立即前插，无需等下帧重算）；
-//   3. 威胁等级改由「状态 + 球位」稳定输出，不再随单帧球权抖动。
-// ============================================================
-TUNABLE(kStateHysteresisFrames, 3);  // 滞回帧数（可调，见 docs/06）
-
-// 威胁降档滞回帧数（升快降慢，短期第1项）：
-//   威胁升档立即；降档需连续低威胁满 kThreatHoldFrames 帧才降，防止球短暂飞出
-//   危险区 / 快球短暂减速，立刻取消人盯人（对手马上回传打空档）。
-//   注意：只改变「降档时机」，threat_level 仍是离散档位（0.1/0.4/0.6/0.8/1.0），
-//   不引入连续中间值——守住「离散打底」红线，连续威胁是后续独立开关。
-//   <=0 时完全退回旧行为（即时升降），作回滚开关。
+// 状态机：滞回帧数 / 威胁降档滞回帧(升快降慢，<=0关) / 反击窗口帧 / 分区防守开关(0=关)
+TUNABLE(kStateHysteresisFrames, 3);
 TUNABLE(kThreatHoldFrames, 10);
-
-// 反击快攻窗口帧数（docs/13 攻击强化 方案 A）：
-//   断球瞬间起 30 帧（≈0.75s）内，assist/midfield 豁免回防条件立即前插接应，
-//   让 ACTIVE 断球后有传球选择；窗口过后恢复正常回防逻辑。
-//   30 帧约等于 demo 就地反抢到位所需时间——窗口内把球传/带过半场即成功。
 TUNABLE(kCounterWindowFrames, 30);
+TUNABLE(kZoneMode, 0.0);
 
-// 第 91 轮：官方式分区防守（见 roles.cpp run_zone）。活球期 PASSIVE/ASSIST/MIDFIELD 一律 run_zone，
-//   不再走逼抢者/清道夫/回防等分支；死球摆位期与点球执行期照旧。=0 回滚到第 90 轮。
-TUNABLE(kZoneMode, 0.0);  // 2026-09-30 用户指令关闭，回到第 90 轮行为（第 93 轮）
-
-// 罚球点几何（真机 rlg 实测，2026-09-12 两场共 14 次摆球）
-TUNABLE(kPenaltySpotDist, 39.4);  // 罚球点到门线距离 cm
-TUNABLE(kPenaltySpotTol, 1.5);  // 容差 cm
-TUNABLE(kPenaltySpotStill, 1.0);  // cm/帧：球静止判定
+// 罚球点（真机实测）：距门线 39.4cm、容差 1.5cm、静止阈值 1.0cm/帧
+TUNABLE(kPenaltySpotDist, 39.4);
+TUNABLE(kPenaltySpotTol, 1.5);
+TUNABLE(kPenaltySpotStill, 1.0);
 
 bool we_take_penalty_spot(const WorldModel &wm) {
     bool state_says_ours = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||
                            (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow);
-    if (state_says_ours) return true;                 // 摆位期平台确实报点球态
+    if (state_says_ours) return true;
     if (!wm.ball.valid) return false;
-    if (std::hypot(wm.ball.vx, wm.ball.vy) >= kPenaltySpotStill) return false;   // 球在动=已在比赛
+    if (std::hypot(wm.ball.vx, wm.ball.vy) >= kPenaltySpotStill) return false;
     double spot_x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * kPenaltySpotDist;
     return std::fabs(wm.ball.x - spot_x) < kPenaltySpotTol &&
            std::fabs(wm.ball.y - 90.0) < kPenaltySpotTol;
 }
 
 void Strategy::run(WorldModel &wm) {
-    // 1. 局势分析（球权/半场/禁区）
     Situation sit = sit_.analyze(wm);
     wm.we_have_ball = sit.we_have_ball;
-    if (sit.whos_mismatch) ++wm.whos_disagree;   // 平台球权 vs 自算的不一致帧数（标定用）
+    if (sit.whos_mismatch) ++wm.whos_disagree;
 
-    // 1.5 我方主罚点球执行期标志（供 roles 区分"对方门球"vs"我方点球"：
-    //   两者都是"球静止在对方门区"，但点球必须去踢，门球要等对方开出）
-    //   ⚠️ 平台约定 PM_PenaltyKick_X = **X 队主罚**（证据：官方 demo 的 SetBall 只在
-    //   PM_GoalKick_Yellow 时把球放黄队门区，而 demo 是黄队；demo 的 SetLaterRobots
-    //   case 7=PM_PenaltyKick_Yellow 摆的是黄队自己主罚的阵型）。摆位用得上这条。
-    //   但**执行期**平台报的不是点球态（见 we_take_penalty_spot 注释）→ 这里改用
-    //   "球静止在对方罚球点上"这个可观测量，真机 9 次点球里 0 次生效的老问题在此修掉。
+    // 我方点球执行期：平台执行期不报点球态，改用「球静止在对方罚球点」判据
     {
         bool we_take = we_take_penalty_spot(wm);
         if (we_take) {
             wm.in_penalty_exec = true;
         } else if (wm.in_penalty_exec) {
-            // 球离开罚球点（被踢出/被碰走）或 PlayMode 已切走 → 执行期结束
             bool ball_leaves = std::hypot(wm.ball.vx, wm.ball.vy) > 3.0 ||
                                std::fabs(wm.ball.x - wm.ctx.opp_goal_x()) > 60.0 ||
                                std::fabs(wm.ball.y - 90.0) > 30.0;
@@ -82,36 +50,21 @@ void Strategy::run(WorldModel &wm) {
         }
     }
 
-    // 2. 攻防状态机（滞回 + 事件 + 威胁）
     update_team_state(wm);
 
-    // 3. 站位参考点（状态感知：进攻锚点 vs 防守锚点）
     sit_.update_stand_points(wm);
 
-    // 4. 角色分配（固定角色：0=GK 1=ACTIVE 2=ASSIST 3=MID 4=PASSIVE）
     ra_.assign(wm);
 
-    // 4.5 清道夫指派（球在防守三区拉边时，抽一个区域防守者钉中路封远门柱/横传）
     update_sweeper(wm);
 
-    // 4.6 前场散球逼抢者指派（球在前场且静止/周围没对方时，抽进攻球员就近抢散球）
     update_presser(wm);
 
-    // 4.7 盯人分配（第 97 轮，用户指令「使用带权的匈牙利算法」）：把"谁盯谁"从
-    //     各自贪心 argmax 升级成**全队最优一一匹配**（杜绝两个人盯同一个对手），
-    //     并把"换人惩罚 λ"直接放进代价矩阵 ⇒ "配得准"和"少折腾"是同一个最小化问题。
-    //     威胁门槛没过时 mark_assign 全清 -1，角色函数自动走各自的原逻辑（可整体回退）。
     assign_marks(wm);
 
-    // 4.8 抢断唯一竞标（第 104 轮）：assign_marks 之后、角色执行之前，全局算一次
-    //     「谁该抢脚下球」，只让 EV 最高的一个上前（其余人守盯人位）。
     steal_decide(wm);
 
-    // 5. 按角色执行（薄壳调度）
-    //    冷却期门区禁令（docs/13 方案 C 扩展）：撤出刚触发 30 帧内，本角色若还在
-    //    对方门区（且非攻门作业/点球执行），直接指令门外、**跳过角色函数**——
-    //    让角色再跑一帧会把 chase/站位目标与撤出目标交替覆盖 vl/vr，机器人
-    //    原地抖振卡在门区（实测蓝1 滞留 45 帧的根因）。
+    // 5. 按角色执行；冷却期内仍在对方门区则撤出并跳过角色函数（防抖振卡区）
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
         if (wm.ga_cooldown[i] > 0) {
@@ -128,14 +81,13 @@ void Strategy::run(WorldModel &wm) {
                     wm.coop_control_end(CoopOutcome::GoalDiscipline);
                 double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
                 motion::position(wm.home[i], ogx - ad * 70.0, clamp(wm.home[i].y, 72.5, 107.5));
-                continue;   // 冷却期禁令：跳过角色函数
+                continue;
             }
         }
         if (kZoneMode > 0.5 && wm.live_play && !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
         }
-        // 第 89 轮：逼抢者也要守门区冷却禁令（原先排在冷却检查之前，被撤出后又冲回门区）
-        if (i == wm.presser_id) { run_press(wm, i); continue; }   // 前场散球逼抢者 override 原角色
+        if (i == wm.presser_id) { run_press(wm, i); continue; }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
             case ROLE_PASSIVE:  run_passive(wm, i); break;
@@ -145,12 +97,7 @@ void Strategy::run(WorldModel &wm) {
         }
     }
 
-    // 5.5 全角色对方门区停留时限兜底（docs/13 方案 C 扩展）：
-    //   平台判罚看**实际位置**，clamp 只约束站位点，挡不住追球/锚点振荡实际进区
-    //   （sim 实测：ACTIVE 追角区球路径穿门区滞留 36 帧、ASSIST 锚点停门区边缘）。
-    //   ACTIVE 的 run_active 内方案 C 撤出照旧，这里是兜底：豁免"球在门区且自己
-    //   贴球(≤25cm)"——门前争抢/补射/带球攻门不算滞留；其余（含追球穿区）连续
-    //   >15 帧 → 强制撤到门区前缘外 70cm + 冷却 30 帧（冷却由 5 的调度前置拦截执行）。
+    // 对方门区停留兜底：贴球(≤25cm)不算滞留，其余连续 >15 帧撤出 + 冷却 30 帧
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) continue;
         double ogx = wm.ctx.opp_goal_x(), ad = wm.ctx.attack_dir();
@@ -160,8 +107,6 @@ void Strategy::run(WorldModel &wm) {
             bool ball_in_ga = in_opp_goal_area(wm.ctx, wm.ball.x, wm.ball.y);
             bool shooting_work = ball_in_ga &&
                 dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y) <= 25.0;
-            // 第 89 轮：非主攻没有进对方门区的理由 → 一进就撤（真机 09-29：ASSIST/MID 滞留 40~94 帧）；
-            //   主攻保留 15 帧（追球穿区/门前补位）。
             const int limit = (wm.role[i] == ROLE_ACTIVE) ? 15 : 0;
             if (!shooting_work && ++wm.ga_overstay[i] > limit) {
                 if (wm.coop_pass_task.active && (i == wm.coop_pass_task.passer_id || i == wm.coop_pass_task.receiver_id))
@@ -177,52 +122,27 @@ void Strategy::run(WorldModel &wm) {
         }
     }
 
-    // 5.6 我方门区"只能有门将"硬闸（见函数注释）：除门将外任何人进小禁区当场顶出去
+    // 门区纪律：门区只能有门将；大禁区非门将最多 3 人（规则7.10.4 红线=4），超限顶离球最远
     enforce_own_goal_area(wm);
-
-    // 5.7 我方大禁区人数闸（规则 7.10.4）：非门将在己方大禁区内同时最多 3 人，超限顶出
-    //     **离球最远**的那台（角色已写完命令，这里按实际位置兜底；见函数头注释）
     enforce_own_penalty_count(wm);
 }
 
-// ============================================================
-// 我方门区"只能有门将"硬闸（docs/06 第 68 轮，用户真机诊断）
-//   实测（09-14 20:46 场，7444 帧逐帧统计）：我方门区里 ≥2 人共 **674 帧 ≈ 全场 9%**，
-//   同一场被判 **9 次点球**（全部"黄方主罚"= 我们违规所致）；而"对方门区 2+ 人"只有 17 帧、
-//   且 9 次点球前 200 帧内一次都没出现 ⇒ 病根是**挤自己的小禁区**，不是进攻时挤对方门区。
-//   规则：门区（球门前 50×30）里非门将的第二个人即违规 → 判对方点球。
-//   与角色无关：无论谁（后卫锚点压线、主攻追球回家…）只要在里面，当场顶到门区前缘外 8cm。
-//   ⚠️ 门将豁免（只有它可以在门区内）；球在门区里也照样顶出（门将负责处理门区内的球）。
-// ============================================================
-TUNABLE(kRuleBoxMarginX, 8.0);   // 裁判门区向场内余量 cm（抗惯性过冲）
-TUNABLE(kRuleBoxMarginY, 6.0);   // 裁判门区向两侧余量 cm
-
-// ============================================================
-// 己方大禁区人数闸（规则 7.10.4，2026-10-06）：除门将外，己方禁区内（A+B = 球门前 80×35）
-//   **同时最多 3 人**。规则红线：除守门员外 **4 个机器人在禁区内防守 → 直接判点球**。
-//   （7.10.3 的"3 个在禁区内"只在"在球门区里停留 >20 连续周期"时才罚，而门区已被
-//    enforce_own_goal_area 每帧清空 ⇒ 非门将 ≤3 人即安全。）
-//   为什么必须独立成闸：roles.cpp 的 `own_box_clamp`（"只放离球最近的一个分区球员进大禁区"）
-//   挂在 run_zone 上，而 `strategy.kZoneMode` 默认 0（第 93 轮用户指令关闭）⇒ 那条纪律
-//   是**死代码**；plan_defense 只把断球/护门点推到 85cm 线，管不住 ACTIVE 追球、盯人跟防、
-//   护门点回撤同时涌入（球被压到自家门前时的蜂群场景）。
-//   做法：按**实际位置**数人（角色已写完命令，这里是兜底）；超限时只顶**离球最远**的那台
-//   ——留住离球近的（抢球/封门），顶走最不相关的。不引入跨帧状态、不动角色逻辑。
-// ============================================================
-TUNABLE(kOwnBoxMaxOutfield, 3);   // 己方大禁区内非门将人数上限（规则 7.10.4 红线 = 4）
-TUNABLE(kOwnBoxMarginOut, 5.0);   // 顶到"大禁区前缘(球门前 80cm) + 此余量"cm
+// 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm
+TUNABLE(kRuleBoxMarginX, 8.0);
+TUNABLE(kRuleBoxMarginY, 6.0);
+TUNABLE(kOwnBoxMaxOutfield, 3);
+TUNABLE(kOwnBoxMarginOut, 5.0);
 
 void enforce_own_goal_area(WorldModel &wm) {
     if (!wm.ball.valid) return;
     const double hold_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 58.0;  // 50 + 8 余量
-    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {          // 0 号门将豁免
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
         RobotState &r = wm.home[i];
         if (in_goal_area(wm.ctx, r.x, r.y)) {
             motion::position(r, hold_x, clamp(r.y, 72.5, 107.5), motion::TM_PASS);
             continue;
         }
-        // 裁判口径门区（浅而宽，见 in_goal_area_rule）：带余量提前顶出，沿 x 直出、y 保持
-        //   （旧 in_goal_area 只管 y∈[75,105]，漏掉 y∈[65,75)∪(105,115] 的门柱两侧 → 点球主因）
+        // 裁判口径门区更浅更宽（含门柱两侧，见 in_goal_area_rule）：带余量提前顶出
         if (in_goal_area_rule(wm.ctx, r.x, r.y, kRuleBoxMarginX, kRuleBoxMarginY)) {
             double out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * (15.0 + kRuleBoxMarginX + 6.0);
             motion::position(r, out_x, r.y, motion::TM_PASS);
@@ -249,13 +169,9 @@ void enforce_own_penalty_count(WorldModel &wm) {
 }
 
 void Strategy::update_team_state(WorldModel &wm) {
-    // 滞回计数
     if (wm.we_have_ball) { ++wm.possession_frames; wm.no_possession_frames = 0; }
     else                 { ++wm.no_possession_frames; wm.possession_frames = 0; }
 
-    // 反击快攻窗口（docs/13 方案 A）：
-    //   失球→持球转换帧 = 断球成功，置窗口让 assist/mid 立即前插（不等滞回切进攻态）；
-    //   窗口每帧递减，归零后恢复正常回防。
     if (wm.we_have_ball && !wm.prev_we_have_ball && wm.game_state == PM_PlayOn) {
         wm.counter_attack_frames = kCounterWindowFrames;
     }
@@ -269,37 +185,27 @@ void Strategy::update_team_state(WorldModel &wm) {
         wm.team_state = TS_DEFENSE;
     wm.state_transition = (wm.team_state != prev);
 
-    // 威胁等级：由「状态 + 球位」稳定输出（不再随单帧球权抖动），
-    // 再叠加「升快降慢」滞回（见 kThreatHoldFrames 注释）：升档立即、降档需连续
-    // 低威胁满 N 帧才降，消除 danger≈6 阈值附近的档位来回跳。切换到进攻态(threat=0.1)
-    // 即时降——攻防切换本身已由状态机 3 帧滞回把关，无需再叠一层。
     double raw_threat = threat_from_state(wm);
     if (kThreatHoldFrames <= 0 || raw_threat >= wm.threat_level) {
-        wm.threat_level = raw_threat;             // 升档/持平：立即
+        wm.threat_level = raw_threat;
         wm.threat_hold_frames = 0;
     } else if (wm.team_state == TS_ATTACK) {
-        wm.threat_level = raw_threat;             // 进攻态：即时（状态机已滞回）
+        wm.threat_level = raw_threat;
         wm.threat_hold_frames = 0;
     } else if (++wm.threat_hold_frames >= kThreatHoldFrames) {
-        wm.threat_level = raw_threat;             // 降慢：连续 N 帧低威胁才降
+        wm.threat_level = raw_threat;
         wm.threat_hold_frames = 0;
     }
 }
 
 double Strategy::threat_from_state(const WorldModel &wm) const {
     const TeamContext &ctx = wm.ctx;
-    if (wm.team_state == TS_ATTACK) return 0.1;   // 我方控球：低威胁
-    // 防守态：按球的位置分级
-    if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return 1.0;   // 球在己方罚球区
+    if (wm.team_state == TS_ATTACK) return 0.1;
+    if (in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return 1.0;
     bool our_half = ctx.attack_dir() > 0 ? (wm.ball.x < 110.0) : (wm.ball.x > 110.0);
     double threat = our_half ? 0.6 : 0.4;
 
-    // 球速方向加成（team-level danger）：球快速朝门滚时提前升档，让全队早回防。
-    //   danger = 球朝己方门的速度分量（defense.hpp 点积投影），横滚/背离=0，不会误判。
-    //   朝门且快 → 对方半场 0.4→0.6（提前触发人盯人）、己方半场 0.6→0.8（预留更高档）。
-    //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人——升 0.6 是真正的提前回防收益。
-    // 朝门有效速度阈值：犀利进攻档（defense.kSharpDefense=1）降到 4 cm/帧，
-    //   对方刚提速推进就升档 → 全队提前回防/人盯人（默认 6）。
+    // 球朝己方门快速滚时提前升档（阈值 cm/帧，犀利防守档降到 4）
     const double danger_speed = sharp_defense_on() ? sharp_danger_speed() : 6.0;
     if (ball_danger_speed(wm) > danger_speed) {
         threat = our_half ? 0.8 : 0.6;
@@ -314,16 +220,12 @@ void Strategy::update_sweeper(WorldModel &wm) {
     const TeamContext &ctx = wm.ctx;
     double bx = wm.ball.x, by = wm.ball.y;
 
-    // 触发：球在本方防守三区（离门 1/3 场以内）且明显拉边（|y-90|>30）。
-    //   这种局面球-门连线的静态站位会把所有区域防守者都拽到球侧（Y 同侧），
-    //   中路/远门柱真空，横传或内切一打就穿——抽一个区域防守者回收中路兜底。
+    // 触发：球在本方防守三区且拉边(|y-90|>30)——静态球-门连线会让中路/远门柱真空
     const double third = TeamContext::FIELD_LENGTH / 3.0;
     bool our_third = (ctx.attack_dir() > 0) ? (bx < third)
                                             : (bx > TeamContext::FIELD_LENGTH - third);
     if (!our_third || std::fabs(by - 90.0) <= 30.0) return;
 
-    // 从两个区域防守者(ASSIST/MIDFIELD)里挑「离球更远」的那个做清道夫：
-    //   离球近的继续压上/断球，离球远的回收中路（少跑路、也正好在远侧）。
     int ids[2] = { -1, -1 };
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_ASSIST)        ids[0] = i;
@@ -334,54 +236,43 @@ void Strategy::update_sweeper(WorldModel &wm) {
     if (d0 < 0.0 && d1 < 0.0) return;
     wm.sweeper_id = (d0 >= d1) ? ids[0] : ids[1];
 
-    // 清道夫站位：罚球区前缘外侧(gx+85)、中路 y=90。
-    //   y=90 封中路与远门柱；x=85 尊重「非门将不进己方罚球区」纪律(见 situation.cpp)。
+    // 清道夫站位：己方罚球区前缘外 85cm、中路 y=90（封中路与远门柱，不进罚球区）
     wm.sweeper_x = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
     wm.sweeper_y = 90.0;
 }
 
-// ============================================================
-// 前场散球逼抢者指派（docs/06 第 83 轮，用户指令）
-//   球在前场（对方半场）且「静止 或 周围没有对方球员」时，从进攻三人组
-//   （ACTIVE/ASSIST/MIDFIELD，排除门将和中卫）里打分选一个去抢散球：
-//   打破「只有 ACTIVE 追球」的固定分工——离球最近的助攻/中场也能就地抢回球权。
-//   打分（越小越好）：score = 到球距离 - kForwardBonus * 球在球员前方程度；
-//   现任者减 kPressHysteresis 防每帧换人（写法仿 defense.cpp::pick_mark_target）。
-// ============================================================
-TUNABLE(kPressEnabled, 1.0);        // 总开关：<=0 关闭本功能（回滚开关）
-TUNABLE(kPressMaxDist, 250.0);      // 候选离球最远距离(cm)，超过不抢
-TUNABLE(kPressOppClearDist, 40.0);  // 「球周围没对方」阈值：最近对手离球 > 此值
-TUNABLE(kPressStillSpeed, 1.0);     // 球静止阈值(cm/帧)
-TUNABLE(kForwardBonus, 0.6);        // 球在球员前方(球员在球后)的加分系数
-TUNABLE(kForwardMax, 60.0);         // 前方加分的 forward 上限(cm)
-TUNABLE(kPressHysteresis, 15.0);    // 换人滞回(cm)：新人要比现任好超过此值才换
+// 前场散球逼抢者：球在前场且静止/周围无对方时，从进攻三人组打分选一台（距离cm、球速cm/帧）
+TUNABLE(kPressEnabled, 1.0);
+TUNABLE(kPressMaxDist, 250.0);
+TUNABLE(kPressOppClearDist, 40.0);
+TUNABLE(kPressStillSpeed, 1.0);
+TUNABLE(kForwardBonus, 0.6);
+TUNABLE(kForwardMax, 60.0);
+TUNABLE(kPressHysteresis, 15.0);
 
 void Strategy::update_presser(WorldModel &wm) {
-    int cur = wm.presser_id;   // 上帧逼抢者（滞回用）
-    wm.presser_id = -1;        // 默认清空，下面满足触发才重新选
+    int cur = wm.presser_id;
+    wm.presser_id = -1;
 
     if (kPressEnabled <= 0.0) return;
     if (!wm.ball.valid) return;
-    if (!wm.live_play) return;   // 死球期有专门逻辑，别抢（第 88 轮：真机 gameState 不回 PlayOn，改认活球）
-    if (wm.we_have_ball) return;              // 球已在我方脚下，不「抢」
+    if (!wm.live_play) return;
+    if (wm.we_have_ball) return;
 
     const TeamContext &ctx = wm.ctx;
     double bx = wm.ball.x, by = wm.ball.y;
 
-    // 前场（对方半场）
     bool front = (ctx.attack_dir() > 0) ? (bx > 110.0) : (bx < 110.0);
     if (!front) return;
 
-    // 球静止 或 球周围没有对方球员（两者满足其一即可）
     bool still = std::hypot(wm.ball.vx, wm.ball.vy) < kPressStillSpeed;
     if (!still) {
         double opp_min = 1e9;
         for (int j = 0; j < PLAYERS_PER_SIDE; ++j)
             opp_min = std::min(opp_min, dist(bx, by, wm.opp[j].x, wm.opp[j].y));
-        if (opp_min <= kPressOppClearDist) return;   // 球周围有对方，不是安全散球
+        if (opp_min <= kPressOppClearDist) return;
     }
 
-    // 打分选人（进攻三人组，越小越好）
     double ad = ctx.attack_dir();
     int best = -1;
     double best_score = 1e9;
@@ -390,10 +281,9 @@ void Strategy::update_presser(WorldModel &wm) {
         if (rl != ROLE_ACTIVE && rl != ROLE_ASSIST && rl != ROLE_MIDFIELD) continue;
         double d = dist(bx, by, wm.home[i].x, wm.home[i].y);
         if (d > kPressMaxDist) continue;
-        // 球在球员进攻方向前方（球员在球后，抢到能顺势朝门推）的程度
         double forward = clamp(ad * (bx - wm.home[i].x), 0.0, kForwardMax);
         double score = d - kForwardBonus * forward;
-        if (i == cur) score -= kPressHysteresis;   // 现任粘性：防每帧换人
+        if (i == cur) score -= kPressHysteresis;
         if (score < best_score) { best_score = score; best = i; }
     }
     wm.presser_id = best;

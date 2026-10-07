@@ -1,7 +1,4 @@
-// ============================================================
-// strategy.hpp — 主策略调度（RunStrategy 核心）
-// 每周期：更新世界模型 → 分析局势 → 算站位 → 分配角色 → 角色执行
-// ============================================================
+// strategy.hpp — 主策略调度
 #ifndef SIMURO5_STRATEGY_HPP
 #define SIMURO5_STRATEGY_HPP
 
@@ -11,46 +8,34 @@
 
 namespace simuro5 {
 
-// ============================================================
-// 我方是否正在主罚点球？（docs/06 第 56 轮，2026-09-12 真机 16:52 场复盘）
-// ------------------------------------------------------------
-// ⚠️ 不能只看 gameState：真机实测**执行期平台报的不是点球态**（否则平台不会调用
-//    RunStrategy）→ 原来"比对 PM_PenaltyKick_*"的判据永远为假：9 次点球里 ACTIVE 被
-//    "死球别推"守卫支到 (85,90) 干等 2.5 秒，球一次没碰（rlg 帧 1316~1358 铁证）。
-// 改用可观测量：**球静止在对方罚球点上**。真机实测罚球点 = 门前 39.4cm、正中央
-//    （两场共 14 次摆球全部落在 (39.4,89.8) 或镜像 (180.8,89.7)），容差 ±3cm。
-// 返回 true = 我方主罚（roles 的"我方点球必须去踢"例外生效）。
-// ============================================================
+// 是否我方主罚点球（球静止在对方罚球点）
 bool we_take_penalty_spot(const WorldModel &wm);
 
 class Strategy {
 public:
-    // 一周期决策（只读 wm 输入，决策写入 wm.home[i].vl/vr）
+    // 一周期决策，结果写机器人轮速
     void run(WorldModel &wm);
 
 private:
     SituationModule sit_;
     RoleAssignment ra_;
 
-    // 攻防状态机：滞回计数 + 状态翻转 + 事件标志 + 威胁分级
+    // 攻防状态机：滞回 + 事件 + 威胁
     void update_team_state(WorldModel &wm);
+    // 由状态与球位算威胁等级 0~1
     double threat_from_state(const WorldModel &wm) const;
 
-    // 清道夫(远侧覆盖)指派：球在防守三区拉边时挑一个区域防守者钉中路封远门柱/横传
+    // 清道夫指派（球拉边时封中路）
     void update_sweeper(WorldModel &wm);
 
-    // 前场散球逼抢者指派：球在前场且「静止或周围没对方」时，从进攻三人组里
-    //   打分选出离球最近、球在其前方的球员去抢散球（docs/06 第 83 轮）。
+    // 前场散球逼抢者指派
     void update_presser(WorldModel &wm);
 };
 
-// 我方门区"只能有门将"硬闸（docs/06 第 68 轮）：除 0 号门将外，任何人进我方门区
-//   都被顶到门区前缘外 8cm。独立成函数是为了能单测（不依赖角色决策）。
+// 除 0 号门将外，进我方门区就顶出
 void enforce_own_goal_area(WorldModel &wm);
 
-// 我方大禁区人数闸（规则 7.10.4，2026-10-06）：除门将外，己方禁区内（A+B，球门前 80×35）
-//   同时最多 `strategy.kOwnBoxMaxOutfield`(=3) 人 —— 规则红线是 4 个非门将在禁区内防守
-//   → 直接判点球。与 enforce_own_goal_area 同层（角色写完命令后按实际位置兜底）。
+// 己方大禁区非门将最多 3 人（规则 7.10.4）
 void enforce_own_penalty_count(WorldModel &wm);
 
 }  // namespace simuro5

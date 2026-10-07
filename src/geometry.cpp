@@ -15,7 +15,7 @@ double point_to_segment_dist(double px, double py,
 bool segment_clear_of_circles(double ax, double ay, double bx, double by,
                               const CircleObstacle *obs, int n,
                               CircleObstacle *hit) {
-    double best_pen = -1.0;   // 最大「穿透深度」：正=被挡（相切也算，口径同 segment_hits_circle）
+    double best_pen = -1.0;
     int best = -1;
     for (int i = 0; i < n; ++i) {
         double d = point_to_segment_dist(obs[i].x, obs[i].y, ax, ay, bx, by);

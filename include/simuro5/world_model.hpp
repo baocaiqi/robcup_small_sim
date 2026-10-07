@@ -1,9 +1,4 @@
-// ============================================================
-// world_model.hpp — 世界模型包装
-// 平台上帝视角数据的内部化封装
-// 小型组是上帝视角，平台每周期直接把全场数据塞进 Environment，
-// 这里只做「搬运 + 派生量计算」(球速/预测/球权)。
-// ============================================================
+// world_model.hpp — 平台 Environment 的内部封装（搬运 + 派生量）
 #ifndef SIMURO5_WORLD_MODEL_HPP
 #define SIMURO5_WORLD_MODEL_HPP
 
@@ -13,29 +8,27 @@
 
 namespace simuro5 {
 
-// 团队攻防状态（Strategy 状态机写入，滞回防抖）
 enum TeamState {
-    TS_ATTACK = 0,    // 进攻态：我方稳定控球（连续 N 帧持球才进入）
-    TS_DEFENSE = 1    // 防守态：对方控球 / 球权未定（连续 N 帧失球才进入）
+    TS_ATTACK = 0,
+    TS_DEFENSE = 1
 };
 
 struct RobotState {
-    double x = 0, y = 0;        // 位置
-    double rot = 0;             // 朝向(度)
-    double vl = 0, vr = 0;      // 差速轮速(仅己方有效)
+    double x = 0, y = 0;
+    double rot = 0;
+    double vl = 0, vr = 0;      // 差速轮速（仅己方有效）
 };
 
 struct BallState {
     double x = 0, y = 0;
-    double vx = 0, vy = 0;      // 速度(由 current-last 差分)
+    double vx = 0, vy = 0;      // 速度 cm/帧（current-last 差分）
     bool valid = false;
 };
 
-// 配合传球与普通 PassPlan 共用的跨帧接球任务。
 enum class CoopPassPhase { Preparing, Receiving, Received };
 enum class PassTaskKind { Coop, Ordinary };
 
-// 只用于记账。成功是传球的主要结果，后续临时控球退出不重复算失败。
+// 结算原因，只用于记账
 enum class CoopOutcome {
     Success, PrepareTimeout, ReceiveTimeout, GameState, InvalidBall, Penalty,
     HighThreat, Corner, Intercepted, EmergencyDefense, IncomingShot,
@@ -43,6 +36,7 @@ enum class CoopOutcome {
     DeadBall, DegenerateTarget, PrepPoint, MatchEnd, LooseBall, TeammateTakeover,
     CarryPoint, OpponentFirst, Count
 };
+// 结算原因名（统计用）
 const char *coop_outcome_name(CoopOutcome result);
 struct CoopPassStats {
     unsigned long created = 0, released = 0, received = 0, control_entered = 0;
@@ -57,7 +51,7 @@ struct CoopPassTask {
     int frames_left = 0;
     int game_state = 0;
     CoopPassPhase phase = CoopPassPhase::Preparing;
-    // 推球指令只开启观察窗口；之后的球位/速度/人与球分离才是出球证据。
+    // 推球指令只开观察窗口，之后的球位/速度/人球分离才是出球证据
     bool observing_push = false;
     double push_ball_x = 0.0, push_ball_y = 0.0;
     double push_dir_x = 0.0, push_dir_y = 0.0;
@@ -65,7 +59,6 @@ struct CoopPassTask {
     PassTaskKind kind = PassTaskKind::Coop;
 };
 
-// 接球任务完成后的临时带球权；不改变固定角色，也不调用普通 PassPlan。
 struct CoopBallControl {
     bool active = false;
     int receiver_id = -1;
@@ -77,8 +70,9 @@ struct WorldModel {
     CoopPassTask coop_pass_task;
     CoopBallControl coop_ball_control;
     CoopPassStats coop_stats;
-    // 默认为空；仿真器可安装只读记录器，比赛 DLL 不进行文件输出。
+    // 可为空；仿真器可装只读记录器，比赛 DLL 不写文件
     void (*coop_observer)(const WorldModel &, const char *, CoopOutcome) = nullptr;
+    // 传球任务与临时控球的计数/结算
     void coop_created();
     void coop_released();
     void coop_finish(CoopOutcome result);
@@ -86,146 +80,80 @@ struct WorldModel {
     void coop_control_end(CoopOutcome reason);
     TeamContext ctx;
 
-    BallState ball;          // 当前球
-    BallState ball_last;     // 上一帧球
-    BallState ball_pred;     // 平台预测球(直接用)
+    BallState ball;
+    BallState ball_last;
+    BallState ball_pred;
     RobotState home[PLAYERS_PER_SIDE];
     RobotState opp[PLAYERS_PER_SIDE];
-    RobotState opp_last[PLAYERS_PER_SIDE];   // 上一帧对方位置（差分求速用）
-    double opp_vx[PLAYERS_PER_SIDE] = {0};   // 对方速度(cm/帧，current-last 差分，瞬移清零)
+    RobotState opp_last[PLAYERS_PER_SIDE];
+    double opp_vx[PLAYERS_PER_SIDE] = {0};   // 对方速度 cm/帧（差分，复位跳变清零）
     double opp_vy[PLAYERS_PER_SIDE] = {0};
-    bool opp_vel_ready = false;              // 首帧只记位置不求速（防初始(0,0)跳变）
+    bool opp_vel_ready = false;
 
-    Bounds field;            // 场地边界(平台给)
-    Bounds goal;             // 球门边界(平台给)
+    Bounds field;
+    Bounds goal;
     int game_state = 0;      // PlayMode
-    int game_state_last = 0; // 上一帧 PlayMode（点球/定位球执行期识别：PenaltyKick→PlayOn 过渡）
-    // 活球判定（第 88 轮）：真机比赛进行中 gameState 一直停在上次重启的类型（1/2/3/5…），
-    //   从不回 PlayOn —— 只认 game_state==PM_PlayOn 的功能在真机上永远不触发。
-    //   live_play = PlayOn，或自上次重启（gameState 变化/球位跳变）后球已离开摆放点。
-    bool live_play = true;     // 默认与 game_state=0(PlayOn) 一致；update() 每帧重算
+    int game_state_last = 0;
+    // 活球判定：真机 gameState 从不回 PlayOn，故用"球已离开重启摆放点"补判
+    bool live_play = true;
     bool restart_armed = false;
     double restart_x = 0.0, restart_y = 0.0;
-    long whos_ball = 0;      // 球权(0=未知/1=我们? 以平台为准)
-    int whos_disagree = 0;   // 平台球权与自算不一致的累计帧数（标定/回归用）
-    // 我方主罚点球执行中（strategy.cpp 每帧维护）：球静止在罚球点、我方必须去踢。
-    // roles 用它区分"对方门球"（不抢）vs"我方点球"（必须射门）——两者都是球静止在对方门区。
+    long whos_ball = 0;      // 平台球权 0=未知；whos_disagree 为与自算不一致帧数
+    int whos_disagree = 0;
+    // 我方点球执行中：roles 用它区分"对方门球(不抢)"与"我方点球(必须射门)"
     bool in_penalty_exec = false;
-    // 全角色对方门区停留时限（strategy.cpp 调度后兜底，docs/13 方案 C 扩展）：
-    //   平台判罚看实际位置，clamp 站位点挡不住 ASSIST/MID/PASSIVE 追球/振荡进区；
-    //   连续停留 >15 帧强制撤出 + 冷却（防撤出-回区拉锯）。
     int ga_overstay[PLAYERS_PER_SIDE] = {0};
     int ga_cooldown[PLAYERS_PER_SIDE] = {0};
-    // 死球等待计时（run_active）：球静止在对方门区（对方门球/卡死）的连续帧数。
-    //   超时（>100 帧）→ 判定"对方不开球/球卡死"，ACTIVE 主动去推球（真实 8/31 镜像
-    //   内战 0:0 根因：球卡对方门区 135 秒，进攻方死球等待永不超时、门将清球不穿过）。
-    int dead_ball_frames = 0;
-    double threat_level = 0.0; // 威胁等级 0~1（状态机输出：状态+球位稳定计算）
-    int threat_hold_frames = 0; // 威胁降档滞回计数：连续低威胁帧数（strategy.cpp 升快降慢）
-    int goalie_opp_hold = 0;   // 门将「对手持球」滞回计数：连续未检测到才撤销（防瞬时丢标记前出，roles.cpp）
-    bool we_have_ball = false; // 球权是否在我方（简版判断）
+    int dead_ball_frames = 0;  // 球静止在对方门区的连续帧数（>100 判卡死）
+    double threat_level = 0.0; // 0~1
+    int threat_hold_frames = 0;
+    int goalie_opp_hold = 0;
+    bool we_have_ball = false;
 
-    // —— 攻防状态机（strategy.cpp 每帧写入）——
-    TeamState team_state = TS_DEFENSE; // 当前攻防状态
-    int possession_frames = 0;         // 连续持球帧数（滞回计数）
-    int no_possession_frames = 0;      // 连续失球帧数
-    bool state_transition = false;     // 本帧是否刚发生攻防切换（事件标志，供即时响应）
-    // 反击快攻窗口（docs/13 攻击强化 方案 A）：
-    //   断球（失球→持球转换）瞬间置 counter_attack_frames = kCounterWindow，
-    //   窗口内 run_assist/run_midfield 豁免回防条件、立即前插接应，
-    //   治"反击时前场真空——assist/mid 还在防守位，ACTIVE 1 打 5 攻不出去"
-    //   （真实平台 9/2 vs demo：球在蓝半场 79%、0 射门威胁的根因之一）。
-    //   prev_we_have_ball：上一帧球权，供检测转换帧。
-    bool prev_we_have_ball = false;
+    TeamState team_state = TS_DEFENSE;
+    int possession_frames = 0;
+    int no_possession_frames = 0;
+    bool state_transition = false;
+    bool prev_we_have_ball = false;   // 反击窗口：断球瞬间置位，窗口内 assist/mid 立即前插
     int counter_attack_frames = 0;
 
-    // 角色分配结果（由 RoleAssignment 填写）
-    int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 roles.hpp 的 Roles 枚举
-    // 动态主攻（第 82 轮，role_assignment.cpp）：当前 ACTIVE 的机器人下标 + 换人滞回状态
+    int role[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 见 Roles 枚举
+    // 动态主攻：当前 ACTIVE 下标 + 换人滞回状态
     int active_id = 1;
     int active_cand = -1, active_cand_frames = 0, active_hold = 0;
-    // 人盯人目标（上一帧选中的对方球员下标，-1=无；供滞回防抖用）
     int mark_target = -1;
 
-    // —— 带权匈牙利盯人分配（第 97 轮，用户 2026-09-30 指令「使用带权的匈牙利算法」）——
-    //   为什么要有它：原来只有 PASSIVE 一台做单目标贪心 argmax（各自挑自己认为最危险的），
-    //   多人一起盯时**会撞车**——两个人盯同一个对手，最危险的那个反而没人管。
-    //   匈牙利是**一一匹配**，从数学上杜绝重复；"换人惩罚 λ"直接进代价矩阵，
-    //   所以"少折腾"和"配得准"是同一个最小化问题（不是事后补丁）。
-    //   mark_assign[i]     ：机器人 i 本帧被指派的对手（-1 = 不盯，按原区域防守走）。
-    //                        由 defense::assign_marks() 每帧写；角色函数只读。
-    //   mark_prev_assign[i]：上一帧的指派（换人惩罚 λ 的比较基准）。
-    //   mark_commit[i]     ：刚换过目标的"强化承诺"帧数（>0 时换回去的代价再加一个 λ，治来回抖）。
-    //   mark_cost_ema      ："我到盯防点距离"的 EMA 平滑值（消逐帧噪声；首帧直接取观测值）。
-    //   mark_switch_events ：累计换人次数（纯统计，sim/真机复盘用）。
+    // 带权匈牙利盯人：mark_assign[i]=机器人 i 本帧被指派的对手（-1=不盯，回退区域防守）
     int mark_assign[PLAYERS_PER_SIDE] = {-1, -1, -1, -1, -1};
     int mark_prev_assign[PLAYERS_PER_SIDE] = {-1, -1, -1, -1, -1};
     int mark_commit[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};
     double mark_cost_ema[PLAYERS_PER_SIDE][PLAYERS_PER_SIDE] = {{0.0}};
     bool mark_ema_ready = false;
-    // 本帧的 mark_assign[] 是否有效（威胁门槛没过时为 false ⇒ 角色函数回退旧逻辑，
-    //   避免"拿着上一帧的旧指派"去盯人）。
-    bool mark_assign_valid = false;
+    bool mark_assign_valid = false;   // false 时角色函数回退旧逻辑
     int mark_switch_events = 0;
 
-    // —— 抢断唯一竞标结果（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）——
-    //   steal_decide() 每帧算一次：只让 EV 最高且 >0 的那一个防守者上前抢脚下球，
-    //   其余人守住自己的盯人/站位——治第 103 轮「多人同扑、一起被过、身后漏人」。
-    //   角色函数只读（run_mark_body 逼抢 / run_passive 争抢上抢 认 wm.stealer_id==id）。
-    int stealer_id = -1;
+    int stealer_id = -1;   // 抢断唯一竞标：只让 EV 最高的一台上抢（-1=无人）
 
-    // ACTIVE 在对方门区停留计数（docs/13 方案 C：防"门区单人停留>20 周期"罚点球）
-    // roles.cpp run_active 每帧更新；超限强制撤出（射门/传球/带球出区）。
-    //   active_ga_frames ：纯停留帧数（人在门区 且 球不在门区或不在脚下>25cm）——主判据
-    //   active_ga_total  ：门区总时长（含带球推射）——兜底：球被门将挡回反复推
-    //                      也是真实平台罚点球场景（8/29 实测 21~30 帧被罚），不能无限续
-    //   ga_retreat_fires ：超限撤出触发次数（sim_bench 诊断用）
     int active_ga_frames = 0;
     int active_ga_total = 0;
     int ga_retreat_fires = 0;
 
-    // 角区救球触发次数（sim_bench 统计用：验证"FreeBall 13 次/场"角区卡球是否被救）
     int corner_rescue_events = 0;
-    // 球在角区且静止的连续帧数（>30 帧才算"真卡住"，防路过/刚弹到角的球误触发救球）
     int corner_ball_frames = 0;
 
-    // 清道夫（远侧覆盖）：球在防守三区拉边时，指定一个区域防守者钉中路封远门柱/横传。
-    //   strategy.cpp 每帧写入；-1=无清道夫（正常防守站位）。
     int sweeper_id = -1;
     double sweeper_x = 0, sweeper_y = 90;
-    // 前场散球逼抢者（docs/06 第 83 轮）：球在前场且「静止或周围没对方」时，
-    //   strategy.cpp 打分选出离球最近、球在其前方的进攻球员，override 原角色去抢球。
-    //   -1=无逼抢者（正常角色行为）。
     int presser_id = -1;
-    // 路径执行状态（docs/15 P0：motion::follow_route 用，按机器人索引）
-    //   每帧角色层算出 RoutePlan 后从 wm.route_wp_next[i]=0 起推进；
-    //   跨帧保留段索引防抖（沿用旧 waypoint），路径重算后由角色层重置。
-    int route_wp_next[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};   // 清道夫站位点（罚球区前缘外侧、中路）
-// —— 禁区前沿变角推射（docs/17，模仿官方"沿变角推球"）——
-    // 直推被 GK/防守者挡回后，同一轮进攻连续推球尝试 ≤3 次（kMaxShootPushes），
-    //   超限转入传球/带离（防禁区死磕：反复推不进 → 送判罚/死锁/白送球权）；
-    // 第 2 次起若仍瞄同一侧开口 → 强制换另一侧开口（变角绕封堵）。
-    //   shoot_push_count   ：已推球次数（每次"贴球推穿且球被推动"记 1，cd 冷却防一推多计）
-    //   shoot_push_cd      ：计次冷却帧（推完 20 帧内不重复计，等球弹回/重加速再计下一次）
-    //   shoot_push_last_side：上一次推球瞄准的开口侧（+1 上柱侧 / -1 下柱侧，0=无）
-    // 清零：球离开射程（距门>75）/ 球权易主且人在球外 → count 归零（下一轮进攻重新计）。
-    int shoot_push_count = 0;
+    int route_wp_next[PLAYERS_PER_SIDE] = {0, 0, 0, 0, 0};
+    int shoot_push_count = 0;   // 变角推射：已推球次数（cd 为计次冷却）
     int shoot_push_cd = 0;
     int shoot_push_last_side = 0;
-    // 射门/推进前的"对准尝试"帧数（docs/18 §8）：球一直在动/被抢时不能死等对准，
-    //   超过 kShootAlignTimeout 就按当前朝向推（宁可射偏也不能把机会耗掉）。
     int shoot_align_frames = 0;
-    // —— 点球执行期**锁定**的瞄准方向（docs/06 第 66 轮，用户真机实测"太慢+推偏"）——
-    //   实测（16:01 场帧 3596~3628）：瞄准方向每帧重算 → 准备点漂移 → 机器人先退到球后
-    //   23cm、再折返时偏离瞄准线 15~24cm，最后从球的侧上方掠过 → 出球 0.7cm/帧且几乎
-    //   垂直于射门方向，平台判"没开出"把点球重发 3 次。
-    //   锁存规则：点球执行期第一帧算一次，之后方向不再变；in_penalty_exec 转 false 解锁。
-    bool   pen_aim_locked = false;
-    double pen_aim_rot = 0.0;          // 锁定的机头朝向（度）
-    double pen_dir_x = 1.0, pen_dir_y = 0.0;   // 锁定的推球方向（单位向量）
-    double pen_aim_y = 90.0;           // 锁定的瞄准点 y（分侧/诊断用）
+    bool   pen_aim_locked = false;   // 点球执行期锁定瞄准方向（rot 度 / 方向向量 / 瞄准点 y）
+    double pen_aim_rot = 0.0;
+    double pen_dir_x = 1.0, pen_dir_y = 0.0;
+    double pen_aim_y = 90.0;
 
-    // 站位参考点（由 SituationModule 填写）
     double passive_x = 0, passive_y = 90;
     double assist_x = 0, assist_y = 90;
     double mid_x = 110, mid_y = 90;

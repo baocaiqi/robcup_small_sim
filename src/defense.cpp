@@ -1,108 +1,58 @@
-// ============================================================
-// defense.cpp — 区域防守：断球点计算（队员 D 负责）
-//
-// 见 defense.hpp 头注释：核心是用球速 (vx, vy) 的方向角做三角外推，
-// 把断球点从「球-门连线静态点」升级成「球真实运动轨迹上的点」。
-// ============================================================
+// defense.cpp — 区域防守：沿球运动轨迹求断球点（原点左下角 cm，蓝队守 x=220）
 #include "simuro5/defense.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/role_assignment.hpp"
-#include "simuro5/hungarian.hpp"   // 带权匈牙利指派（第 97 轮盯人分配，自研实现）
+#include "simuro5/hungarian.hpp"
 #define TUNABLE_PREFIX "defense."
 #include "simuro5/tunable.hpp"
 #include <cmath>
 #include <algorithm>
 
 namespace simuro5 {
-// ============================================================
-// 犀利进攻防守总开关（队员 D，手动）—— docs/06
-//   默认 0 = 关，防守行为与现状逐位一致。真机遇到"进攻极其犀利"的对手时，
-//   把 defense.kSharpDefense 置 1（参数文件或改这里默认值），防守整体收紧：
-//     更早回防（威胁提前升档）+ 人盯人更贴身（贴距/预测/换人惩罚收紧）。
-//   收紧的具体值见 defense.hpp 的 sharp_* 内联常量；核心逻辑一字不动。
-// ============================================================
-TUNABLE(kSharpDefense, 1.0);   // 临时置 1 验证「犀利进攻防守档」（真机后按需改回 0）
+// 犀利进攻防守总开关：1=防守收紧（更早回防、盯人更贴）；sharp_defense_on 供跨 TU 读取
+TUNABLE(kSharpDefense, 1.0);
 
-// 供跨 TU 读取（strategy.cpp / defense.hpp 的 mark_dist·mark_lead 都调它）。
 bool sharp_defense_on() { return kSharpDefense > 0.5; }
 
-// 拦截线距球门线的距离(cm)：球门前方多远处开始断球。
-//   越近 → 站位越靠门，堵门更稳，但断球更晚、留给反应的时间更少；
-//   越远 → 断球更早，但离门远、一旦被变向绕过就回不来。
-//   默认 50cm（沿用旧版「球-门连线 50cm」的口径）。
+// 断球线距门线 cm / 球速阈值 cm/帧(低于即停球 → 回退静态点) / 断球点夹取范围 cm / 我方速度 cm/帧 / 可达余量倍数
 TUNABLE(kInterceptLineDist, 48.5364);
 
-// 球速阈值(cm/帧)：低于此值视为「球基本停着」，外推方向噪声大、
-// 无断球价值，直接回退到静态球-门连线站位。
 TUNABLE(kMinBallSpeed, 1.35924);
 
-// 断球点夹取范围，防止站出场地或贴死边线。
 TUNABLE(kMinX, 12.0);
 TUNABLE(kMaxX, 208.0);
 TUNABLE(kMinY, 15.0);
 TUNABLE(kMaxY, 165.0);
 
-// 可达性判断：防守队员直线速度(cm/帧)。
-//   标定来源：world_model.cpp 对方速度差分处实测「机器人正常 ~2.5 cm/帧」
-//   （kMaxOppVel=8.0 那条注释），同物理引擎下我方速度一致，取 2.5 与实测对齐。
-//   原 2.0 是未标定的保守拍脑袋值——偏低会高估我到达时间、漏掉实际追得上的断球点。
 TUNABLE(kMySpeed, 2.18624);
-
-// 可达余量倍数：我到达时间 ≤ 球到达时间 × 该系数 才认为追得上。
-//   >1 给自己留缓冲（比如 1.2 = 多留 20% 时间余量）。
 TUNABLE(kReachMargin, 1.04068);
 
-// ============================================================
-// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）
-// ============================================================
-// 总开关：0=关（回退旧行为），1=开。初始默认关，sim A/B 确认有收益再设默认 1。
+// 主动截球：开关 / 采样步长 10cm、最远 150cm / 截点限我方门前 140cm / 对手贴球 20cm 算带球
 TUNABLE(kEarlyEnable, 0.0);
-// 轨迹采样步长(cm)：球慢（阈值 1.36cm/帧），10cm 采样已足够密。
 TUNABLE(kEarlyStep, 10.0);
-// 采样最远距离(cm)：覆盖传球距离；球这么慢，更远没必要追。
 TUNABLE(kEarlyMaxDist, 150.0);
-// 护栏1：截点离我方门的距离上限(cm)。对方组织进攻的传球落点必在我们半场，
-//   滚向对方半场/边线角落的死球不该追（追了白丢位，第 99 轮教训）。
 TUNABLE(kEarlyProtectDist, 140.0);
-// 护栏3：最近对手离球多近视为「还在带球」。球虽在飞，但若对方仍贴球控制，
-//   正面去抄会变抢球推人犯规，交给盯人/门将。
 TUNABLE(kEarlyDribbleDist, 20.0);
 
-// ============================================================
-// 会合点 + 迎球朝向（第 103 轮，用户指令）
-// ============================================================
-// 球每帧速度衰减：真机实测高速段 0.992~0.994（sim_bench kBallDecay 同一口径），
-//   所以外推必须带衰减——只按匀速推会把落点算远。
+// 球每帧衰减(真机 0.992~0.994) / 会合提前 6 帧 / 外推上限 40 帧 / 边界余量 12cm / 迎球朝向开关
 TUNABLE(kBallDecay, 0.993);
-// 提前量（帧）：我比球早到这么多帧才算"会合"。
-//   差速轮原地转 ~30°/帧（motion kMaxRotW=14 轮速 ≈160°/s），转身 90° 约 3 帧 ⇒ 取 6 留一倍余量。
 TUNABLE(kMeetLead, 6.0);
-// 外推上限（帧）：40 帧 ≈ 2.4s，够覆盖一次传球飞行（球 6cm/帧 → 40 帧 240cm）。
 TUNABLE(kMeetHorizon, 40.0);
-// 会合点离场地边界的余量（cm）：贴边线的点站不下车。
 TUNABLE(kMeetMargin, 12.0);
-// 迎球朝向总开关（1=开，0=回退"只给位置不给朝向"的旧行为）。
 TUNABLE(kFaceIncoming, 1.0);
 
-// ============================================================
-// 纯函数：球轨迹 ∩ 球门前拦截线
-// ============================================================
+// 断球点 = 球轨迹 ∩ 门前拦截线；false = 球没朝门滚（调用方回退静态点）
 bool intercept_point(const WorldModel &wm, double line_dist,
                      double &ix, double &iy) {
     const TeamContext &ctx = wm.ctx;
     double bx = wm.ball.x, by = wm.ball.y;
     double vx = wm.ball.vx, vy = wm.ball.vy;
 
-    // 拦截线 x：球门线向场内退 line_dist。
-    //   attack_dir() 指进攻方向（蓝队 -1，黄队 +1），
-    //   所以「球门线 + attack_dir * line_dist」正好是向场内方向。
-    //   蓝队：220 + (-1)*50 = 170；黄队：0 + (+1)*50 = 50。
     double line_x = ctx.our_goal_x() + ctx.attack_dir() * line_dist;
 
-    // 三角函数外推：球沿 (vx,vy) 方向到达拦截线时的 y（见 defense.hpp）。
     double y_at_line = 0.0;
     if (!predict_y_at_x_reflect(bx, by, vx, vy, line_x, y_at_line)) {
-        return false;   // vx≈0 或球背离球门 → 没有「朝门滚」的断球点
+        return false;
     }
 
     ix = clamp(line_x, kMinX, kMaxX);
@@ -110,36 +60,28 @@ bool intercept_point(const WorldModel &wm, double line_dist,
     return true;
 }
 
-// ============================================================
-// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）：
-//   补 intercept_point 的盲区——现有只算「球到门前拦截线」，横传/斜传的球
-//   根本滚不到那条线。本函数沿球前进方向扫一串采样点，逐个问「我能不能比球
-//   先到」，找到最早可截点站过去截。找不到则 return false 交回 plan_defense。
-// ============================================================
+// 主动截球：沿球轨迹扫点，找最早「我能比球先到」的点（补横传/斜传盲区）
 bool early_intercept_point(const WorldModel &wm, int defender_id,
                            double &out_x, double &out_y) {
-    if (kEarlyEnable < 0.5) return false;   // 总开关：默认关，sim 注入开启
-
-    // 护栏3：对方还贴着球（带球控制）→ 正面去抄会变抢球犯规，交盯人/门将
+    if (kEarlyEnable < 0.5) return false;
     if (opp_clear_dist(wm) < kEarlyDribbleDist) return false;
 
     const double spd = ball_speed(wm.ball.vx, wm.ball.vy);
-    if (spd < kMinBallSpeed) return false;   // 球慢/停着 → 交现有逻辑，别抢静止球
+    if (spd < kMinBallSpeed) return false;
 
-    const double ux = wm.ball.vx / spd;      // 球前进方向单位向量
+    const double ux = wm.ball.vx / spd;
     const double uy = wm.ball.vy / spd;
     const double mx = wm.home[defender_id].x;
     const double my = wm.home[defender_id].y;
 
-    // 从近往远扫：第一个「我能比球先到」的点就是离我最近、截得最早的点
     for (double d = kEarlyStep; d <= kEarlyMaxDist; d += kEarlyStep) {
-        const double px = wm.ball.x + ux * d;   // 球未来会经过的位置（匀速近似）
+        const double px = wm.ball.x + ux * d;
         const double py = wm.ball.y + uy * d;
-        if (px < kMinX || px > kMaxX || py < kMinY || py > kMaxY) continue;  // 出界不追
-        if (wm.ctx.dist_our_goal(px) > kEarlyProtectDist) continue;  // 护栏1：不在防区不追
-        const double t_ball = d / spd;                       // 球沿轨迹走 d cm
-        const double t_me   = dist(mx, my, px, py) / kMySpeed;   // 我直线冲过去
-        if (t_me <= t_ball * kReachMargin) {                 // 我比球先到（含余量）
+        if (px < kMinX || px > kMaxX || py < kMinY || py > kMaxY) continue;
+        if (wm.ctx.dist_our_goal(px) > kEarlyProtectDist) continue;   // 不在防区不追
+        const double t_ball = d / spd;
+        const double t_me   = dist(mx, my, px, py) / kMySpeed;
+        if (t_me <= t_ball * kReachMargin) {
             out_x = px;
             out_y = py;
             return true;
@@ -148,16 +90,12 @@ bool early_intercept_point(const WorldModel &wm, int defender_id,
     return false;
 }
 
-// ============================================================
-// 会合点（第 103 轮）：沿球未来轨迹逐帧外推，找「我比球早到 lead 帧」的第一个点。
-//   比喻：不是"球会停在哪我去那儿等"（球几乎不减速，等不到），而是
-//   "球会经过哪儿、我几帧能到那儿"——谁先到，谁就占住那个点。
-// ============================================================
+// 会合点：沿球未来轨迹逐帧外推（含衰减），找「我比球早到 lead 帧」的点并给出迎球朝向
 bool ball_meeting_point(const WorldModel &wm, double px, double py,
                         double my_speed, double lead_frames,
                         double &out_x, double &out_y, double &out_aim) {
     const double spd = ball_speed(wm.ball.vx, wm.ball.vy);
-    if (spd < kMinBallSpeed) return false;          // 球停着：没有"会合"，交回静态站位
+    if (spd < kMinBallSpeed) return false;
     if (!(my_speed > 1e-6) || !std::isfinite(my_speed)) return false;
     if (!std::isfinite(px) || !std::isfinite(py)) return false;
 
@@ -167,47 +105,33 @@ bool ball_meeting_point(const WorldModel &wm, double px, double py,
     double bx = wm.ball.x, by = wm.ball.y, vx = wm.ball.vx, vy = wm.ball.vy;
 
     for (int k = 1; k <= horizon; ++k) {
-        bx += vx; by += vy; vx *= dec; vy *= dec;        // 球下一帧的位置（含衰减）
+        bx += vx; by += vy; vx *= dec; vy *= dec;
         if (bx < kMeetMargin || bx > TeamContext::FIELD_LENGTH - kMeetMargin ||
-            by < kMeetMargin || by > TeamContext::FIELD_WIDTH - kMeetMargin) break;  // 出界：不再追
-        const double t_me = dist(px, py, bx, by) / my_speed;     // 我直线跑过去要几帧
-        if (t_me + lead <= (double)k) {                  // 我比球早到 lead 帧 → 这就是会合点
+            by < kMeetMargin || by > TeamContext::FIELD_WIDTH - kMeetMargin) break;
+        const double t_me = dist(px, py, bx, by) / my_speed;
+        if (t_me + lead <= (double)k) {
             out_x = bx; out_y = by;
-            out_aim = angle_to(0.0, 0.0, -vx, -vy);      // 迎球朝向 = 球来向的反方向
+            out_aim = angle_to(0.0, 0.0, -vx, -vy);
             return true;
         }
     }
     return false;
 }
 
-// ============================================================
-// 主入口：2 号防守队员的断球点
-// ============================================================
+// 主入口：算 defender_id 的断球点；球朝门 = vx·(门x−球x) > 0
 DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     DefensePlan plan;
     const TeamContext &ctx = wm.ctx;
     plan.ball_spd = ball_speed(wm.ball.vx, wm.ball.vy);
 
-    // 球是否朝己方球门滚：
-    //   用「速度 x 分量」与「球→门」的 x 方向是否同号判断。
-    //   蓝队门在 +x 端(220)，球在门左侧，朝门 = vx>0；
-    //   黄队门在 -x 端(0)，  球在门右侧，朝门 = vx<0。
-    //   统一写成 vx * (goal_x - ball.x) > 0，蓝黄通用。
     double toward_goal = wm.ball.vx * (ctx.our_goal_x() - wm.ball.x);
     plan.approaching = toward_goal > 0.0;
 
-    // 有威胁（朝门滚 + 球速够快）→ 用三角函数算真实断球点；
-    // 否则（球慢 / 背离 / 无有效交点）→ 回退到 situation 给的
-    // 球-门连线静态点 wm.passive_xy。
+    // 有威胁 → 真实轨迹断球点；追不上或球慢/背离 → 回退静态球-门连线点
     double ix = 0.0, iy = 0.0;
-    bool on_ball_path = false;   // 本次给的是「球来路上的点」还是「静态卡位点」
+    bool on_ball_path = false;
     if (plan.approaching && plan.ball_spd >= kMinBallSpeed &&
         intercept_point(wm, kInterceptLineDist, ix, iy)) {
-        // 可达性判断：算出的断球点，我赶不赶得上？
-        //   t_ball = 球到截点的时间 = dist(球, 截点) / 球速
-        //   t_me   = 我到截点的时间 = dist(我, 截点) / kMySpeed
-        //   若 t_me > t_ball × 余量 → 追不上，回退卡位：
-        //   避免为追一个够不着的球而失位、把身后空档让给对方。
         double t_ball = dist(wm.ball.x, wm.ball.y, ix, iy) / plan.ball_spd;
         double t_me   = dist(wm.home[defender_id].x, wm.home[defender_id].y, ix, iy) / kMySpeed;
         if (t_me <= t_ball * kReachMargin) {
@@ -219,8 +143,6 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
             plan.target_y = wm.passive_y;
         }
     } else if (early_intercept_point(wm, defender_id, ix, iy)) {
-        // 主动截球（docs/15）：球在飞但现有断门逻辑不处理（横传/斜传/横滚），
-        //   沿球轨迹扫点、找「我能比球先到」的最早截点站过去截。
         plan.target_x = ix;
         plan.target_y = iy;
         on_ball_path = true;
@@ -229,25 +151,19 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         plan.target_y = wm.passive_y;
     }
 
-    // 迎球朝向（第 103 轮，用户指令）：断球点落在球来路上、且球确实在动
-    //   → 到点后机头朝球来的反方向（-v）站定迎球。
-    //   为什么：本平台球被撞出去的方向 ≈ 机头方向，斜着迎球 = 把球横着顶出去、
-    //   动量不抵消（球继续朝自家门滚）。球慢/卡位点不给朝向（方向是噪声）。
+    // 迎球朝向：本平台球出射方向 ≈ 机头方向，斜着迎球会把球横顶出去
     if (kFaceIncoming > 0.5 && on_ball_path && plan.ball_spd >= kMinBallSpeed) {
         plan.aim_rot = angle_to(0.0, 0.0, -wm.ball.vx, -wm.ball.vy);
         plan.face_incoming = true;
     }
 
-    // 规则红线：断球点不得进入己方门区（只有守门员能进）。
-    //   蓝队门区 x∈[170,220]；拦截线本身 x=170 正好压门区前缘，
-    //   若 y 也落在门宽范围内则再往外推 5cm，避免踩线犯规。
+    // 规则红线：断球点不得进己方门区（只有守门员能进）
     if (in_goal_area(ctx, plan.target_x, plan.target_y)) {
         plan.target_x = clamp(ctx.our_goal_x() + ctx.attack_dir() * 55.0, kMinX, kMaxX);
         plan.target_y = clamp(wm.ball.y, 75.0, 105.0);
     }
 
-    // 兑底（本地第4轮）：防守点若落入己方大禁区则推出（防堆叠送点球）。
-    //   下方"防推球"里"推球点被推回罚球区"也复用此推出，统一成局部 lambda。
+    // 防推球：防守点落进己方大禁区就推出；离球 <8cm 时退到球后 8cm
     auto push_out_of_penalty = [&](double &tx, double &ty) {
         if (in_penalty_area(ctx, tx, ty)) {
             tx = ctx.our_goal_x() + ctx.attack_dir() * 85.0;
@@ -255,28 +171,18 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
         }
     };
     push_out_of_penalty(plan.target_x, plan.target_y);
-    // 防推球犯规（本地第7轮）：防守点距球保持 >= 8cm（球周围不挤球不推球）
     double db = dist(plan.target_x, plan.target_y, wm.ball.x, wm.ball.y);
     if (db < 8.0) {
         double ang = atan2(wm.ball.y - plan.target_y, wm.ball.x - plan.target_x);
         plan.target_x = wm.ball.x - 8.0 * cos(ang);
         plan.target_y = wm.ball.y - 8.0 * sin(ang);
-        // 推球点可能又被推回罚球区（球贴罚球区前缘时），再夹一次防送点球
         push_out_of_penalty(plan.target_x, plan.target_y);
     }
-    // 禁区纪律（对方门区）：防守点也不得落入对方门区（FIRA：门区 2+ 人 → 罚点球）。
-    //   球被压到对方门前/门角时，球-门连线兜底锚点会把防守者带到对方门区边线上，
-    //   转场途中/落位误差就踩线违规（sim 诊断 f2664/f5021：passive 真门区 x<50）。
-    //   统一在这里兜底，覆盖 run_passive 兜底分支与 assist/mid 回防分支。
+    // 也不得进对方门区（2+ 人 → 罚点球）；前缘只「夹」不「覆盖」，留 8cm（蓝 58 / 黄 162）
     clamp_out_opp_goal_area(ctx, plan.target_x, plan.target_y);
-    // 对方门区禁入（后置夹取）：防守兜底点 x 须与对方门区前缘保持 8cm 余量。
-    //   球深压对方门区时 passive_x≈球+50≈49~58，正好压/越门区前缘(x=50)，夹到 58 起；
-    //   无球回防时 passive/assist/mid 三人共用此兜底点，夹回门区前缘防 2+ 犯规。
-    //   注意：只「夹」不「覆盖」——球在对方门区内中等深度时 passive_x=球+50≈60~95
-    //   本就在门区外、更远离对方球门；若强行覆盖成固定 58，反而把人往门区方向拉。
     double ogx = ctx.opp_goal_x();
     double ad  = ctx.attack_dir();
-    double opp_front = ogx - ad * 58.0;   // 蓝:58, 黄:162
+    double opp_front = ogx - ad * 58.0;
     if (ad < 0.0) {
         if (plan.target_x < opp_front) plan.target_x = opp_front;
     } else {
@@ -286,16 +192,13 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     return plan;
 }
 
-// ============================================================
-// 球-门连线护门点（参考官方 demo CenterDefender 思想，自研实现）
-// ============================================================
+// 球-门连线护门点：球远站球后 45cm，中近站门前 50cm，贴门站球前 8cm 堵推射线
 bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
     const TeamContext &ctx = wm.ctx;
     double bx = wm.ball.x, by = wm.ball.y;
     double d_goal = ctx.dist_our_goal(bx);
 
     if (d_goal > 100.0) {
-        // 球远：站「球→门心」连线、球向门方向 45cm（对应 demo 中卫 ball.x-45）
         double dx = ctx.our_goal_x() - bx, dy = 90.0 - by;
         double len = std::hypot(dx, dy);
         if (len < 1e-6) { out_x = ctx.our_goal_x() + ctx.attack_dir() * 45.0; out_y = 90.0; }
@@ -304,16 +207,10 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
             out_y = by + dy / len * 45.0;
         }
     } else if (d_goal > 45.0) {
-        // 球中近：站门前 50cm 拦截线、y 跟球（压上断球）
         out_x = ctx.our_goal_x() + ctx.attack_dir() * 50.0;
         out_y = clamp(by, 72.5, 107.5);
     } else {
-        // 球已贴门（<45cm）：站「球与门之间」、球前(朝门方向)8cm——堵推射线。
-        //   注意不能站"门前 20cm 线"：球距门 <20cm 时那条线在球的场侧（球在
-        //   线与门之间），协防者站球后，对方推球时追不上同向的球（rlg 复盘
-        //   f3304：B5 到位 (200,86) 时球已被推进 (220,89)）。必须站球前，
-        //   对方追击手一推球就撞在协防者身上（demo 中卫站 (25,ball.y) 同理，
-        //   对黄队 x=0 门，球 x<25 时 25 在球门侧）。
+        // 球已贴门：必须站「球与门之间」，站门侧追不上被同向推的球
         double dx = ctx.our_goal_x() - bx, dy = 90.0 - by;
         double len = std::hypot(dx, dy);
         if (len < 1e-6) { out_x = bx + ctx.attack_dir() * 8.0; out_y = by; }
@@ -321,30 +218,17 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
             out_x = bx + dx / len * 8.0;
             out_y = by + dy / len * 8.0;
         }
-        // 别越过门线：朝门方向最多到门前 3cm
-        //   door_x = 门线 - attack_dir*3（蓝队 ad=-1 → 220-3=217；黄队 ad=+1 → 0+3=3）
-        //   球若已比 door_x 更靠门（如 (218,90)），护门点无空间，直接站 door_x 堵门。
+        // 朝门方向最多到门前 3cm；球更靠门就直接站门前堵门；入裁判门区则退到门区外缘 29cm
         double door_x = ctx.our_goal_x() + ctx.attack_dir() * 3.0;
         double lo = std::min(bx, door_x), hi = std::max(bx, door_x);
         out_x = clamp(out_x, lo, hi);
-        // 球已比 door_x 更靠门（离门线更近）→ 护门点没空间，直接站 door_x 堵门。
-        //   ⚠️ 2026-10-07 修：原来这里是**绝对 x** 比较 `if (bx > door_x)`，只对蓝队成立
-        //   （蓝 door_x=217，要 bx>217 才算"更靠门"）；黄队 door_x=3 时"任何 bx>3"都成立
-        //   ⇒ 贴门分区的护门点被钉死在门线侧后（x=3，再被 kMinX 抬到 12），与球位无关。
-        //   实测偏深 13.2cm（球 (30,130) 应站 (25.2,123.6)，错版本给 (12.0,123.6)）；
-        //   黄位其它球位被"门区闸→29"和"kMinX=12"掩盖，所以此前没暴露。
-        //   改用与 in_goal_area_rule 同一套「离门线距离」口径 ⇒ 两侧同式，蓝位行为不变。
-        const double door_gap = (door_x - ctx.our_goal_x()) * ctx.attack_dir();   // 两侧同为 +3
+        const double door_gap = (door_x - ctx.our_goal_x()) * ctx.attack_dir();
         if ((bx - ctx.our_goal_x()) * ctx.attack_dir() < door_gap) out_x = door_x;
-        // 裁判门区（门线内 15cm）非门将一进就累计、离开不清零 → 满 20 帧判点球。
-        //   护门点落在里面时退到门区外缘 +14cm（门口球交给门将），y 不变。
         if (in_goal_area_rule(ctx, out_x, out_y, 8.0, 6.0)) {
             out_x = ctx.our_goal_x() + ctx.attack_dir() * 29.0;
             return true;
         }
-        // 注意：不能走末尾的 kMaxX clamp——kMaxX=208 是断球点约束（防守者不深入
-        //   门区），而贴门护门点必须站到球与门之间（x 可到 213+），会被截断。
-        out_x = clamp(out_x, kMinX, TeamContext::FIELD_LENGTH);
+        out_x = clamp(out_x, kMinX, TeamContext::FIELD_LENGTH);   // 护门点可深入，不受 kMaxX 约束
         out_y = clamp(out_y, kMinY, kMaxY);
         return true;
     }
@@ -353,33 +237,25 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
     return true;
 }
 
-// ============================================================
-// 人盯人：威胁打分 + 目标选择（见 defense.hpp 注释）
-// ============================================================
+// 人盯人威胁打分：控球 50/(d+K) + 位置 25/(d+K) + 接球 0.4·approach + 突破 0.3·danger
 double mark_threat(double d_ball, double d_goal,
                    double approach_speed, double danger_speed, bool is_dribbler) {
-    const double K = 10.0;                  // 距离平滑：避免贴脸分数爆表/每帧抖动
-    double s = 50.0 / (d_ball + K);         // ① 控球威胁（主导）：越靠近球越危险
-    s      += 25.0 / (d_goal + K);          // ② 位置威胁：越靠门越危险
-    // ③ 接球威胁：球正朝该球员冲（快传/直塞），按离球距离加权——
-    //    离球近的人（拿得到球）才吃这个加成；球越快朝他、人越近球 → 越危险。
-    //    用倒数衰减而非硬阈值，避免阈值附近每帧抖动。
-    double reach = 1.0 / (1.0 + d_ball / 20.0);   // d_ball=0→1, 20→0.5, 40→0.33
+    const double K = 10.0;
+    double s = 50.0 / (d_ball + K);
+    s      += 25.0 / (d_goal + K);
+    double reach = 1.0 / (1.0 + d_ball / 20.0);
     s += 0.4 * approach_speed * reach;
-    // ④ 持球突破威胁：持球者带球朝门冲，球越快朝门越要贴。
-    //    （持球者脚下 d_ball≈0，③ 项 reach 虽≈1 但 approach_speed≈0，靠此项兜住）
     if (is_dribbler) s += 0.3 * danger_speed;
     return s;
 }
 
+// 选威胁最大者，含 5% 滞回与危险门限；离球离门都远则 -1 回区域防守
 int pick_mark_target(const WorldModel &wm, int current_target) {
     const TeamContext &ctx = wm.ctx;
-    double danger = ball_danger_speed(wm);   // 球朝己方门速度（持球突破威胁用）
+    double danger = ball_danger_speed(wm);
 
-    // 持球者 = 离球最近的对方球员
     int dribbler = nearest_opp_to_ball(wm);
 
-    // 逐人打分取 argmax
     int best = -1;
     double best_score = -1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
@@ -390,10 +266,6 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         if (score > best_score) { best_score = score; best = i; }
     }
 
-    // 滞回：新目标分没超过当前目标 5% 就不换（防每帧换人原地转圈；
-    //   20% 太强、10% 仍「选错人」占未贴住 19~22%——危险换人常被滞回挡掉。
-    //   1.1→1.05（2026-08-26）：修正尺子后「贴住最威胁」仅 5~27%，放宽到 5% 让
-    //   危险换人能切过去，但保留 5% 余量防两个威胁分接近时每帧抖换）
     if (current_target >= 0 && current_target < PLAYERS_PER_SIDE &&
         best != current_target) {
         double cur_d_ball = dist(wm.ball.x, wm.ball.y,
@@ -406,9 +278,6 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
         if (best_score <= cur_score * 1.05) best = current_target;
     }
 
-    // 危险门限：最终目标必须离球近(持球/抢点) 或 离门近(门前埋伏) 才贴；
-    //   否则返回 -1 回区域防守——复盘未贴住帧里 44~48% 被盯者离球 >40cm，
-    //   追不危险的对手白费体力还丢区域。
     if (best >= 0) {
         double d_ball = dist(wm.ball.x, wm.ball.y, wm.opp[best].x, wm.opp[best].y);
         double d_goal = wm.ctx.dist_our_goal(wm.opp[best].x);
@@ -419,80 +288,52 @@ int pick_mark_target(const WorldModel &wm, int current_target) {
     return best;
 }
 
-// ============================================================
-// 二抢一（双人夹击）：持球者带球推进到门前危险区时，再补一个防守者上前，
-//   与被动盯人者（passive）形成包夹——一个正面封、一个斜侧抢，逼其变向丢球。
-//   只让 assist/midfield 里「非清道夫、且离持球者更近」的那一个上前，
-//   另一个留在区域里保持纵深（两个同时压上会被一脚直塞打穿）。
-// ============================================================
-TUNABLE(kDoubleTeamDangerDist, 111.151);  // 持球者离门多近才夹抢(cm)
-TUNABLE(kDoubleTeamLateral, 32.5);  // 夹抢点横向偏移(cm)：与盯人者错开角度
-TUNABLE(kDoubleTeamCarryDist, 15);  // 持球者判定：离球 <此值视为正带球（8→15 第73轮：松球/即将接球也夹抢）
-TUNABLE(kDoubleTeamCoverDist, 53.832);  // 持球者距门 <此值且球在罚球区 → 进禁区协防(cm)
+// 二抢一门槛(cm)：夹抢距离 111、横向错开 32.5、离球 15 内算带球、53.8 内进禁区协防
+TUNABLE(kDoubleTeamDangerDist, 111.151);
+TUNABLE(kDoubleTeamLateral, 32.5);
+TUNABLE(kDoubleTeamCarryDist, 15);
+TUNABLE(kDoubleTeamCoverDist, 53.832);
 
-// ============================================================
-// 带权匈牙利盯人分配（第 97 轮，用户指令「使用带权的匈牙利算法」）
-//   设计说明见 defense.hpp 的声明处注释；这里只写"数字为什么这么大"。
-// ============================================================
-// 总开关：1 = 用匈牙利做全队一一匹配（默认）；0 = 回退旧的单目标贪心
-//   （run_passive 走 pick_mark_target，run_assist/run_midfield 走双人夹抢）。
-//   回退方式：defense.kMarkHungarian=0（或改源码默认值）——单旋钮。
+// 带权匈牙利盯人分配（自研）：1=全队一一匹配，0=回退贪心；参与门槛 0.55、λ=25cm、EMA 0.35、量化 5cm、承诺 20 帧、无人盯代价 22cm×威胁
 TUNABLE(kMarkHungarian, 1.0);
 
-// 参与分配的威胁门槛：威胁低于它 ⇒ 整队不进入"盯人分配"（mark_assign 全清 -1），
-//   角色函数按各自的原逻辑走。跟 run_passive 原有的 `threat_level >= 0.6` 同量级，
-//   取 0.55 略宽一点是为了让边翼在"威胁刚要起来"时就参与分配（分配本身有 λ 兜着，不会乱跑）。
 TUNABLE(kMarkRelGate, 0.55);
 
-// 换人惩罚 λ（cm）：把某个防守者换到另一个对手头上，需要"总路程省下超过 λ"才算值。
-//   ⚠️ 这是**唯一**需要真机标定的旋钮（docs/06 第 97 轮）：太小 = 来回抖；
-//   太大 = 危险对手换防不过来（该盯的人没人管）。默认 25cm 来自"一次无效转向约等于走 25cm"。
 TUNABLE(kMarkLambda, 25.0);
 
-// 代价 EMA 系数 α：α 越大越跟手、越小越稳。0.35 ≈ 3 帧时间常数的平滑。
 TUNABLE(kMarkEma, 0.35);
 
-// 代价量化步长(cm)：把距离四舍五入到 5cm ⇒ 制造"平台"——
-//   两个候选差不到 5cm 就算打平，打平时不换人（配合 λ 双重防抖）。
 TUNABLE(kMarkQuant, 5.0);
 
-// 换人后的"强化承诺"帧数：窗口内换回去要**再加一个 λ**（等价于临时把 λ 翻倍）。
-//   为什么不是"全局冻结"：那会把该救的球也冻住（第 97 轮设计讨论里的结论）。
 TUNABLE(kMarkCommit, 20.0);
 
-// "没人盯他"的代价系数（cm / 威胁分）：没人盯对手 j 的总代价 = kMarkLeaveW × 威胁_j。
-//   越危险越贵 ⇒ 危险的对手必然有人管；不危险的（威胁≈0.4）只值几厘米 ⇒
-//   除非某个防守者正好贴着他，否则宁可站着不追（省体力、保阵型）。
-//   这也顺带取代了原来写死的"危险门限"（离球>40 且离门>40 就回区域防守）。
 TUNABLE(kMarkLeaveW, 22.0);
 
-// 局面是否处于"该盯人"的状态（威胁够高、不是点球执行期、球有效）。
+// 局面是否该盯人（威胁够高、非点球执行期、球有效）/ 清空本帧指派（不动 prev·commit）
 static bool mark_gate_open(const WorldModel &wm) {
     return kMarkHungarian >= 0.5 && wm.ball.valid && !wm.in_penalty_exec &&
            wm.threat_level >= kMarkRelGate;
 }
 
-// 清空本帧指派（不动 prev/commit：门重新打开时还能"回到上次的分工"而不是重新洗牌）。
 static void mark_clear(WorldModel &wm) {
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_assign[i] = -1;
     wm.mark_assign_valid = false;
 }
 
+// 全队最优一一匹配（行=可盯人防守者，列=对手+虚拟列，补虚拟行表示无人盯），写回指派并返回台数
 int assign_marks(WorldModel &wm) {
     if (!mark_gate_open(wm)) { mark_clear(wm); return 0; }
 
-    // —— ① 可盯人的防守者（行）：非门将/非主攻，且没被清道夫/逼抢者占用 ——
     int rows[PLAYERS_PER_SIDE], nr = 0;
     for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
         const int r = wm.role[i];
         if (r != ROLE_PASSIVE && r != ROLE_ASSIST && r != ROLE_MIDFIELD) continue;
-        if (i == wm.sweeper_id || i == wm.presser_id) continue;   // 已有明确任务，不参与分配
+        if (i == wm.sweeper_id || i == wm.presser_id) continue;
         rows[nr++] = i;
     }
-    constexpr int M = PLAYERS_PER_SIDE;      // 对手数（列）
+    constexpr int M = PLAYERS_PER_SIDE;
     if (nr <= 0) { mark_clear(wm); return 0; }
 
-    // —— ② 对手威胁度（复用现有打分，口径与旧贪心完全一致）——
     const double danger = ball_danger_speed(wm);
     const int dribbler = nearest_opp_to_ball(wm);
     double threat[M];
@@ -503,9 +344,7 @@ int assign_marks(WorldModel &wm) {
         threat[j] = mark_threat(d_ball, d_goal, appr, danger, j == dribbler);
     }
 
-    // —— ③ 约化代价 c(i→j)：我到"对手预测位置"的距离（EMA 平滑 + 量化）+ 换人惩罚 ——
-    //   用预测位置（mark_lead 帧外推）而不是当前位置：防守是"截击"不是"追尾"，
-    //   与执行侧 run_passive 的站位口径一致。
+    // 代价 = 我到对手预测位置的距离(EMA 平滑+量化) + 换人惩罚 λ（承诺窗口内再加一个 λ）
     const double lambda = sharp_defense_on() ? sharp_mark_lambda() : kMarkLambda;
     double real[PLAYERS_PER_SIDE][M];
     for (int r = 0; r < nr; ++r) {
@@ -519,8 +358,6 @@ int assign_marks(WorldModel &wm) {
             const double q = (kMarkQuant > 1e-6)
                            ? std::floor(wm.mark_cost_ema[i][j] / kMarkQuant + 0.5) * kMarkQuant
                            : wm.mark_cost_ema[i][j];
-            // 换人惩罚：目标不是上一帧那个 ⇒ 加 λ；承诺窗口内再加一个 λ（治"换回去"）
-            //   犀利进攻档（kSharpDefense=1）λ 25→15，危险换防更果断（更快贴住对手）。
             double lam = 0.0;
             if (wm.mark_prev_assign[i] >= 0 && wm.mark_prev_assign[i] != j) {
                 lam = lambda + ((wm.mark_commit[i] > 0) ? lambda : 0.0);
@@ -530,27 +367,23 @@ int assign_marks(WorldModel &wm) {
     }
     wm.mark_ema_ready = true;
 
-    // —— ④ 补成方阵：n = 防守者数 + 对手数 ——
-    //   行 = [防守者… | 虚拟行（代表"这个对手没人盯"）]
-    //   列 = [对手…   | 虚拟列（代表"这个防守者闲着"）]
-    //   虚拟行 × 对手 j 的代价 = kMarkLeaveW × 威胁_j（越危险越贵 ⇒ 必须有人管）
-    //   防守者 × 虚拟列 = 0（不追不危险的对手不花钱）
+    // 补成方阵：虚拟行×对手 = kMarkLeaveW×威胁（越危险越贵），防守者×虚拟列 = 0
     const int n = nr + M;
-    if (n > kHungarianMaxN) { mark_clear(wm); return 0; }     // 理论到不了（3+5=8）
+    if (n > kHungarianMaxN) { mark_clear(wm); return 0; }
     double cost[kHungarianMaxN * kHungarianMaxN];
     for (int r = 0; r < n; ++r) {
         for (int c = 0; c < n; ++c) {
             double value = 0.0;
-            if (r < nr && c < M)       value = real[r][c];                    // 防守者盯对手
-            else if (r >= nr && c < M) value = kMarkLeaveW * threat[c];       // 没人盯这个对手
-            else                       value = 0.0;                           // 闲着（含全虚拟区）
+            if (r < nr && c < M)       value = real[r][c];
+            else if (r >= nr && c < M) value = kMarkLeaveW * threat[c];
+            else                       value = 0.0;
             cost[r * n + c] = value;
         }
     }
     int row_to_col[kHungarianMaxN];
     if (!hungarian_solve(cost, n, row_to_col)) { mark_clear(wm); return 0; }
 
-    // —— ⑤ 落地：防守者的列若在"对手区"就是真指派；写回状态 + 统计换人 ——
+    // 落地：列在对手区就是真指派，写回状态并统计换人（-1→某人 不算换人）
     int assigned = 0, switches = 0;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_assign[i] = -1;
     for (int r = 0; r < nr; ++r) {
@@ -560,12 +393,10 @@ int assign_marks(WorldModel &wm) {
         wm.mark_assign[i] = target;
         if (target >= 0) ++assigned;
         if (target != wm.mark_prev_assign[i]) {
-            // 只有"从某个人换到另一个人"才算换人；-1→某人 是首次接任务（不是抖动）
             if (wm.mark_prev_assign[i] >= 0) ++switches;
             wm.mark_commit[i] = static_cast<int>(kMarkCommit);
         }
     }
-    // 承诺帧递减（只在窗口内递减，不越界成负数）
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
         if (wm.mark_commit[i] > 0) --wm.mark_commit[i];
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.mark_prev_assign[i] = wm.mark_assign[i];
@@ -574,38 +405,19 @@ int assign_marks(WorldModel &wm) {
     return assigned;
 }
 
-// ============================================================
-// 抢断唯一竞标（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）
-//   参考「预期价值（EV）决策」的通用防守战术思想，自研实现。
-//   把原来散在 run_mark_body（逼抢）/run_passive（争抢上抢）里各自独立、
-//   只按「谁近谁抢」的判断，收成每帧一次全局竞标：只让 EV 最高且 >0 的那一个
-//   上前抢脚下球，其余人守住盯人位——治第 103 轮「多人同扑、一起被过、身后漏人」。
-//   EV = 成功率 × 夺回球权价值  −  失败率 × 失位后露出的威胁  −  抢断折腾 λ。
-//   λ 是常数（对所有人相同），不影响「谁 EV 最高」的排序，只决定「要不要抢」的零点。
-// ============================================================
-// 总开关：0=关（回退旧分散逻辑「谁近谁抢」），1=开。默认开，真机验证。
+// 抢断唯一竞标（自研）：每帧只让 EV 最高且 >0 的一人抢球；候选 60cm、球速 ≤6cm/帧、价值 40、λ=8、有协防 30cm
 TUNABLE(kStealEnable, 1.0);
-// 候选门槛：我到球距离上限(cm)。对齐 run_passive 争抢的 kContestReach=60，不缩小
-//   原有「能抢」的范围，只把「谁最终抢」交给 EV 排序。
 TUNABLE(kStealDist, 60.0);
-// 球速上限(cm/帧)：球太快（对手高速带球）不抢——正面冲抢会被变速过掉。
-//   ⚠️ 保守默认 6.0（球速很少到 6cm/帧，默认不因球速拦截）；真机标定后调小。
 TUNABLE(kStealVMax, 6.0);
-// 夺回球权的价值（cm 当量，标定项）：越大越愿意抢。
 TUNABLE(kStealValue, 40.0);
-// 抢断折腾 λ（cm 当量）：抢断动作本身的成本（离开盯人位、转身、冲刺）。
 TUNABLE(kStealLambda, 8.0);
-// 成功率 sigmoid 系数 p = 1/(1+exp(−A + B·d + C·spd − D·has_cover))：
-//   越近(B)、球越慢(C)、有协防(D) 成功率越高。标定项。
 TUNABLE(kStealA, 2.0);
 TUNABLE(kStealB, 0.1);
 TUNABLE(kStealC, 0.5);
 TUNABLE(kStealD, 0.8);
-// 「有协防」判定半径(cm)：附近有队友（非门将）→ 抢断更安全，成功率 +D。
 TUNABLE(kStealCover, 30.0);
 
-// 我失位后「原来盯的那个人」还危不危险：越危险越不该离开他去抢。
-//   复用 mark_threat（口径与 assign_marks 完全一致），威胁分高 = 身后露大洞。
+// EV = 成功率 p×夺回价值 − (1−p)×失位威胁（原盯人威胁分）− λ；太远/球太快返回 -1e9
 static double steal_exposed_cost(const WorldModel &wm, int i) {
     int t = wm.mark_assign[i];
     if (t < 0 || t >= PLAYERS_PER_SIDE) return 0.0;
@@ -617,14 +429,12 @@ static double steal_exposed_cost(const WorldModel &wm, int i) {
     return mark_threat(d_ball, d_goal, appr, danger, t == dribbler);
 }
 
-// 单个防守者 i 的抢断期望价值 EV（越小越不该抢；触发护栏返回 -1e9 不参与）。
 static double steal_ev(const WorldModel &wm, int i) {
     const RobotState &me = wm.home[i];
     const double d_ball = dist(me.x, me.y, wm.ball.x, wm.ball.y);
     const double opp_spd = ball_speed(wm.ball.vx, wm.ball.vy);
-    if (d_ball > kStealDist || opp_spd > kStealVMax) return -1e9;  // 太远/球太快不抢
+    if (d_ball > kStealDist || opp_spd > kStealVMax) return -1e9;
 
-    // 附近有队友（非门将）协防 → 抢断更安全
     bool has_cover = false;
     for (int k = 0; k < PLAYERS_PER_SIDE; ++k) {
         if (k == i || wm.role[k] == ROLE_GOALIE) continue;
@@ -640,66 +450,52 @@ static double steal_ev(const WorldModel &wm, int i) {
 
 void steal_decide(WorldModel &wm) {
     wm.stealer_id = -1;
-    if (kStealEnable < 0.5) return;   // 总开关：关 → 回退旧分散逻辑（谁近谁抢）
+    if (kStealEnable < 0.5) return;   // 关 → 回退旧「谁近谁抢」
     double best = 0.0;
-    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {   // i=1 起（0=门将，门将不参与）
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {   // 0=门将，不参与
         const int r = wm.role[i];
         if (r != ROLE_PASSIVE && r != ROLE_ASSIST && r != ROLE_MIDFIELD) continue;
-        if (i == wm.sweeper_id || i == wm.presser_id) continue;   // 有明确任务，不抢
+        if (i == wm.sweeper_id || i == wm.presser_id) continue;
         const double ev = steal_ev(wm, i);
         if (ev > best) { best = ev; wm.stealer_id = i; }
     }
 }
 
+// 二抢一站位：持球者压到门前危险区时算夹抢点（只让更近的非清道夫上前），false = 不夹
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y) {
-    // 门槛①：威胁足够高（球在己方半场，passive 已人盯人）
     if (wm.threat_level < 0.6) return false;
 
-    // 门槛②：有明确持球者（离球最近且足够近）
     double dmin = 1e9;
     int dribbler = nearest_opp_to_ball(wm, &dmin);
     if (dribbler < 0 || dmin >= kDoubleTeamCarryDist) return false;
 
-    // 门槛③：球已在己方罚球区 → 原「禁区纪律」直接 return false（门前只剩门将 1v1，
-    //   真 vs demo 2:7×2 复盘：demo 控停门前 (205,90) 后追击手直冲抢点推射）。
-    //   结构性改造（docs 第14轮）：持球者已压到门前 kDoubleTeamCoverDist 内时，
-    //   允许第二人进禁区协防，与门将/passive 形成双人包夹——防守方进己方罚球区
-    //   合法（规则只限制进攻方进对方门区）。球还在禁区边缘/外面则不冲进去。
     if (in_penalty_area(wm.ctx, wm.ball.x, wm.ball.y)) {
         if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamCoverDist) return false;
     }
 
-    // 门槛④：持球者已推进到离门 kDoubleTeamDangerDist 内才夹抢——
-    //   过早夹抢会把第二人提前调离区域、留出纵深，反被一脚直塞打穿。
     if (wm.ctx.dist_our_goal(wm.opp[dribbler].x) > kDoubleTeamDangerDist) return false;
 
-    // 只让「非清道夫、且离持球者更近」的那一个上前；离得远的留区域保持纵深。
     double ox = wm.opp[dribbler].x, oy = wm.opp[dribbler].y;
     double my_d = dist(wm.home[defender_id].x, wm.home[defender_id].y, ox, oy);
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (i == defender_id || i == wm.sweeper_id) continue;
         if (wm.role[i] != ROLE_ASSIST && wm.role[i] != ROLE_MIDFIELD) continue;
         double d = dist(wm.home[i].x, wm.home[i].y, ox, oy);
-        if (d < my_d) return false;   // 有更近的队友，它去夹，我留区域
+        if (d < my_d) return false;
     }
 
-    // 夹抢站位：持球者→门心方向上 mark_dist 处（与 passive 同深、不同角），
-    //   再横向偏 kDoubleTeamLateral 到持球者所在一侧——封它沿边线外切的角度，
-    //   把它往中路门将/passive 怀里赶。
+    // 夹抢点：持球者推进方向（无速度则门向）前方 mark_dist 处，再横向错开到持球者一侧
     double gx = wm.ctx.our_goal_x(), gy = 90.0;
     double dx = gx - ox, dy = gy - oy;
     double len = std::hypot(dx, dy);
     if (len < 1e-6) return false;
-    dx /= len; dy /= len;                       // 持球者→门心 单位向量
-    double nx = -dy, ny = dx;                   // 垂直向量（横向）
-    double side = (oy >= 90.0) ? 1.0 : -1.0;    // 偏到持球者所在一侧
-    // 2026-09-14 升级：持球者在动 → 封他**当前推进方向**（而不是只站门侧）。
-    //   本平台没有踢球/抢断动作，"抢"只能靠身体顶掉或封角度 ⇒ 夹抢的价值在于
-    //   **逼他变向**；站在他正在前进的路线上最直接（注释口径一致）。
+    dx /= len; dy /= len;
+    double nx = -dy, ny = dx;
+    double side = (oy >= 90.0) ? 1.0 : -1.0;
     double vx = wm.opp_vx[dribbler], vy = wm.opp_vy[dribbler];
     double vlen = std::hypot(vx, vy);
-    if (vlen > 0.5) {                                  // 有明确推进方向（cm/帧）
+    if (vlen > 0.5) {
         out_x = ox + (vx / vlen) * mark_dist() + nx * side * kDoubleTeamLateral;
         out_y = oy + (vy / vlen) * mark_dist() + ny * side * kDoubleTeamLateral;
     } else {
@@ -707,8 +503,7 @@ bool double_team_point(const WorldModel &wm, int defender_id,
         out_y = oy + dy * mark_dist() + ny * side * kDoubleTeamLateral;
     }
 
-    // 禁区纪律：夹抢点若落入己方门区（小禁区），退到门区前缘外——门区是门将
-    //   专属活动区，区域防守者不挤进去；罚球区（大禁区）允许进入（协防合法）。
+    // 禁区纪律：夹抢点落入己方门区则退到门区前缘外（罚球区允许进）
     if (in_goal_area(wm.ctx, out_x, out_y)) {
         out_x = wm.ctx.our_goal_x() + wm.ctx.attack_dir() * 55.0;
         out_y = clamp(oy, 72.5, 107.5);

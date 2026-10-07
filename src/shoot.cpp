@@ -1,36 +1,4 @@
-// ============================================================
-// shoot.cpp — 射门决策（docs/18 §8：机会质量驱动的动态射程）
-//              + 借墙射门（bank shot，docs/06 第 65 轮，用户 2026-09-14 指令）
-//
-// 本平台没有踢球动作：射门 = 用身体把球推出去，**球出射方向 ≈ 撞球瞬间的机头方向**。
-// 所以本模块只负责"往哪儿瞄"，执行（到位+转正+推穿）由 roles.cpp + motion 负责。
-//
-// 直线射门：角度遮挡几何（解析解，比"两个门柱口挑一个"精确）：
-//   门张角区间 [−half, +half]（相对「球→门中心」方向）；
-//   GK 遮挡区间 [gk_mid−gk_half, gk_mid+gk_half]（GK 半径 kGkRadius 在该距离的张角）；
-//   净开口 = 门张角 \ 遮挡角 的最大连续空隙，取空隙**中心**为射门方向（连续值）。
-//
-// 借墙射门（本文件下半部分）：直线被封（门将站位挡住开口 / 路线有人）时的**换角度**打法。
-//   ⚠️ 关键物理（撞墙系数：docs/06 第 65 轮 → **第 75 轮补记修正**）：
-//     球撞墙后 **法向分量恢复 ≈0.45、切向保持 ≈0.81** ⇒ **入射角 ≠ 反射角**，
-//     出射线会明显往墙那边"扫"。所以**不能**用"把球门对墙镜像、连线求交点"的镜面做法
-//     （那只在弹性各向同性时成立），必须按各向异性反射解方程（有闭式解，见 build_bank）。
-//     ⚠️ 第 65 轮老测法给 0.66，**第 75 轮补记证明那是测量假象**：老测法要求"球贴墙 +
-//     法向位移变号"，而球是**同一帧内**被弹回的、位置序列根本不变号（docs/06:2430-2437）。
-//     新测法（找法向坐标的局部极值帧）在真机两套日志、两个轴向上一致给
-//     **0.451(x, n=380) / 0.449(y, n=501)**，并写明"借墙门槛全建立在 0.66 上，
-//     需按 0.45 重新评估"（docs/06:2446-2448）。
-//     ⇒ 本轮（2026-09-30）**只把借墙改用 0.45**：field_info 的 ball_wall_rest() 仍留 0.66，
-//       因为它同时被 defense.hpp 的 predict_y_at_x_reflect（门将/后卫反弹落点预测）使用——
-//       **门将不动，才能把"借墙"这一个功能的效果在真机上单独测出来**。
-//
-// 射程闸门（docs/03 R17-18 的教训：无闸门放宽 70cm → 真机 0:3）：
-//   · ≤70cm：维持"无条件可射"——sim A/B 验证过的进球主力区，
-//     在这里加闸门会砍掉边际射门（实测净胜 5.7→4.4），不能碰；
-//   · 70~110cm：**净开口 ≥8° 且 30cm 路线无遮挡** 才放行——0:3 事故正是远距盲射；
-//   · 点球执行期：旁路闸门。罚球点距门 92cm（>70），门张角 ±12.3°、GK 遮挡 ±5.0°
-//     → 净开口只剩 7.3°，按闸门会被永远拒掉（这正是"点球 0/3"的第二个根因）。
-// ============================================================
+// shoot.cpp — 射门决策（无踢球动作，推球方向≈机头方向）：直线取门张角空隙中心 + 借墙反射
 #include "simuro5/shoot.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/geometry.hpp"
@@ -41,93 +9,59 @@
 
 namespace simuro5 {
 
-// 借墙方案统计（纯统计，不影响决策；声明见 shoot.hpp）
-long g_bank_plans = 0;      // 新机会次数（上升沿）
-long g_bank_frames = 0;     // 采纳帧数
-bool g_bank_prev = false;   // 上一帧是否是借墙方案
+long g_bank_plans = 0;
+long g_bank_frames = 0;
+bool g_bank_prev = false;
 
 namespace {
 
-// —— 机会质量参数（数值集中此处，变更同步 docs/06）——
-// ⚠️ 射程结论（docs/18 §8，两条独立证据都指向"别放宽"）：
-//   · 真机历史：无闸门放宽 70cm → 真机 0:3（docs/03 R17-18，A/B 确认有副作用）
-//   · 本轮 sim 4 种子 A/B：放宽到 110cm（带闸门）净胜 -1.0（噪声 σ=0.66）→ 已回退
-//   因此 kFarShotEnabled 默认 false：远射档作为**能力**保留（一个常量可开），
-//   等真机对准率提上来、有真机 A/B 数据后再单开一轮评估。
-TUNABLE(kMaxShotNormal, 70.0);  // 常规射程（旧口径，sim/真机都验证过的主力区）
-TUNABLE(kMaxShotPenalty, 110.0);  // 点球：罚球点距门 92cm，必须能射
-TUNABLE(kMaxShotFar, 110.0);  // 远射档上限
-// 远射档开关：**用户 2026-09-11 决定开启**（真机观查）。注意 sim A/B 是反对的：
-//   50 场×4 种子净胜 -1.0~-1.68（σ=0.66）；docs/06 第 47 轮有完整数据。
-//   用户理由：sim 的 carry 机制/弱脚本门将无法复现真机"射正率 8% vs 对手 48%"的问题，
-//   该项只能真机裁决。若真机验证下来进攻变差，把这里改回 false 即回退（单常量）。
+// 射程(cm)：常规 70 / 点球 110（罚球点距门 92）/ 远射上限 110；≤70 无条件可射，近于 5cm 不射
+TUNABLE(kMaxShotNormal, 70.0);
+TUNABLE(kMaxShotPenalty, 110.0);
+TUNABLE(kMaxShotFar, 110.0);
+// 远射档开关：sim A/B 反对，单常量改回 false 即回退
 constexpr bool   kFarShotEnabled = true;
-TUNABLE(kMinShot, 5.0);  // 球距门线过近(<5cm)不射（无可推空间）
-constexpr double kLegacyRange= 70.0;    // ≤此距离维持无条件可射（A/B 校准，勿当参数乱调）
-// 2026-10-06：9.00123 → **5.0**（用户指令"放松需要准度判断再进攻的门槛"，按 sim 扫描只上这一条）。
-//   依据：19+12 个档位 × 3 种子 × 40 场 = 2280 场的参数扫描（docs/06「全线放松准度门槛」一节，
-//   复现工具 tools/sweep/relax_sweep.ps1，数据 docs/work/relax_sweep*.csv）：
-//     放宽到 5° 后丢球 0.792→0.533/场（-0.26，≈2.9σ）、乌龙 0.643→0.440/场（-0.20，≈2.8σ），
-//     同档流畅度指标（主攻交接 0.530 vs 0.533 次/秒、不朝球 47.4%→48.0%、犹豫 44.2%→44.9%）无实质变化。
-//   **所以呢**：70~110cm 的远射不再要求 9° 净开口（约等于"门将挡住的缝再窄一点也打"），
-//   更敢出脚反而少送乌龙——因为球不再在自家门前磨蹭。⚠️ "全放松"组合实测是 -0.325 净胜球/场（变差），
-//   所以**只动这一条**，其余门槛原样。
-//   ⚠️ 只测了 sim（vs scripted 对手、3 种子），**还没真机验证**；真机若远射变差，改回 9.00123 即可（单常量）。
-TUNABLE(kMinOpen, 5.0);      // 远射放行的最小净开口角（度）
-TUNABLE(kAngleFull, 19.2041);  // 开口评分饱和角（度）
-TUNABLE(kSpeedFull, 8.0);  // 球速评分饱和（cm/帧）
-TUNABLE(kGkRadius, 8.0);  // GK 有效遮挡半径（本体 6 + 扑救余量 2）
-TUNABLE(kLaneLen, 30.0);  // 射门路线拦截检查长度 cm
-TUNABLE(kLaneBlockR, 8.0);  // 拦截者判挡半径（本体 6 + 余量 2）
+TUNABLE(kMinShot, 5.0);
+constexpr double kLegacyRange= 70.0;
+// 远射最小净开口角(度)；开口饱和 19.2°、球速饱和 8cm/帧、GK 遮挡半径 8cm、路线检查 30cm 判挡 8cm、quality 权重
+TUNABLE(kMinOpen, 5.0);
+TUNABLE(kAngleFull, 19.2041);
+TUNABLE(kSpeedFull, 8.0);
+TUNABLE(kGkRadius, 8.0);
+TUNABLE(kLaneLen, 30.0);
+TUNABLE(kLaneBlockR, 8.0);
 TUNABLE(kWOpen, 0.371001);
 TUNABLE(kWDist, 0.3);
-TUNABLE(kWSpeed, 0.2);  // quality 权重
+TUNABLE(kWSpeed, 0.2);
 
 
-// —— 借墙射门参数（2026-09-14；实测口径与推导见文件头 + docs/06 第 65 轮）——
-// 撞墙系数：**借墙专用**旋钮（2026-09-30，见文件头）。不直接用 field_info 的
-// ball_wall_rest()（那个仍是第 65 轮老测法的 0.66，且被门将反弹预测共用，不能动）。
-// 回退：shoot.kBankWallRest 改回 0.66 → 行为回到第 79 轮（单常量）。
-TUNABLE(kBankWallRest, 0.45);   // 法向恢复（真机新测法 0.451/0.449）
-TUNABLE(kBankWallFric, 0.81);   // 切向保持（真机 y 墙实测 0.78~0.84，取 0.81）
-TUNABLE(kBankMaxDist, 300);  // 借墙总路程上限 cm（超过则距离项 0）
-TUNABLE(kBankCornerFull, 40.0);  // 反弹点离对方门线多远算满分（否则像"蹭门柱"）
-TUNABLE(kBankCornerMin, 12.0);  // 反弹点离门线近于此 → 直接否决
-TUNABLE(kBankAngleFull, 18.0);  // 借墙的开口满分角（与直线同口径）
-TUNABLE(kBankMinSlope, 0.25);  // 入射"陡度"下限 |法向|/|切向|：太低=贴墙扫，不可靠
-TUNABLE(kBankMinQ, 0.42);  // 借墙放行阈值
-TUNABLE(kBankMargin, 0.144751);  // 必须比直线好这么多才换（不打平就换）
-TUNABLE(kBankDirectWeak, 0.471292);  // 直线 quality 低于此才算"没戏"，才考虑借墙
-TUNABLE(kBankPrepDist, 17.2849);  // 准备点=球后 20cm（与 roles.cpp 口径一致，做合法性检查）
-TUNABLE(kBankCarryMax, 160.0);  // 蜂群推进者的借墙射程（docs/06 第 79 轮）：离门更远也能借墙送球
-TUNABLE(kBankPrepMargin, 7.94513);  // 准备点离场边余量
+// 借墙参数（专用旋钮，不动 field_info 被门将共用的 0.66）：法向恢复 0.45、切向 0.81；路程上限 300cm、反弹点满分 40cm 低过 12cm 否决
+//   开口满分 18°、入射陡度下限 0.25、放行 0.42、须优于直线 0.145、直线没戏 0.471、准备点 17.3cm 边距 7.9cm、蜂群射程 160cm、权重；总开关 kBankEnabled
+TUNABLE(kBankWallRest, 0.45);
+TUNABLE(kBankWallFric, 0.81);
+TUNABLE(kBankMaxDist, 300);
+TUNABLE(kBankCornerFull, 40.0);
+TUNABLE(kBankCornerMin, 12.0);
+TUNABLE(kBankAngleFull, 18.0);
+TUNABLE(kBankMinSlope, 0.25);
+TUNABLE(kBankMinQ, 0.42);
+TUNABLE(kBankMargin, 0.144751);
+TUNABLE(kBankDirectWeak, 0.471292);
+TUNABLE(kBankPrepDist, 17.2849);
+TUNABLE(kBankCarryMax, 160.0);
+TUNABLE(kBankPrepMargin, 7.94513);
 TUNABLE(kBankWOpen, 0.274509);
 TUNABLE(kBankWDist, 0.25);
 TUNABLE(kBankWBounce, 0.25);
 TUNABLE(kBankWSpd, 0.20);
-// 借墙射门总开关：默认开。sim A/B 用它做"只隔离借墙"的对照（同一份代码跑开/关两批），
-// 真机若验证下来进攻变差，改回 false 即回退（单常量，和 kFarShotEnabled 一个套路）。
 constexpr bool kBankEnabled = true;
 
-// —— 真机借墙测试档（第 96 轮，用户 2026-09-30 指令「在真机上直接测借墙射门，一个队员就够」）——
-// 1.0 = 测试档：① 主攻只要算得出**合法**借墙几何就打墙（不看 kBankMinQ/kBankMargin/
-//              kBankDirectWeak 三道门槛）；② `plan_bank_carry` 直接返回空 ⇒ 关掉蜂群借墙推进，
-//              **场上只有主攻一个人借墙**（用户要的"一个队员"）。
-// 0.0 = 第 95 轮的生产行为（三道门槛 + 蜂群借墙推进 160cm）——**仿真/单测/调参的默认**。
-// 打开方式：只在**平台入口** `src/dll_blue.cpp` 里 set_param("shoot.kBankForceTest", 1.0)
-//   （历史教训：把测试档写成源码默认值会污染 sim A/B 与 tune_es 的参数搜索基线）。
-// 为什么必须强制才有样本：扫 175 场真机 .rlg（`tools/py/bank_shot_report.py`）——
-//   撞边墙 173 次、我方进球 313 个，其中「撞墙后 2.5s 内进球」只有 **2 个** ⇒
-//   自然对局里借墙几乎不出样本，不强制就永远测不出效果。
-// 保留的门槛（测试档也不动）：射程闸门（≤70cm 无条件射区不许被借墙抢走、>110cm 不射）、
-//   `build_bank` 内部的几何合法性（反弹点在球与门之间、离门线 ≥kBankCornerMin、
-//   两段路线无遮挡、推球准备点在场内且不进对方门区、从反弹点看门不被门将挡住）。
-// ⚠️ 这是测试档：比赛版必须回 0.0（并删掉 dll_blue.cpp 里那行）。
+// 真机借墙测试档：1 = 主攻只要几何合法就打墙（不看三道门槛）+ 关掉蜂群借墙推进，只测一个队员
 TUNABLE(kBankForceTest, 0.0);
 
 double deg(double rad) { return rad * 180.0 / SIMURO5_PI; }
 
-// 对方守门员 = 离对方门线最近者，返回其下标并回填 y
+// 对方守门员 = 离对方门线最近者，返回下标并回填 y
 int find_opp_goalie(const WorldModel &wm, double ogx, double &gky) {
     int idx = -1;
     double best = 1e9;
@@ -139,15 +73,13 @@ int find_opp_goalie(const WorldModel &wm, double ogx, double &gky) {
     return idx;
 }
 
-// ============================================================
-// 直线射门（原实现原样搬进来，行为不变）
-// ============================================================
+// 直线射门：净开口 = 门张角扣掉门将遮挡后的最大连续空隙，取空隙中心为瞄准方向
 ShootPlan build_direct(const WorldModel &wm) {
     ShootPlan plan;
     const TeamContext &ctx = wm.ctx;
 
     double bx = wm.ball.x, by = wm.ball.y;
-    double ogx = ctx.opp_goal_x();                 // 对方门线 x
+    double ogx = ctx.opp_goal_x();
     double dgoal = dist(bx, by, ogx, 90.0);
     plan.shot_dist = dgoal;
     plan.penalty = wm.in_penalty_exec;
@@ -155,91 +87,62 @@ ShootPlan build_direct(const WorldModel &wm) {
                                          : (kFarShotEnabled ? kMaxShotFar : kMaxShotNormal);
     if (dgoal > max_shot || dgoal < kMinShot) return plan;
 
-    // —— 对方守门员：离门线最近者 ——
     double gky = 90.0;
     int gk_idx = find_opp_goalie(wm, ogx, gky);
 
-    // —— 门张角（相对「球→门中心」方向，度）——
     double mid  = angle_to(bx, by, ogx, 90.0);
     double a_lo = angle_to(bx, by, ogx, goal_y_low());
     double a_hi = angle_to(bx, by, ogx, goal_y_high());
     double half = std::fabs(angle_diff(a_lo, a_hi)) / 2.0;
 
-    // —— GK 遮挡区间（相对 mid）——
     double gk_dist = dist(bx, by, ogx, gky);
     double gk_half = (gk_dist > 1e-6) ? deg(std::atan2(kGkRadius, gk_dist)) : 90.0;
     double gk_mid  = angle_diff(angle_to(bx, by, ogx, gky), mid);
     double gl = gk_mid - gk_half, gh = gk_mid + gk_half;
 
-    // —— 净开口 = 门张角 \ 遮挡角 的最大连续空隙，取空隙中心为瞄准方向 ——
     double open_angle = 0.0, aim_rel = 0.0;
-    double lo1 = -half, hi1 = std::min(half, gl);          // 下段候选
-    double lo2 = std::max(-half, gh), hi2 = half;          // 上段候选
+    double lo1 = -half, hi1 = std::min(half, gl);
+    double lo2 = std::max(-half, gh), hi2 = half;
     if (hi1 - lo1 > open_angle) { open_angle = hi1 - lo1; aim_rel = (lo1 + hi1) / 2.0; }
     if (hi2 - lo2 > open_angle) { open_angle = hi2 - lo2; aim_rel = (lo2 + hi2) / 2.0; }
     plan.open_angle = open_angle;
 
-    // —— 射程闸门（远射档才判；点球永远旁路）——
     const bool dyn = kFarShotEnabled && (dgoal > kLegacyRange) && !plan.penalty;
     if (dyn && open_angle < kMinOpen) return plan;
 
-    // —— 瞄准：**连续瞄准** = 门张角 \ GK 遮挡角 的最大空隙中心（用户决定启用）——
-    //   旧口径是"门柱内侧两定点(74/106)挑离 GK 远的一侧"；连续瞄准的好处是 GK 偏一侧时
-    //   瞄的是真实空隙中心、且开口很小时能反映出来（配合远射档闸门）。
-    //   ⚠️ sim A/B：连续瞄准单独贡献约 -0.33（4σ）→ 已如实记录（docs/06 第 47 轮），
-    //   真机观查；若真机变差，恢复下面注释里的旧"两定点"实现即可。
-    //   旧实现（保留备查）：
-    //     double goal_half_w = GOAL_WIDTH/2; aim_up = 90+goal_half_w-4; aim_down = 90-goal_half_w+4;
-    //     aim_y = |aim_up-gky| >= |aim_down-gky| ? aim_up : aim_down;
     double aim_deg = mid + aim_rel;
     double ra = aim_deg * SIMURO5_PI / 180.0;
     double dirx = std::cos(ra), diry = std::sin(ra);
 
-    // —— 路线拦截：球→开口方向 30cm 段，GK 之外防守者圆盘碰撞 ——
     CircleObstacle obs[PLAYERS_PER_SIDE];
     int no = 0;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        if (i == gk_idx) continue;                         // 跳过 GK（遮挡已计入开口几何）
+        if (i == gk_idx) continue;
         obs[no].x = wm.opp[i].x; obs[no].y = wm.opp[i].y; obs[no].r = kLaneBlockR;
         ++no;
     }
     double lx = bx + dirx * kLaneLen, ly = by + diry * kLaneLen;
     plan.lane_blocked = !segment_clear_of_circles(bx, by, lx, ly, obs, no);
-    if (dyn && plan.lane_blocked) return plan;             // 远射且有人站射门线 → 不硬射
+    if (dyn && plan.lane_blocked) return plan;
 
-    // —— 机会质量 quality ∈ [0,1] ——
     double speed = std::hypot(wm.ball.vx, wm.ball.vy);
     double q_open = clamp(open_angle / kAngleFull, 0.0, 1.0);
     double q_dist = clamp((kMaxShotFar - dgoal) / kMaxShotFar, 0.0, 1.0);
     double q_spd  = clamp(speed / kSpeedFull, 0.0, 1.0);
     plan.quality = kWOpen * q_open + kWDist * q_dist + kWSpeed * q_spd;
-    // 点球：白送的射门机会，quality（球静止 → 只有 0.2 出头）不作数
     if (plan.penalty) plan.quality = 1.0;
 
-    // —— 输出（两段式推射执行体兼容：dir 单位向量 + 瞄准角 + 球后 8cm 推球点）——
     plan.aim_y = clamp(by + std::tan(ra) * (ogx - bx), goal_y_low(), goal_y_high());
     plan.dir_x = dirx;
     plan.dir_y = diry;
-    plan.aim_rot = angle_to(0.0, 0.0, dirx, diry);         // 机头应朝的角度(度)
+    plan.aim_rot = angle_to(0.0, 0.0, dirx, diry);
     plan.target_x = bx - dirx * 8.0;
     plan.target_y = by - diry * 8.0;
     plan.viable = true;
     return plan;
 }
 
-// ============================================================
-// 借墙射门：给定「墙 + 门内目标点 ty」求反弹点，再按四项算机会质量
-// ------------------------------------------------------------
-// 各向异性反射闭式解（推导）：
-//   入射向量        i = (rx−bx, W−by)                      W = 墙的 y
-//   出射向量（实测） o = ( i.x·kFric , −i.y·kRest )         切向×0.81，法向反号×0.66
-//   要求出射方向指向目标 T=(ogx, ty)：
-//       o × (T−R) = 0
-//   令 c1 = kFric·(ty−W)、c2 = kRest·(W−by)，整理成 rx 的一次方程：
-//       c1·(rx−bx) + c2·(ogx−rx) = 0
-//       ⇒ rx = (c1·bx − c2·ogx) / (c1 − c2)
-//   （镜面做法就是把 kRest/kFric 都当 1，本平台会系统性打偏 → 所以必须按实测系数解）
-// ============================================================
+// 借墙射门：按各向异性反射闭式解求反弹点（入射角≠反射角，镜面做法会系统性打偏），再四项算质量
 ShootPlan build_bank(const WorldModel &wm, double max_shot) {
     ShootPlan none;
     const TeamContext &ctx = wm.ctx;
@@ -249,15 +152,13 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
     none.shot_dist = dgoal;
     none.penalty = wm.in_penalty_exec;
 
-    // 点球不借墙（白送的直线机会）；射程沿用同一闸门，不趁机放宽
     if (none.penalty) return none;
     if (dgoal > max_shot || dgoal < kMinShot) return none;
 
     double gky = 90.0;
     const int gk_idx = find_opp_goalie(wm, ogx, gky);
 
-    // 障碍集合：第一段（球→反弹点）把门将也算进去（它可能出击到路上）；
-    //          第二段（反弹点→球门）跳过门将——门将的遮挡用角度几何单独算
+    // 第一段（球→反弹点）含门将，第二段（反弹点→门）跳过门将（遮挡另按角度算）
     CircleObstacle all5[PLAYERS_PER_SIDE], no_gk[PLAYERS_PER_SIDE];
     int n_all = 0, n_no = 0;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
@@ -270,55 +171,48 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
 
     const double tys[3]   = {goal_y_low() + 4.0, 90.0, goal_y_high() - 4.0};
     const double walls[2] = {0.0, TeamContext::FIELD_WIDTH};
-    // 撞墙系数：**借墙专用旋钮**（见文件头）。刻意不用 field_info 的 ball_wall_rest()——
-    //   那个 0.66 是第 65 轮老测法的测量假象，且与门将反弹预测共用，本轮不动它。
     const double kFric = kBankWallFric, kRest = kBankWallRest;
 
     ShootPlan best;
     double best_q = 0.0;
-    const double ad = ctx.attack_dir();      // 进攻方向：蓝队 -1（攻 x=0），黄队 +1（攻 x=220）
+    const double ad = ctx.attack_dir();
     if (dgoal < 1e-6) return none;
     for (int wi = 0; wi < 2; ++wi) {
         const double wall = walls[wi];
         for (int ti = 0; ti < 3; ++ti) {
             const double ty = tys[ti];
 
-            // ① 反射点闭式解
             const double c1 = kFric * (ty - wall);
             const double c2 = kRest * (wall - by);
             const double den = c1 - c2;
             if (std::fabs(den) < 1e-9) continue;
             const double rx = (c1 * bx - c2 * ogx) / den;
-            // 反弹点必须落在「球 → 对方门」这段上（按进攻方向判，蓝黄通用）
+            // 反弹点须落在「球 → 对方门」之间（按进攻方向判，蓝黄通用）
             if ((rx - bx) * ad <= 3.0) continue;
             if ((ogx - rx) * ad <= 3.0) continue;
-            const double corner_d = (ogx - rx) * ad;          // 反弹点到对方门线的距离
-            if (corner_d < kBankCornerMin) continue;          // 太贴角区（像蹭门柱）
+            const double corner_d = (ogx - rx) * ad;
+            if (corner_d < kBankCornerMin) continue;
             const double ix = rx - bx, iy = wall - by;
             const double len_in = std::hypot(ix, iy);
             if (len_in < 1e-6) continue;
-            if (std::fabs(ix) < 1e-6) continue;                // 纯法向入射：退化
+            if (std::fabs(ix) < 1e-6) continue;
             const double slope = std::fabs(iy) / std::fabs(ix);
-            if (slope < kBankMinSlope) continue;               // 入射太"扫"，落点不可靠
+            if (slope < kBankMinSlope) continue;
             const double ux = ix / len_in, uy = iy / len_in;
             const double leg2 = dist(rx, wall, ogx, ty);
             const double L = len_in + leg2;
 
-            // ② 遮挡：两段路线（第一段含门将，第二段不含）都要通
             if (!segment_clear_of_circles(bx, by, rx, wall, all5, n_all)) continue;
             if (!segment_clear_of_circles(rx, wall, ogx, ty, no_gk, n_no)) continue;
 
-            // ③ 推球准备点合法性：球后 20cm 必须在场内、且不进对方门区（禁区纪律）
+            // 推球准备点须在场内且不进对方门区
             const double px = bx - ux * kBankPrepDist, py = by - uy * kBankPrepDist;
             if (px < kBankPrepMargin || px > TeamContext::FIELD_LENGTH - kBankPrepMargin ||
                 py < kBankPrepMargin || py > TeamContext::FIELD_WIDTH - kBankPrepMargin)
                 continue;
             if (in_opp_goal_area(ctx, px, py)) continue;
 
-            // ④ 从反弹点看门：目标方向是否被门将挡住；没挡住才算空隙宽度
-            // ⚠️ 门将位置用**实际坐标**，不用"投影到门线上"（直线路径的老约定）：
-            //    借墙时反弹点离门线只有几十厘米，把门将投到门线上会算错遮挡角
-            //    （实测差 5~10°，会误判"目标被挡"或"没被挡"）。门线只用来算门框本身。
+            // 从反弹点看门：门将用实际坐标（投到门线上会算错遮挡角 5~10°）
             const double gk_x_r = (gk_idx >= 0) ? wm.opp[gk_idx].x : ogx;
             const double mid_r = angle_to(rx, wall, ogx, 90.0);
             const double a_lo_r = angle_to(rx, wall, ogx, goal_y_low());
@@ -329,21 +223,19 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
             const double gk_mid_r = angle_diff(angle_to(rx, wall, gk_x_r, gky), mid_r);
             const double gl_r = gk_mid_r - gk_half_r, gh_r = gk_mid_r + gk_half_r;
             const double a_t = angle_diff(angle_to(rx, wall, ogx, ty), mid_r);
-            if (a_t < -half_r || a_t > half_r) continue;       // 目标点不在门框内
-            if (a_t > gl_r && a_t < gh_r) continue;            // 正被门将挡着 → 换墙/换点
-            const double lo_gap = clamp(gl_r, -half_r, half_r) + half_r;   // 下侧空隙宽
-            const double hi_gap = half_r - clamp(gh_r, -half_r, half_r);   // 上侧空隙宽
+            if (a_t < -half_r || a_t > half_r) continue;
+            if (a_t > gl_r && a_t < gh_r) continue;
+            const double lo_gap = clamp(gl_r, -half_r, half_r) + half_r;
+            const double hi_gap = half_r - clamp(gh_r, -half_r, half_r);
             const double gap = (a_t <= gl_r) ? lo_gap : hi_gap;
             if (gap <= 0.0) continue;
 
-            // ⑤ 四项机会质量
             const double q_open   = clamp(gap / kBankAngleFull, 0.0, 1.0);
             const double den_d    = std::max(kBankMaxDist - dgoal, 30.0);
             const double q_dist   = clamp((kBankMaxDist - L) / den_d, 0.0, 1.0);
             const double q_inc    = clamp(slope, 0.0, 1.0);
             const double q_corner = clamp(corner_d / kBankCornerFull, 0.0, 1.0);
             const double q_bounce = q_inc * q_corner;
-            // 撞墙保持率按实际入射方向算：|o| / |i|
             const double retain = std::hypot(ix * kFric, iy * kRest) / len_in;
             const double v_along = std::max(0.0, wm.ball.vx * ux + wm.ball.vy * uy);
             const double q_spd = clamp(v_along * retain / kSpeedFull, 0.0, 1.0);
@@ -352,7 +244,7 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
             if (q <= best_q) continue;
 
             best_q = q;
-            best = none;                       // 继承 shot_dist / penalty
+            best = none;
             best.viable = true;
             best.bank = true;
             best.bank_wall = wall;
@@ -369,20 +261,17 @@ ShootPlan build_bank(const WorldModel &wm, double max_shot) {
             best.target_y = by - uy * 8.0;
         }
     }
-    // quality 用借墙质量（roles.cpp 的机会闸门按它放行；shot_dist ≤70 时本来就无条件放行）
     best.quality = best.bank_quality;
     return best;
 }
 
-}  // namespace
+}
 
 ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
     ShootPlan direct = build_direct(wm);
     if (!kBankEnabled) { g_bank_prev = false; return direct; }
 
-    // —— 测试档（第 96 轮）：不看三道门槛，只要有合法借墙几何就用 ——
-    //   唯一保留的"不抢"规则：门前 ≤70cm 的无条件射区仍走直线（那是最稳的进球区，
-    //   借墙天生更远更慢，抢它只会白扔机会；与第 65 轮定的口径一致）。
+    // 测试档：门前 ≤70cm 的无条件射区仍走直线（借墙天生更远更慢，抢它白扔机会）
     if (kBankForceTest >= 0.5) {
         ShootPlan bank = build_bank(wm, kFarShotEnabled ? kMaxShotFar : kMaxShotNormal);
         if (bank.viable && bank.shot_dist > kLegacyRange) {
@@ -395,14 +284,14 @@ ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
         return direct;
     }
 
-    // 直线能射且不算差 → 不换（借墙天生更远更慢，只在直线没戏时换角度）
+    // 直线能射且不算差 → 不换；借墙须比直线好 kBankMargin 才采纳
     if (direct.viable && direct.quality >= kBankDirectWeak) { g_bank_prev = false; return direct; }
 
     ShootPlan bank = build_bank(wm, kFarShotEnabled ? kMaxShotFar : kMaxShotNormal);
     if (bank.viable && bank.bank_quality >= kBankMinQ &&
         bank.bank_quality >= direct.quality + kBankMargin) {
-        ++g_bank_frames;                          // 统计：本帧采纳了借墙方案
-        if (!g_bank_prev) ++g_bank_plans;         // 上一次不是借墙 → 记一次**新机会**（上升沿）
+        ++g_bank_frames;
+        if (!g_bank_prev) ++g_bank_plans;
         g_bank_prev = true;
         return bank;
     }
@@ -412,12 +301,10 @@ ShootPlan plan_shoot(const WorldModel &wm, int /*shooter_id*/) {
 
 ShootPlan plan_bank_carry(const WorldModel &wm) {
     if (!kBankEnabled) return ShootPlan{};
-    // 测试档（第 96 轮）：关掉蜂群借墙推进 ⇒ 借墙只可能由主攻一个人发起（用户要的"一个队员"）
     if (kBankForceTest >= 0.5) return ShootPlan{};
     return build_bank(wm, kBankCarryMax);
 }
 
-// 统计接口（声明见 shoot.hpp）
 long bank_plan_count() { return g_bank_plans; }
 long bank_frame_count() { return g_bank_frames; }
 

@@ -10,38 +10,29 @@ Situation SituationModule::analyze(const WorldModel &wm) {
     const TeamContext &ctx = wm.ctx;
     double bx = wm.ball.x, by = wm.ball.y;
 
-    // 球权：简版 = 最近的人是否是自己人（距离阈值）
+    // 球权判定：20cm 内且比对方近 5cm 才算明确控球，否则按最近距离兜底
     double our_min = 1e9, opp_min = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         our_min = std::min(our_min, dist(bx, by, wm.home[i].x, wm.home[i].y));
         opp_min = std::min(opp_min, dist(bx, by, wm.opp[i].x, wm.opp[i].y));
     }
     bool by_distance = (our_min < opp_min) && (our_min < 20.0);
-    // —— 球权来源（2026-09-28 改：兜底不再信平台 whosBall）——
-    //   真机标定结论：平台 Environment.whosBall 语义不可靠（实测整场 84% 报 1=我方，明显错），
-    //   用它兜底会误判"自己持球"→ 关掉前场逼抢/双人包夹 → 对方带球长驱直入无人防。
-    //   所以 whosBall 只保留作"标定诊断计数"（whos_mismatch），不再参与 we_have_ball 判定。
-    //   判定改成纯距离自算：明确我方/明确对方（20cm 内且比对方近 5cm）→ 否则 by_distance 兜底。
-    //   （12cm 门槛太紧：带球者通常离球 10~25cm，落在"既不明确我方也不明确对方"的夹缝，
-    //   只能掉进不可靠的 whosBall 兜底。放宽到 20cm 把带球状态接住。）
-    bool near_ours   = (our_min < 20.0) && (our_min + 5.0 < opp_min);   // 明确我方控球
-    bool near_theirs = (opp_min < 20.0) && (opp_min + 5.0 < our_min);   // 明确对方控球
+    // 平台 whosBall 语义不可靠，只留作标定计数（whos_mismatch）
+    bool near_ours   = (our_min < 20.0) && (our_min + 5.0 < opp_min);
+    bool near_theirs = (opp_min < 20.0) && (opp_min + 5.0 < our_min);
     if (near_ours) {
         sit.we_have_ball = true;
     } else if (near_theirs) {
         sit.we_have_ball = false;
     } else {
-        sit.we_have_ball = by_distance;   // 散球/混战/带球贴身 → 距离自算兜底
+        sit.we_have_ball = by_distance;
     }
-    // 标定用：只要平台给了值，就记录它与自算判据是否一致（真机跑一场看多数是否一致）
     if (wm.whos_ball != 0) sit.whos_mismatch = ((wm.whos_ball == 1) != by_distance);
 
-    // 半场/禁区判断（参数化）
     sit.ball_in_our_half = ctx.attack_dir() > 0 ? (bx < 110.0) : (bx > 110.0);
     sit.ball_in_our_penalty = in_penalty_area(ctx, bx, by);
     sit.ball_in_opp_penalty = in_opp_penalty_area(ctx, bx, by);
 
-    // 威胁等级
     if (sit.ball_in_our_penalty && !sit.we_have_ball)      sit.threat_level = 1.0;
     else if (sit.ball_in_our_half && !sit.we_have_ball)    sit.threat_level = 0.6;
     else if (sit.we_have_ball)                             sit.threat_level = 0.1;
@@ -54,11 +45,11 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     double bx = wm.ball.x, by = wm.ball.y;
     if (!wm.ball.valid) return;
 
-    double ad = ctx.attack_dir();   // +1 或 -1
+    double ad = ctx.attack_dir();
     double gx = ctx.our_goal_x();
     bool attack = (wm.team_state == TS_ATTACK);
 
-    // —— 防守锚点（PASSIVE/中卫）：球-己方球门连线，距门约 50cm（攻防共用）——
+    // 防守锚点：球-己方门连线，距门约 50cm（攻防共用）
     double gy = 90.0;
     double d = dist(bx, by, gx, gy);
     if (d > 30) {
@@ -70,35 +61,22 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.passive_y = 90.0;
     }
 
-    // 对方罚球区外沿（进攻方站位不进入对方禁区，留 5cm 余量）
     double opp_box_edge = ctx.opp_goal_x() - ad * 85.0;
 
-    // —— 助攻/中场目标点（先算局部变量，走滞回后再写入）——
     double ax, ay, mx, my;
     if (attack) {
-        // 进攻态：助攻球前 40cm 偏上、中场中线前压 0.5 偏下，均不进入对方禁区
         ax = clamp(bx + ad * 40.0, 15.0, 205.0);
         ay = clamp(by + 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, ax, ay)) ax = opp_box_edge;
         mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
         my = clamp(by - 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, mx, my)) mx = opp_box_edge;
-        // 门前半撤：球攻进对方罚球区时——assist 留禁区外沿当近端短传出球点
-        // （治"主攻被围无近端接应"，参考 2008 心得「禁区内能安全倒开球是关键」），
-        // mid 回撤中线防反击。
-        // 触发条件除罚球区外，还包括球在对方门线附近 55cm 内（含门角外的球：
-        //   球滚到门角 y<72.5 或 >107.5 时不在罚球区判定内，但锚点会贴到门区线
-        //   附近 x≈55-59，落位振荡即踩线送点球——sim 诊断 f6861/f15621 实测）。
+        // 门前半撤：球进对方罚球区或门线 55cm 内时，assist 留禁区外沿、mid 回中线
         if (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < 55.0) {
             ax = opp_box_edge; mx = 110.0;
         }
     } else {
-        // 防守态：按威胁分级站位（docs/13 攻击强化 方案 C：防守也留反击支点）
-        //   威胁 <0.6（球在中场/对方半场，我方大概率能断到球）：assist/mid 站中线
-        //     偏对方半场 30cm 当反击支点——断球瞬间前场立刻有人接应，
-        //     不必等"反击窗口+跑位 100cm"（治真实 9/2 vs demo：assist/mid 全程
-        //     蹲防守位，断球后前场真空、ACTIVE 1 打 5）。
-        //   威胁 >=0.6（球在我们半场/门前）：回收中线两侧保纵深（原逻辑）。
+        // 防守态：威胁 <0.6 时 assist/mid 站中线偏前 30cm 当反击支点，否则回收中线
         if (wm.threat_level < 0.6) {
             ax = 110.0 + ad * 30.0;
             mx = 110.0 + ad * 30.0;
@@ -110,11 +88,9 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         my = clamp(by - 40.0, 20.0, 160.0);
     }
 
-    // —— 跑位前瞻修正：目标点附近有对手时，y 往空档侧挪开（别跑到别人怀里）——
-    //    参考 2008 战术心得「跑位要考虑对方会不会先到」，自研实现；
-    //    与现有约束合并：在滞回之前算，禁区外沿/门前回撤/己方禁区纪律仍生效。
-    const double kAvoidRadius = 25.0;    // 对手距目标点多近需要躲（cm）
-    const double kAvoidShift  = 30.0;    // 躲开的 y 位移（cm）
+    // 跑位前瞻：目标点附近有对手时，y 往空档侧挪开（躲人半径 25cm、位移 30cm）
+    const double kAvoidRadius = 25.0;
+    const double kAvoidShift  = 30.0;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (dist(wm.opp[i].x, wm.opp[i].y, ax, ay) < kAvoidRadius) {
             ay = (wm.opp[i].y >= ay) ? ay - kAvoidShift : ay + kAvoidShift;
@@ -126,26 +102,19 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         }
     }
 
-    // —— 锚点滞回：目标变化 < kAnchorHysteresis 不更新 ——
-    //    均速落后 demo 的主因之一：追着每帧移动的锚点频繁变向（差速轮转向慢吃速度）。
-    //    目标点冻结 → 机器人跑直线、到位等待，少无效转向。防守锚点不设滞回（要响应快）。
-    const double kAnchorHysteresis = 15.0;   // cm（可调，见 docs/06）
+    // 锚点滞回 15cm：变化小于此不更新，防追着每帧移动的锚点频繁变向（防守锚点不设）
+    const double kAnchorHysteresis = 15.0;
     if (dist(ax, ay, wm.assist_x, wm.assist_y) >= kAnchorHysteresis) { wm.assist_x = ax; wm.assist_y = ay; }
     if (dist(mx, my, wm.mid_x, wm.mid_y) >= kAnchorHysteresis)       { wm.mid_x = mx;  wm.mid_y = my; }
 
-    // 高位防守：球在对方半场时，防守线前压（防全缩后场，攻防均适用）
     bool ball_opp_half = (ad > 0) ? (bx > 110.0) : (bx < 110.0);
     if (ball_opp_half) {
         wm.passive_x = (ad > 0) ? std::max(wm.passive_x, 65.0)
                                  : std::min(wm.passive_x, 155.0);
     }
-    // —— 防守堆叠纪律（短期第4项）：三台区域防守者两两最小间距，防扎堆互撞 ——
-    //   真机常出现多台防守挤成一团（互相干扰/拖球乌龙/送点球）。在锚点层做两两分离：
-    //   任意两台间距 < kDefenseMinSep → 沿连线各推一半；2 轮对称推开基本稳定。
-    //   只约束锚点层；动态目标（人盯人/二抢一/断球点）仍由各角色自由站位。
-    //   放在下方禁区纪律**之前**：分离若意外压入禁区，纪律 clamp 会在后面兜住。
+    // 防守堆叠纪律：三台区域防守者两两最小间距 20cm，沿连线各推一半（2 轮）
     {
-        const double kDefenseMinSep = 20.0;   // 两两最小间距(cm)
+        const double kDefenseMinSep = 20.0;
         for (int it = 0; it < 2; ++it) {
             double ax[3] = { wm.passive_x, wm.assist_x, wm.mid_x };
             double ay[3] = { wm.passive_y, wm.assist_y, wm.mid_y };
@@ -154,14 +123,13 @@ void SituationModule::update_stand_points(WorldModel &wm) {
                     double dx = ax[b] - ax[a], dy = ay[b] - ay[a];
                     double d = std::hypot(dx, dy);
                     if (d >= kDefenseMinSep) continue;
-                    if (d < 1e-6) { dx = 0.0; dy = 1.0; d = 1.0; }   // 完全重合 → 沿 y 推开
+                    if (d < 1e-6) { dx = 0.0; dy = 1.0; d = 1.0; }
                     double push = (kDefenseMinSep - d) * 0.5;
                     double ux = dx / d, uy = dy / d;
                     ax[a] -= ux * push; ay[a] -= uy * push;
                     ax[b] += ux * push; ay[b] += uy * push;
                 }
             }
-            // 写回并夹场地边界（推开可能出界）
             wm.passive_x = clamp(ax[0], 10.0, 210.0);
             wm.passive_y = clamp(ay[0], 10.0, 170.0);
             wm.assist_x  = clamp(ax[1], 15.0, 205.0);
@@ -170,7 +138,7 @@ void SituationModule::update_stand_points(WorldModel &wm) {
             wm.mid_y     = clamp(ay[2], 20.0, 160.0);
         }
     }
-    // 己方禁区纪律：防守点/助攻点/中场点不得进入己方门区与罚球区（防堆叠送点）
+    // 己方禁区纪律：三个锚点不得进己方门区/罚球区（防堆叠送点）
     if (in_goal_area(ctx, wm.passive_x, wm.passive_y))
         wm.passive_x = clamp(gx + ad * 55.0, 10.0, 210.0);
     if (in_penalty_area(ctx, wm.passive_x, wm.passive_y))
@@ -179,15 +147,9 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         wm.assist_x = clamp(gx + ad * 85.0, 15.0, 205.0);
     if (in_penalty_area(ctx, wm.mid_x, wm.mid_y))
         wm.mid_x = clamp(gx + ad * 85.0, 15.0, 205.0);
-    // 对方门区防护带（禁区纪律-进攻侧）：防守锚点也不得进入对方门前 65cm 以内。
-    //   球被压到对方门前时，球-门连线 50cm 锚点会落在门区线正上方（x≈50~60），
-    //   落位振荡即踩线送点球（sim 诊断 f15621/f23607：passive 在真门区 x≈47-50）。
-    //   镜像己方纪律：与对方门线保持 15cm 余量（65 = 门区深 50 + 余量 15，
-    //   与 clamp_out_opp_goal_area 口径一致；10cm 余量实测违规回升且得分无改善）。
+    // 防守锚点也不进对方门前 65cm 以内（对方门区深 50 + 15cm 余量）
     if (ad < 0) {
         wm.passive_x = std::max(wm.passive_x, 65.0);     // 蓝方守 x=220：不进 x<65
-        // 助攻/中场同样受门区纪律约束（sim 诊断 f16376：ASSIST 落位/穿行对方
-        //   门区 x≈32-47 连续 21+ 帧送点球；进攻站 x=85 不受影响）
         wm.assist_x  = std::max(wm.assist_x, 65.0);
         wm.mid_x     = std::max(wm.mid_x, 65.0);
     } else {

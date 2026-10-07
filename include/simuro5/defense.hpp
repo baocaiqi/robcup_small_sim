@@ -1,76 +1,34 @@
-// ============================================================
-// defense.hpp — 区域防守：断球点计算工具箱（队员 D 负责）
-//
-// 核心思路（用三角函数算断球点）：
-//   球在场上近似匀速直线运动，其运动方向角 θ = atan2(vy, vx)，
-//   斜率 k = vy/vx = tan(θ)。防守队员不再站「球-己方球门连线」上
-//   那个静态点，而是站到球【真实运动轨迹】上：沿 θ 方向外推，
-//   求轨迹与「球门前拦截线」的交点 —— 提前占住这条轨迹，球自己
-//   滚过来被断。
-//
-//   对比旧版「球-门连线 50cm 点」：
-//     · 旧版只堵门（防正面射门），球斜着滚时站位会偏，断不到；
-//     · 新版沿真实运动方向站位，斜向球也能正对轨迹断下。
-//
-// 本文件同时提供球轨迹外推工具，供守门员 run_goalie 的「出击预判」
-// 复用（见 roles.cpp）。
-// ============================================================
+// defense.hpp — 区域防守：断球点计算工具箱（原点左下角 cm；蓝队守 x=220 的右门）
 #ifndef SIMURO5_DEFENSE_HPP
 #define SIMURO5_DEFENSE_HPP
 
 #include "simuro5/world_model.hpp"
 #include "simuro5/geometry.hpp"
-#include "simuro5/field_info.hpp"   // ball_wall_rest()/ball_wall_fric()：撞墙实测系数
+#include "simuro5/field_info.hpp"
 
 namespace simuro5 {
 
-// ============================================================
-// 球轨迹外推工具（纯函数，可独立单测）
-// ============================================================
-
-// 球速大小（cm/帧 量级；速度由 world_model 用「本帧-上帧」差分得到）
+// 球速大小 / 朝己方门心速度分量 / 朝某点(px,py)速度分量（cm/帧；后两者只取投影，背离为 0）
 inline double ball_speed(double vx, double vy) {
     return std::hypot(vx, vy);
 }
 
-// 球朝「己方球门心」方向的速度分量（cm/帧）。
-//   点积投影：把球速向量投到「球→门心」方向上，等价 |v|·cos(θ)，
-//   θ = 速度方向与门方向的夹角。朝门=正（全速），横滚≈0，背离门→负值截成 0。
-//   与 ball_speed（原始速率）的区别：只看「朝门」这个方向有没有威胁，
-//   横着滚 / 往对方门滚的球即使很快，也不构成我方门前威胁。
-//   供守门员站位深度 + 持球者威胁使用。
 inline double ball_danger_speed(const WorldModel &wm) {
     double gx = wm.ctx.our_goal_x();
-    double dx = gx - wm.ball.x, dy = 90.0 - wm.ball.y;   // 球 → 门心 方向向量
+    double dx = gx - wm.ball.x, dy = 90.0 - wm.ball.y;
     double d = std::hypot(dx, dy);
     if (d < 1e-6) return 0.0;
     return std::max(0.0, (wm.ball.vx * dx + wm.ball.vy * dy) / d);
 }
 
-// 球朝「某点 (px, py)」方向的速度分量（cm/帧）：判断球是否正冲向该点。
-//   人盯人专用：球正朝某球员飞（快传/直塞）→ 该球员即将接球，威胁上升。
-//   与 ball_danger_speed 的区别：投影基准是「球→该球员」，不是「球→门」。
 inline double ball_approach_speed(const WorldModel &wm, double px, double py) {
-    double dx = px - wm.ball.x, dy = py - wm.ball.y;     // 球 → 该球员 方向向量
+    double dx = px - wm.ball.x, dy = py - wm.ball.y;
     double d = std::hypot(dx, dy);
     if (d < 1e-6) return 0.0;
     return std::max(0.0, (wm.ball.vx * dx + wm.ball.vy * dy) / d);
 }
 
-// 球从 (x, y) 以速度 (vx, vy) 匀速直线运动，预测它到达
-// 「竖线 x = target_x」时的 y 坐标。
-//
-// 三角函数原理（写在这里是为了把公式和直觉对上）：
-//   运动方向角 θ = atan2(vy, vx) —— 这是唯一用到三角函数的地方；
-//   到达 target_x 需要的时间 t = (target_x - x) / vx；
-//   此时 y = y + vy * t = y + k * (target_x - x)，其中 k = vy/vx = tan(θ)。
-//
-// 代码里直接用代数形式（等价于 tan θ 的斜率），比「先 atan2 求角、
-// 再 tan 反算」少一次往返、也避免 θ 接近 ±90° 时的数值问题。
-//
-// 返回 false（没有有效交点）：
-//   - |vx| ≈ 0：球几乎只沿 y 方向滚，永远到不了这条竖线；
-//   - t < 0：球背离 target_x 运动（时间倒流，说明球不是朝这个方向来）。
+// 球匀速直线到竖线 x=target_x 时的 y；false = |vx|≈0 或球背离（t<0）
 inline bool predict_y_at_x(double x, double y, double vx, double vy,
                            double target_x, double &out_y) {
     if (std::fabs(vx) < 1e-9) return false;
@@ -80,56 +38,40 @@ inline bool predict_y_at_x(double x, double y, double vx, double vy,
     return true;
 }
 
-// 带边墙反弹的轨迹预测：同 predict_y_at_x，但球中途撞 y=0 / y=180 边墙时折返，
-//   预测反射后到达 target_x 时的 y。
-//   ⚠️ 2026-09-14 修正（docs/06 第 65 轮）：**不是理想镜面**！118 场真机 rlg 实测
-//     法向恢复 0.66、切向保持 0.81 ⇒ 反射后法向速度砍掉 1/3、切向也降 19%
-//     ⇒ 出射线比镜面预测更"贴墙"。原来按 -vy 折返（法向 ×1.0）会把落点算得离墙偏远，
-//     后卫/门将按它站位就会站偏。系数统一取自 field_info.hpp 的 ball_wall_rest()/ball_wall_fric()。
-//   只处理一次 y 墙反射；多次反射概率低、且断球点本就该保守回退，不做。
-//   供区域防守断球点 intercept_point 用——球朝边线滚时直线外推会算出界，
-//   实际球会弹回来，按反射后轨迹站位才断得到。
+// 同上但含一次 y 边墙反弹（实测非镜面：法向×0.66、切向×0.81；只算一次反射）
 inline bool predict_y_at_x_reflect(double x, double y, double vx, double vy,
                                    double target_x, double &out_y) {
     if (std::fabs(vx) < 1e-9) return false;
     double t_total = (target_x - x) / vx;
     if (t_total < 0.0) return false;
-    double y_end = y + vy * t_total;              // 直线终点
-    if (y_end >= 0.0 && y_end <= 180.0) {         // 不撞边墙：同直线
+    double y_end = y + vy * t_total;
+    if (y_end >= 0.0 && y_end <= 180.0) {
         out_y = y_end;
         return true;
     }
-    // 撞 y 墙：法向反号并乘恢复系数、切向乘保持系数。y_end 出界 ⇒ vy 必非 0。
     const double kRest = ball_wall_rest(), kFric = ball_wall_fric();
     double wall_y = (y_end < 0.0) ? 0.0 : 180.0;
-    double t_wall = (wall_y - y) / vy;            // 到达墙的时间
-    double x_wall = x + vx * t_wall;              // 撞墙点
-    double vx2 = vx * kFric, vy2 = -vy * kRest;   // 反射后的速度分量
+    double t_wall = (wall_y - y) / vy;
+    double x_wall = x + vx * t_wall;
+    double vx2 = vx * kFric, vy2 = -vy * kRest;
     if (std::fabs(vx2) < 1e-9) return false;
-    double t_rem = (target_x - x_wall) / vx2;     // 反射后还要走多久（vx2 与 vx 同号）
+    double t_rem = (target_x - x_wall) / vx2;
     if (t_rem < 0.0) return false;
     out_y = wall_y + vy2 * t_rem;
     return true;
 }
 
-// 对方射门是否「在门框内且朝门」：球会到达己方门线且落点在门宽内。
-//   复用 predict_y_at_x（匀速直线外推），供后卫抢反弹位 + 后续防补射用。
+// 对方射门是否在门框内且朝门（门宽 40 → y∈[70,110]）
 inline bool shot_on_target(const WorldModel &wm) {
     double y_at_goal = 90.0;
     if (!predict_y_at_x(wm.ball.x, wm.ball.y, wm.ball.vx, wm.ball.vy,
                         wm.ctx.our_goal_x(), y_at_goal))
         return false;
-    const double half = TeamContext::GOAL_WIDTH / 2.0;   // 门宽 40 → 半宽 20，门范围 [70,110]
+    const double half = TeamContext::GOAL_WIDTH / 2.0;
     return y_at_goal >= 90.0 - half && y_at_goal <= 90.0 + half;
 }
 
-// ============================================================
-// 防守/守门共用小工具（去重复：原先散在 run_goalie / pick_mark_target /
-//   double_team_point / run_passive 里的同一段扫描/侧向判断提出来共用）
-// ============================================================
-
-// 找离球最近的对方球员下标（0~4），并回填其到球距离（dmin 可为空）。
-//   run_goalie 的持球者判定、pick_mark_target / double_team_point 的 dribbler 都复用。
+// 离球最近的对方球员下标(0~4，回填距离 cm) / 该距离(cm)
 inline int nearest_opp_to_ball(const WorldModel &wm, double *dmin = nullptr) {
     int best = -1;
     double bd = 1e9;
@@ -141,50 +83,39 @@ inline int nearest_opp_to_ball(const WorldModel &wm, double *dmin = nullptr) {
     return best;
 }
 
-// 最近对方球员离球的距离（cm）。run_goalie 的 opp_dmin_door、run_passive 的 opp_dmin 复用。
 inline double opp_clear_dist(const WorldModel &wm) {
     double dmin = 1e9;
     nearest_opp_to_ball(wm, &dmin);
     return dmin;
 }
 
-// 球门在球的哪一侧：+1 = 球门在球的 +x 侧，-1 = 球门在球的 -x 侧。
-//   用于"门将相对球站在门侧还是场侧"的判断（贴门线防乌龙 / 门球重启 / 解围绕行）。
+// 球门在球的哪一侧：+1 = 门在球 +x 侧（门将判断站门侧还是场侧）
 inline double ball_goal_side(const TeamContext &ctx, double bx) {
     return (ctx.our_goal_x() > bx) ? 1.0 : -1.0;
 }
 
-// 门将封角度深度（cm）：站到球-门连线上、球前 12cm 处，深度夹在 [guard_dist, 40]。
-//   run_goalie 里「对方持球门口封角度」「压门封角度」「慢速盘带压门」三处共用此公式。
+// 门将封角度深度(cm)：球-门连线上球前 12cm，夹在 [guard_dist, 40]
 inline double goalie_block_depth(const TeamContext &ctx, double bx, double guard_dist) {
     return std::min(40.0, std::max(guard_dist, ctx.dist_our_goal(bx) - 12.0));
 }
 
-// 门前抢反弹位：对方射门在门框内时，站位到罚球区前缘、预测入球点 y 上下两侧，
-//   准备抢门将扑出/挡出的二次球（防补射）。
-//   y_side：+30 上侧 / -30 下侧（与 assist/midfield 的 ±30 分散一致）。
-// 2026-09-14 升级（用户指令"全部优化"）：
-//   ① 预测换**带边墙反射**版：球贴边墙滚时直线外推会把落点算到场外/错侧 ✗
-//   ② 反弹方向不再盲目 ±30 平分：本平台门将挡球是**径向反弹**（球被弹出方向 ≈
-//      「门将→球」方向）⇒ 球从门将站位的哪一侧来，就往哪一侧弹 ⇒ 落点加一个偏向
-//   ③ 落点若已被对手（补射者）占住 ⇒ 往空档侧让开 20cm
+// 门前抢反弹位：罚球区前缘、预测入球点 ±y_side（+30 上侧 / -30 下侧），
+//   带边墙反射预测 + 按门将站位偏向 + 落点被对手占住则让开 20cm；最小朝门速度 8cm/帧
 inline void rebound_point(const WorldModel &wm, double y_side, double &x, double &y) {
     const TeamContext &ctx = wm.ctx;
     double y_at_goal = 90.0;
     if (!predict_y_at_x_reflect(wm.ball.x, wm.ball.y, wm.ball.vx, wm.ball.vy,
                                 ctx.our_goal_x(), y_at_goal))
-        y_at_goal = wm.ball.y;                        // 球不朝门：退化成按当前 y
-    // 门将 = 离己方门线最近的对手
+        y_at_goal = wm.ball.y;
     double gk_y = 90.0, gk_best = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         double d = std::fabs(wm.opp[i].x - ctx.our_goal_x());
         if (d < gk_best) { gk_best = d; gk_y = wm.opp[i].y; }
     }
-    double miss = y_at_goal - gk_y;                    // >0 = 球从门将上侧擦过
+    double miss = y_at_goal - gk_y;
     double bias = (std::fabs(miss) < 5.0) ? 0.0 : ((miss > 0.0) ? 1.0 : -1.0);
-    x = ctx.our_goal_x() + ctx.attack_dir() * 80.0;    // 罚球区前缘
+    x = ctx.our_goal_x() + ctx.attack_dir() * 80.0;
     y = clamp(y_at_goal + y_side + bias * 8.0, 72.5, 107.5);
-    // 对手补射者已在落点附近 → 往空档侧让开
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (dist(wm.opp[i].x, wm.opp[i].y, x, y) < 25.0) {
             y = clamp((wm.opp[i].y >= y) ? y - 20.0 : y + 20.0, 72.5, 107.5);
@@ -192,22 +123,13 @@ inline void rebound_point(const WorldModel &wm, double y_side, double &x, double
     }
 }
 
-// 抢反弹位的最小朝门速度(cm/帧)：低于此视为慢球/带球，不抢反弹——
-//   提前站过去浪费体力还留空档，只有真射门（快球朝门）才值得抢二次球。
 inline double rebound_min_danger() { return 8.0; }
 
-// ============================================================
-// 对方"要出脚"的方向预测（docs/06 第 71 轮，用户 2026-09-15 指令）
-//   平台规则「球出射方向 ≈ 撞球瞬间的机头方向」只在**前推**时成立：
-//   对方倒着撞球时球会沿运动方向出去（真机实证：我方点球帧 896 起球被顶向自家门，
-//   机头朝 −x 而球朝 +x）。
-//   所以只在三个条件同时成立时才采信它的 rot：① 球几乎静止 ② 对手贴近球(≤25cm)
-//   ③ 它的机头大致指着球(≤35°)。球在动时一律交给轨迹外推，不看向。
-// ============================================================
+// 对方出脚方向预测：仅「球静止 + 对手贴球 ≤25cm + 机头对球 ≤35°」才采信
 inline bool opp_kick_direction(const WorldModel &wm, double &dx, double &dy, int &who) {
     who = -1;
     if (!wm.ball.valid) return false;
-    if (std::hypot(wm.ball.vx, wm.ball.vy) > 1.0) return false;       // ① 球在动 → 不用朝向
+    if (std::hypot(wm.ball.vx, wm.ball.vy) > 1.0) return false;       // ① 球在动
     double dmin = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         const double d = dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y);
@@ -215,26 +137,18 @@ inline bool opp_kick_direction(const WorldModel &wm, double &dx, double &dy, int
     }
     if (who < 0 || dmin > 25.0) return false;                         // ② 没人贴球
     const double to_ball = angle_to(wm.opp[who].x, wm.opp[who].y, wm.ball.x, wm.ball.y);
-    if (std::fabs(angle_diff(wm.opp[who].rot, to_ball)) > 35.0) return false;   // ③ 机头没对着球
+    if (std::fabs(angle_diff(wm.opp[who].rot, to_ball)) > 35.0) return false;
     const double ra = wm.opp[who].rot * SIMURO5_PI / 180.0;
     dx = std::cos(ra); dy = std::sin(ra);
     return true;
 }
 
-// 由预测方向推"球会从我们门线哪个 y 进"；只在落进门框内时返回 true（供门将提前站位）
-// 开关（用户 2026-09-15 指令：**需要**这个功能 → 默认开）：
-//   ⚠️ **sim A/B 反对**：开=净胜 +0.12、把触发收紧到门前 120cm=−0.32，
-//   都低于不开时的 +0.48（同 seed，见 docs/06 第 71 轮）。原因推断：脚本对手的
-//   "机头对球"时刻与真机 demo 不同，且门将提前离开常规站位本身有代价。
-//   真机对手是官方 demo（出脚基本是前推）⇒ 只能真机裁决；真机若防守变差，
-//   把这里改 false 即回退（单常量）。
 inline constexpr bool kOppKickPredict = true;
 
+// 由预测方向推球从门线哪个 y 进（开关 kOppKickPredict 单常量可回退）；仅门框内且门前 120cm 内
 inline bool opp_kick_target_y(const WorldModel &wm, double &y_at_goal) {
     if (!kOppKickPredict) return false;
     double dx = 0.0, dy = 0.0; int who = -1;
-    // 只在**我方门前 120cm 内**才值得提前封线：中场/对方半场的静止球，
-    //   即使对手贴球，射线打到我们门线也是巧合（sim A/B 实测放宽后净胜 +0.48→+0.12）。
     if (wm.ctx.dist_our_goal(wm.ball.x) > 120.0) return false;
     if (!opp_kick_direction(wm, dx, dy, who)) return false;
     if (!predict_y_at_x(wm.ball.x, wm.ball.y, dx, dy, wm.ctx.our_goal_x(), y_at_goal))
@@ -242,157 +156,68 @@ inline bool opp_kick_target_y(const WorldModel &wm, double &y_at_goal) {
     return y_at_goal >= goal_y_low() && y_at_goal <= goal_y_high();
 }
 
-// ============================================================
-// 防守计划
-// ============================================================
+// 防守计划：断球点 cm / 是否朝己方门逼近 / 球速 cm/帧；face_incoming=true 时 aim_rot(-v 方向) 有效
 struct DefensePlan {
-    double target_x = 0, target_y = 90;   // 断球站位点（给 motion::position 用）
-    bool   approaching = false;           // 球是否朝己方球门逼近（有预判价值）
-    double ball_spd = 0;                  // 当前球速（cm/帧）
+    double target_x = 0, target_y = 90;
+    bool   approaching = false;
+    double ball_spd = 0;
 
-    // —— 迎球朝向（第 103 轮，用户指令："防守不能对准球冲过来的方向"）——
-    //   断球点落在球来路上时，同时给出「机头该朝哪」= 球来向的反方向（-v）。
-    //   为什么必须给：本平台没有踢球动作，球被撞出去的方向 ≈ 撞球瞬间的机头方向
-    //   （见 motion.hpp 头注释）。只给位置不给朝向 ⇒ 防守者是斜着/侧着迎球，
-    //   球只被横着顶一下、动量没被抵消，继续朝自家门滚。
-    //   face_incoming=false 表示"这次给的不是球来路上的点"（静态卡位），调用方按老逻辑走。
-    double aim_rot = 0.0;                 // 迎球朝向（度，angle_to 口径）
-    bool   face_incoming = false;         // true = 执行方应「到位迎球站定」
+    double aim_rot = 0.0;
+    bool   face_incoming = false;
 };
 
-// 主入口：计算 2 号防守队员的断球点
-// defender_id：防守队员在 home[] 中的下标（用于「可达性判断」——我赶不赶得上）
+// 主入口：算 defender_id 的断球点（含可达性判断与静态点回退）
 DefensePlan plan_defense(const WorldModel &wm, int defender_id);
 
-// 球-门连线护门点（参考官方 demo CenterDefender 思想，自研实现）：
-//   demo 中卫永远钉在「球与门之间」——球远站球后 45cm、球进门前站门前 25cm 线，
-//   保证射门/冲锋路径上始终有人。这里按球距门分区给出护门站位：
-//     · 球距门 >100cm：球-门连线、球向门方向 45cm（中远距拦截点）
-//     · 球距门 45~100：门前 50cm 拦截线、y 跟球（压上断球）
-//     · 球距门 <45   ：门前 20cm 线、y 跟球（堵射门角度，对应 demo 门前 25cm）
-//   防守方进己方罚球区协防合法（规则只限制进攻方进对方门区），故不做禁区纪律；
-//   只 clamp 场地边界。由 run_passive「门前协防」分支在对方逼近时调用。
+// 球-门连线护门点：球距门 >100cm 站球后 45cm / 45~100 站门前 50cm / <45 站球前 8cm
 bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y);
 
-// 纯函数：断球点 = 球运动轨迹 ∩ 球门前 line_dist 处的拦截线
-//   拦截线是与球门线平行、位于球门前 line_dist 处的竖线：
-//     蓝队门 x=220 → 拦截线 x = 220 - 50 = 170（line_dist=50 时）
-//     黄队门 x=0   → 拦截线 x = 0   + 50 = 50
-// 返回 false 表示球没有朝门滚（无有效断球点），调用方应回退站位。
+// 断球点 = 球轨迹 ∩ 球门前 line_dist 处拦截线；false = 球没朝门滚（调用方回退）
 bool intercept_point(const WorldModel &wm, double line_dist,
                      double &ix, double &iy);
 
-// 主动截球（docs/15，参考 biswas2014「传球中途拦截」思想，自研实现）：
-//   补 intercept_point 的盲区——现有只算「球到门前拦截线」，横传/斜传的球
-//   根本滚不到那条线，所以全程没人管。本函数专管这些「在飞但不朝门」的球：
-//   沿球前进方向扫一串采样点，逐个问「我能不能比球先到」，找到最早可截点。
-//   返回 false（球慢/追不上/有人持球/落点不在防区）→ 交回 plan_defense 兜底。
+// 主动截球：沿球轨迹扫采样点，找最早「我比球先到」的点（补横传/斜传盲区）
 bool early_intercept_point(const WorldModel &wm, int defender_id,
                            double &out_x, double &out_y);
 
-// 会合点（第 103 轮，用户指令："接球需要提前到达位置"）：
-//   沿球未来轨迹逐帧往前推（含球速衰减），找第一个「我比球早到 lead_frames 帧」的点。
-//   为什么要"逐帧推"而不是求"球停点"：真机标定球每帧只衰减 0.992~0.994
-//   （sim_bench kBallDecay 同口径），6cm/帧的球理论上还能滚 600cm+ ⇒ "等球停下"等于永远等不到。
-//   能提前锁定的是**时间**：我几帧到、球几帧到。
-//   lead_frames 就是"提前量"：人到点时球还差这么多帧才到，这几帧用来转身迎球。
-//   返回 false（球停着 / 我追不上 / 会合点出界）→ 调用方回退原目标点。
-//   out_aim = 迎球朝向（球来向的反方向），可直接喂给 motion::arrive_facing。
+// 会合点：沿球未来轨迹逐帧外推（含衰减），找「我比球早到 lead_frames 帧」的点；out_aim=迎球朝向
 bool ball_meeting_point(const WorldModel &wm, double px, double py,
                         double my_speed, double lead_frames,
                         double &out_x, double &out_y, double &out_aim);
 
-// ============================================================
-// 人盯人（man-marking）：威胁打分 + 目标选择（队员 D 负责）
-// ============================================================
-
-// ============================================================
-// 犀利进攻防守档（defense.kSharpDefense 总开关，队员 D）
-// ------------------------------------------------------------
-// 手动开关：默认 0=关（防守行为与现状逐位一致）。真机遇到"进攻极其犀利"的
-// 对手（推进快、传切准、突破强、射门果断）时置 1，防守整体收紧——核心逻辑
-// （函数调用链、决策结构、所有防乌龙/防推球/禁区纪律护栏）一个字不动，只把
-// 几个关键数值切到更紧的档（见 docs/06）。
-// 开关本体是 defense.cpp 顶层的 TUNABLE(kSharpDefense)，本文件只提供读取函数
-// 和"犀利档"收紧值。收紧值先做内联常量，真机标定后再决定是否提 TUNABLE。
-// ============================================================
-// 读总开关（跨 TU：strategy/roles/defense 三处共用，defense.cpp 实现）。
+// 犀利进攻防守档：读总开关（defense.kSharpDefense）；收紧值 威胁升档 4cm/帧、贴距 12cm、预测 5 帧、λ 15cm
 bool sharp_defense_on();
 
-// —— 犀利档收紧值（只在开关打开时经下方各函数三元选择启用）——
-inline double sharp_danger_speed() { return 4.0; }   // 更早回防：威胁升档阈值(cm/帧)，默认 6
-inline double sharp_mark_dist()    { return 12.0; }  // 人盯人贴距(cm)，默认 16
-inline double sharp_mark_lead()    { return 5.0; }   // 盯人预测帧数，默认 3
-inline double sharp_mark_lambda()  { return 15.0; }  // 换人惩罚 λ(cm)，默认 25
+inline double sharp_danger_speed() { return 4.0; }
+inline double sharp_mark_dist()    { return 12.0; }
+inline double sharp_mark_lead()    { return 5.0; }
+inline double sharp_mark_lambda()  { return 15.0; }
 
-// 盯人距离：防守队员贴到被盯球员多近(cm)。
-//   太近(<8cm)会被判推球犯规，太远拦不住传/射。取 16cm 折中（原 12 实测超调到 8 犯规边）。
-//   犀利进攻档：收到 12cm，封死对方传射。
+// 盯人贴距(cm)：太近(<8cm)判推球犯规，取 16（犀利档 12）；预测帧数：按被盯者速度外推再站位，太大易超调
 inline double mark_dist() { return sharp_defense_on() ? sharp_mark_dist() : 16.0; }
 
-// 盯人预测帧数：用被盯者速度外推其未来位置再站位（速度前馈截击）。
-//   同速追逐追不上移动目标，预测「几帧后会在哪」才能截住；太大易超调、太小追不上。
-//   6→3（2026-08-26）：修正尺子后复盘实测 marker 平均离理想点 38~52cm「追不到」，
-//   6 帧外推(≈15cm)过冲、目标点每帧跳，marker 永远追不上；降到 3 帧更稳。
-//   犀利进攻档：对手快，外推提到 5 帧提前截击。
 inline double mark_lead() { return sharp_defense_on() ? sharp_mark_lead() : 3.0; }
 
-// 堵传球线站位距离(cm)：被盯者是接球者（非持球者）且离球在此距离内 →
-//   传球随时发生，marker 从 goal-side 换到「球→被盯者」连线，掐断传球。
-//   下界 15cm 是「持球者」判定（离球 <15 视为正持球，堵射门而非传球）。
+// 堵传球线距离 / 盯人危险门限(cm)：离球或离门够近才值得贴，否则回区域防守
 inline double mark_pass_lane_dist() { return 40.0; }
 
-// 盯人危险门限：被盯者必须离球或离门足够近才值得贴，否则回区域防守。
-//   复盘未贴住帧里 44~48% 被盯者离球 >40cm——追不危险的对手白费体力。
 inline double mark_engage_ball_dist() { return 40.0; }
 inline double mark_engage_goal_dist() { return 40.0; }
 
-// 威胁打分（纯函数，可直接单测）：分越高越该被盯。
-//   d_ball         ：该球员到球距离(cm)
-//   d_goal         ：该球员到己方球门线距离(cm)
-//   approach_speed ：球朝「该球员」的速度分量(cm/帧)——快传/直塞威胁
-//   danger_speed   ：球朝「己方球门」的速度分量(cm/帧)——持球突破威胁
-//   is_dribbler    ：该球员是否离球最近（持球者）
+// 威胁打分：越该被盯分越高（d_ball/d_goal 为 cm，approach/danger 为 cm/帧）
 double mark_threat(double d_ball, double d_goal,
                    double approach_speed, double danger_speed, bool is_dribbler);
 
-// 选出「进攻威胁最大」的对方球员下标(0~4)，含滞回 + 危险门限：
-//   对 5 人打 mark_threat 取 argmax；若上一帧目标(current_target)仍在，
-//   且新目标分数没超过它 10%，则继续盯旧目标——避免每帧换人原地转圈。
-//   最后做危险门限：被盯者须离球或离门够近才值得贴，否则返回 -1（回区域防守）。
-//   current_target：上一帧目标（-1=无）。返回新目标下标（-1=无人值得盯）。
+// 选威胁最大的对手下标(0~4)，含滞回与危险门限；-1 = 无人值得盯
 int pick_mark_target(const WorldModel &wm, int current_target);
 
-// ============================================================
-// 带权匈牙利盯人分配（第 97 轮，用户 2026-09-30 指令「使用带权的匈牙利算法」）
-// ------------------------------------------------------------
-// 把"谁盯谁"从**各自贪心**升级成**全队最优一一匹配**：
-//   行 = 可盯人的防守者（PASSIVE/ASSIST/MIDFIELD 里、非门将/非主攻/非清道夫/非逼抢者）；
-//   列 = 5 个对手 + 每个防守者一个"闲着"虚拟列；再补虚拟行表示"这个对手没人盯"。
-// 代价（全部可加，匈牙利才成立）：
-//   cost(i→j) = 我到"盯防点"的距离（EMA 平滑 + 量化）  +  λ ×（j 不是上一帧我盯的人）
-//   "没人盯 j" 的代价 = kMarkLeaveW × 威胁度(sim 里的 mark_threat)  ← 越危险越贵，所以危险的必然有人管
-//   "我闲着" 的代价   = 0                                          ← 对手不危险时，宁可站着不追（省体力）
-// 防抖动四件套（都在同一个最小化问题里，不改算法）：
-//   ① 换人惩罚 λ（kMarkLambda）② 代价 EMA 平滑（kMarkEma）③ 量化造平台（kMarkQuant）
-//   ④ 换人后的强化承诺帧（kMarkCommit：窗口内换回去要再加一个 λ）
-// 出参：wm.mark_assign[i] = 机器人 i 的对手（-1 = 不盯）。返回"真正被指派盯人的台数"（统计/单测用）。
-// 关掉：defense.kMarkHungarian=0 → 角色函数回退到旧的单目标贪心 pick_mark_target。
-// ⚠️ 全部自研实现（hungarian.hpp），没引第三方库（团队铁律 4）。
-// ============================================================
+// 带权匈牙利盯人分配（自研）：全队最优一一匹配，写回 mark_assign，返回被指派台数
 int assign_marks(WorldModel &wm);
 
-// 抢断唯一竞标（第 104 轮，用户指令「全局唯一竞标，只让 EV 最高的人出手」）：
-//   每帧全局算一次「谁该抢脚下球」，只让 EV 最高且 >0 的那一个防守者出手，
-//   其余人保持盯人/站位。取代原来散在 run_mark_body（逼抢）/run_passive（争抢上抢）
-//   里各自独立、只按「谁近谁抢」的判断——那是第 103 轮「多人同扑被过、身后漏人」的根因。
-//   出参：wm.stealer_id（唯一抢断者，-1=无人抢）。
+// 抢断唯一竞标：每帧只让 EV 最高且 >0 的一人抢球，写回 stealer_id（-1 = 无人抢）
 void steal_decide(WorldModel &wm);
 
-// 二抢一（双人夹击）站位：持球者带球推进到门前危险区时，为区域防守者
-//   （assist/midfield 中非清道夫、离持球者更近者）算夹抢点。
-//   defender_id：当前防守队员下标。返回 false=本轮不用夹抢（该防守者留在区域）。
-//   返回 true 时 (out_x, out_y) 为夹抢站位点（已夹场地边界 + 禁区纪律）。
+// 二抢一夹抢站位点；false = 本轮不夹抢（该防守者留区域）
 bool double_team_point(const WorldModel &wm, int defender_id,
                        double &out_x, double &out_y);
 
