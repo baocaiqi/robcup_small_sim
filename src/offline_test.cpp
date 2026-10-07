@@ -1028,6 +1028,167 @@ static int test_bank_force_test() {
     return 0;
 }
 
+// 走廊拐弯：边路无射门方案时把球往门前中路推，且准备点始终留在场内
+static int test_corridor_plan() {
+    const double prep_d = get_param("shoot.kCorridorPrepDist", 23.0);
+    const double margin = get_param("shoot.kCorridorMargin", 11.0);
+
+    {
+        TeamContext ctx{true};               // 蓝队：攻 x=0，对方门 y∈[70,110]
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 75; wm.ball.y = 25;      // 贴下边路、离门 99cm
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 30; }
+        wm.opp[0].x = 5; wm.opp[0].y = 90;   // 门将站门中央
+        ShootPlan p = plan_corridor(wm, 1);
+        if (!p.viable) { printf("FAIL: 边路应出走廊拐弯方案\n"); return 1; }
+        if (!p.corridor) { printf("FAIL: corridor 标志未置\n"); return 1; }
+        double dl = std::hypot(p.dir_x, p.dir_y);
+        if (fabs(dl - 1.0) > 1e-3) { printf("FAIL: corridor dir 非单位 (%.3f)\n", dl); return 1; }
+        if (p.dir_x >= 0.0) { printf("FAIL: 应朝对方门推 dir_x=%.2f\n", p.dir_x); return 1; }
+        if (p.dir_y <= 0.0) { printf("FAIL: 球在下边路应往上拐 dir_y=%.2f\n", p.dir_y); return 1; }
+        double py = wm.ball.y - p.dir_y * prep_d;
+        if (py < margin - 0.5 || py > TeamContext::FIELD_WIDTH - margin + 0.5) {
+            printf("FAIL: 准备点出界 py=%.1f (margin=%.1f)\n", py, margin); return 1;
+        }
+        if (fabs(p.aim_rot - angle_to(0, 0, p.dir_x, p.dir_y)) > 1e-6) {
+            printf("FAIL: corridor aim_rot 与 dir 不一致\n"); return 1;
+        }
+        if (p.aim_y < goal_y_low() || p.aim_y > goal_y_high()) {
+            printf("FAIL: 走廊门点出框 aim_y=%.1f\n", p.aim_y); return 1;
+        }
+        // 关键前提：这种边路位置本来不该有直线射门方案
+        if (plan_shoot(wm, 1).viable && plan_shoot(wm, 1).open_angle >= get_param("roles.kCorridorShotOpen", 12.0)) {
+            printf("FAIL: 边路开口过大，前提不成立 open=%.1f\n", plan_shoot(wm, 1).open_angle); return 1;
+        }
+    }
+    {
+        TeamContext ctx{true};
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 30; }
+        wm.opp[0].x = 5; wm.opp[0].y = 90;
+        wm.ball.x = 75; wm.ball.y = 90;      // 中路：不该拐弯，直接射
+        if (plan_corridor(wm, 1).viable) { printf("FAIL: 中路线不该出走廊方案\n"); return 1; }
+        wm.ball.x = 170; wm.ball.y = 25;     // 太远（>kCorridorMaxDist）：交给普通推进
+        if (plan_corridor(wm, 1).viable) { printf("FAIL: 超距不该出走廊方案\n"); return 1; }
+        wm.ball.x = 75; wm.ball.y = 25;
+        wm.in_penalty_exec = true;           // 点球执行期不拐弯
+        if (plan_corridor(wm, 1).viable) { printf("FAIL: 点球执行期不该出走廊方案\n"); return 1; }
+        wm.in_penalty_exec = false;
+    }
+    {
+        TeamContext ctx{false};              // 黄队镜像：守 x=0、攻 x=220
+        WorldModel wm;
+        wm.ctx = ctx;
+        wm.ball.valid = true;
+        wm.ball.x = 145; wm.ball.y = 155;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 70; wm.opp[i].y = 20 + i * 30; }
+        wm.opp[0].x = 215; wm.opp[0].y = 90;
+        ShootPlan p = plan_corridor(wm, 1);
+        if (!p.viable) { printf("FAIL: 黄队镜像应出走廊方案\n"); return 1; }
+        if (p.dir_x <= 0.0) { printf("FAIL: 黄队应朝 x=220 推 dir_x=%.2f\n", p.dir_x); return 1; }
+        if (p.dir_y >= 0.0) { printf("FAIL: 球在上边路应往下拐 dir_y=%.2f\n", p.dir_y); return 1; }
+    }
+    printf("corridor plan: OK (边路拐弯/方向朝门/准备点在场内/中路与超距不出/点球旁路/黄队镜像)\n");
+    return 0;
+}
+
+// 走廊拐弯的准备点约束：横向分量被夹住后，多脚推进仍应逐步把球带向中线
+static int test_corridor_progress() {
+    TeamContext ctx{true};
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+    for (int i = 0; i < 5; ++i) { wm.opp[i].x = 150; wm.opp[i].y = 20 + i * 30; }
+    wm.opp[0].x = 5; wm.opp[0].y = 90;
+
+    // 模拟沿推球方向连推 6 脚：球位应同时朝对方门（x 减小）和中线（|y-90| 减小）走
+    double bx = 70, by = 20;
+    double start_x = bx, start_lat = fabs(by - 90.0);
+    int moved = 0;
+    for (int step = 0; step < 6; ++step) {
+        wm.ball.x = bx; wm.ball.y = by;
+        ShootPlan p = plan_corridor(wm, 1);
+        if (!p.viable) break;
+        bx += p.dir_x * 18.0; by += p.dir_y * 18.0;   // 一脚推进 18cm
+        ++moved;
+    }
+    if (moved < 3) { printf("FAIL: 走廊方案中途断掉 (only %d steps)\n", moved); return 1; }
+    if (bx >= start_x) { printf("FAIL: 没朝对方门推进 %.1f→%.1f\n", start_x, bx); return 1; }
+    if (fabs(by - 90.0) >= start_lat) {
+        printf("FAIL: 没向中线靠拢 |y-90| %.1f→%.1f\n", start_lat, fabs(by - 90.0)); return 1;
+    }
+    printf("corridor progress: OK (连推 6 脚：x %.0f→%.0f，|y-90| %.0f→%.0f)\n",
+           start_x, bx, start_lat, fabs(by - 90.0));
+    return 0;
+}
+
+// 前场边路：助攻/中场锚点应改成「跟球尾随 + 向中路靠」，中路和远球仍是原来的球前点
+static int test_trail_stand() {
+    SituationModule sitm;
+    const double dist = get_param("situation.kTrailDist", 26.0);
+    const double pull = get_param("situation.kTrailPull", 0.45);
+
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};            // 蓝队：攻 x=0
+        wm.ball.valid = true;
+        wm.ball.x = 75; wm.ball.y = 25;        // 对方半场且贴下边路 → 该尾随
+        wm.team_state = TS_ATTACK;
+        wm.threat_level = 0.1;
+        wm.assist_x = 200; wm.assist_y = 170;  // 先放到远处，确保滞回会更新
+        wm.mid_x = 200; wm.mid_y = 170;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 210; wm.opp[i].y = 175; }
+        sitm.update_stand_points(wm);
+        double want_ax = wm.ball.x - wm.ctx.attack_dir() * dist;    // 蓝队 ad=-1 → 球后
+        double want_ay = wm.ball.y + (90.0 - wm.ball.y) * pull;
+        if (fabs(wm.assist_x - want_ax) > 3.0) {
+            printf("FAIL: 尾随位 x 应≈%.1f got %.1f\n", want_ax, wm.assist_x); return 1;
+        }
+        if (fabs(wm.assist_y - want_ay) > 3.0) {
+            printf("FAIL: 尾随位 y 应≈%.1f got %.1f\n", want_ay, wm.assist_y); return 1;
+        }
+        if (wm.assist_y >= wm.ball.y + 40.0 - 1.0) {
+            printf("FAIL: 尾随位应比旧的球前点更靠中路 got y=%.1f\n", wm.assist_y); return 1;
+        }
+    }
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.ball.valid = true;
+        wm.ball.x = 110; wm.ball.y = 90;       // 正在中路且离对方门 110cm（尾随区之外）→ 保持球前 40cm
+        wm.team_state = TS_ATTACK;
+        wm.threat_level = 0.1;
+        wm.assist_x = 200; wm.assist_y = 170;
+        wm.mid_x = 200; wm.mid_y = 170;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 210; wm.opp[i].y = 175; }
+        sitm.update_stand_points(wm);
+        if (fabs(wm.assist_x - 70.0) > 3.0 || fabs(wm.assist_y - 130.0) > 3.0) {
+            printf("FAIL: 中路线应保持球前点 got (%.1f,%.1f)\n", wm.assist_x, wm.assist_y); return 1;
+        }
+    }
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.ball.valid = true;
+        wm.ball.x = 175; wm.ball.y = 25;       // 离对方门 >110cm → 不尾随
+        wm.team_state = TS_ATTACK;
+        wm.threat_level = 0.1;
+        wm.assist_x = 200; wm.assist_y = 170;
+        wm.mid_x = 200; wm.mid_y = 170;
+        for (int i = 0; i < 5; ++i) { wm.opp[i].x = 210; wm.opp[i].y = 175; }
+        sitm.update_stand_points(wm);
+        if (fabs(wm.assist_x - 135.0) > 3.0) {
+            printf("FAIL: 后场不应尾随 got x=%.1f\n", wm.assist_x); return 1;
+        }
+    }
+    printf("trail stand: OK (前场边路尾随+靠中路/中路不变/后场不变)\n");
+    return 0;
+}
+
 // ACTIVE 门区停留超限后应撤出门区，而不是继续射门/带球
 static int test_active_ga_retreat() {
     TeamContext ctx{true};               // 蓝队：对方门区 x∈[0,50], y∈[75,105]
@@ -4233,6 +4394,9 @@ int main(int argc, char **argv) {
     rc |= test_shoot_plan();
     rc |= test_bank_shot();
     rc |= test_bank_force_test();
+    rc |= test_corridor_plan();
+    rc |= test_corridor_progress();
+    rc |= test_trail_stand();
     rc |= test_active_ga_retreat();
     rc |= test_active_corner_rescue();
     rc |= test_no_push_zone();

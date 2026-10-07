@@ -725,6 +725,10 @@ void run_goalie(WorldModel &wm, int id) {
 TUNABLE(kReboundRushSpeed, 7.34364);  // cm/帧：反弹球可抢速度阈值
 TUNABLE(kReboundRushDist, 51.3294);  // cm：距球超过此值不冲（就近补）
 TUNABLE(kMaxShootPushes, 1);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+// 净开口小于此角(度)就宁可先拐进中路：边路看门只有 12° 上下，中路有 67°
+TUNABLE(kCorridorShotOpen, 12.0);
+// 走廊拐弯总开关（1 开 0 关）；关掉即回到「边路硬推」的老行为
+TUNABLE(kCorridorEnabled, 1.0);
 TUNABLE(kPrepDist, 23.5578);
 TUNABLE(kPenaltyPrepDist, 15.0);
 double shoot_prep_dist(const WorldModel &wm) {
@@ -1229,8 +1233,15 @@ void run_active(WorldModel &wm, int id) {
         sp.target_x = wm.ball.x - cp.dir_x * 8.0; sp.target_y = wm.ball.y - cp.dir_y * 8.0;
         sp.viable = true;
     }
+    // 走廊拐弯：没射门机会、或机会窄到只有一条缝（边路看门本来就只有 12° 上下）时，
+    //   改推「球前中路」而不是往缝里捅
+    bool corridor_now = false;
+    if (kCorridorEnabled >= 0.5 && !coop_pass && (!sp.viable || sp.open_angle < kCorridorShotOpen)) {
+        ShootPlan ca = plan_corridor(wm, id);
+        if (ca.viable) { sp = ca; corridor_now = true; }
+    }
     // 点球执行期：瞄准方向只锁一次（每帧重算会让准备点漂移、折返时把球推偏）
-    if (wm.in_penalty_exec && sp.viable) {
+    if (!corridor_now && wm.in_penalty_exec && sp.viable) {
         if (!wm.pen_aim_locked) {
             wm.pen_aim_locked = true;
             wm.pen_aim_rot = sp.aim_rot;
@@ -1245,14 +1256,15 @@ void run_active(WorldModel &wm, int id) {
         }
     }
     // 射门机会闸门：≤70cm 无条件射；70~110cm 远射要 quality ≥ kShootNowQ（远射档已开启）
+    // 走廊拐弯不走质量闸门：它本来就是在「射门没机会」时才出现的
     const double kShootNowQ = 0.35;
-    bool shoot_now = sp.viable &&
-                     (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ || coop_pass);
-    if (shoot_now && (coop_pass || wm.shoot_push_count < kMaxShootPushes)) {
+    bool shoot_now = corridor_now ||
+                     (sp.viable && (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ || coop_pass));
+    if (shoot_now && (coop_pass || corridor_now || wm.shoot_push_count < kMaxShootPushes)) {
         double bx = wm.ball.x, by = wm.ball.y;
         int this_side = (sp.aim_y > 90.0) ? 1 : -1;
         // 变角推射：已推 >=2 次且仍瞄同一侧 → 强制换另一侧（借墙方案不适用）
-        if (!sp.bank && !coop_pass && wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
+        if (!sp.bank && !coop_pass && !corridor_now && wm.shoot_push_count >= 2 && wm.shoot_push_last_side == this_side &&
             wm.shoot_push_last_side != 0) {
             double ogx = ctx.opp_goal_x(), ad2 = ctx.attack_dir();
             double oy = 90.0 - (sp.aim_y - 90.0);
@@ -1355,7 +1367,7 @@ void run_active(WorldModel &wm, int id) {
                 auto &task = wm.coop_pass_task; task.observing_push = true;
                 task.push_ball_x = bx; task.push_ball_y = by; task.push_dir_x = sp.dir_x; task.push_dir_y = sp.dir_y;
             }
-            if (!coop_pass && wm.shoot_push_cd <= 0 && std::hypot(wm.ball.vx, wm.ball.vy) > 5.0) {
+            if (!coop_pass && !corridor_now && wm.shoot_push_cd <= 0 && std::hypot(wm.ball.vx, wm.ball.vy) > 5.0) {
                 ++wm.shoot_push_count;
                 wm.shoot_push_cd = 20;
                 wm.shoot_push_last_side = this_side;

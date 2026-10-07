@@ -59,6 +59,20 @@ constexpr bool kBankEnabled = true;
 // 真机借墙测试档：1 = 主攻只要几何合法就打墙（不看三道门槛）+ 关掉蜂群借墙推进，只测一个队员
 TUNABLE(kBankForceTest, 0.0);
 
+// 走廊拐弯参数：球在 x=30 时，从边路 y=20 看门只张开 12.6°，从中路 y=90 看是 67.4°（宽 5.4 倍）
+//   触发：离门 < MaxDist 且离中线 > MinLateral；离门 < MinDist 或离中线 < MinLateral 时交给正常射门
+TUNABLE(kCorridorMaxDist, 105.0);
+TUNABLE(kCorridorMinDist, 30.0);
+TUNABLE(kCorridorMinLateral, 22.0);
+// 走廊门点 = 门线前 Gate cm 处的中线，向离门将远的一侧偏 GkShift（避免直接把球推给门将）
+TUNABLE(kCorridorGate, 22.0);
+TUNABLE(kCorridorGkShift, 0.35);
+// 准备点距球 PrepDist cm，离边线留 Margin cm：球贴边线时横向分量被夹住 → 先往前推，多脚渐进拐进中路
+TUNABLE(kCorridorPrepDist, 23.0);
+TUNABLE(kCorridorMargin, 11.0);
+// 推进方向必须有的朝对方门分量（cos 下限）；太小说明只能横推，放弃交给别的分支
+TUNABLE(kCorridorMinFwd, 0.25);
+
 double deg(double rad) { return rad * 180.0 / SIMURO5_PI; }
 
 // 对方守门员 = 离对方门线最近者，返回下标并回填 y
@@ -303,6 +317,70 @@ ShootPlan plan_bank_carry(const WorldModel &wm) {
     if (!kBankEnabled) return ShootPlan{};
     if (kBankForceTest >= 0.5) return ShootPlan{};
     return build_bank(wm, kBankCarryMax);
+}
+
+// 走廊拐弯：把球从边路往门前中路推，让下一次射门面对更宽的门
+ShootPlan plan_corridor(const WorldModel &wm, int shooter_id) {
+    (void)shooter_id;
+    ShootPlan plan;
+    plan.corridor = true;
+    const TeamContext &ctx = wm.ctx;
+    if (wm.in_penalty_exec) return plan;
+
+    const double ad = ctx.attack_dir();
+    const double ogx = ctx.opp_goal_x();
+    const double bx = wm.ball.x, by = wm.ball.y;
+    const double dgoal = dist(bx, by, ogx, 90.0);
+    plan.shot_dist = dgoal;
+    if (dgoal > kCorridorMaxDist || dgoal < kCorridorMinDist) return plan;
+
+    const double lateral = std::fabs(by - 90.0);
+    if (lateral < kCorridorMinLateral) return plan;
+
+    // 门点：中线上门前 Gate 处（在场内一侧），向离门将远的一侧偏；两侧都试，取第一条不被挡的线路
+    double gky = 90.0;
+    const int gk_idx = find_opp_goalie(wm, ogx, gky);
+    const double gate_x = ogx - ad * kCorridorGate;
+    const double bias_dn = clamp(90.0 + (90.0 - gky) * kCorridorGkShift, goal_y_low() + 3.0, goal_y_high() - 3.0);
+    const double gate_try[2] = { bias_dn, 180.0 - bias_dn };
+
+    for (int t = 0; t < 2; ++t) {
+        const double gate_y = clamp(gate_try[t], goal_y_low() + 3.0, goal_y_high() - 3.0);
+
+        double dx = gate_x - bx, dy = gate_y - by;
+        const double len = std::hypot(dx, dy);
+        if (len < 1e-6) continue;
+        dx /= len; dy /= len;
+
+        // 准备点（球后 PrepDist，沿推球线）必须留在场内：夹住横向分量，剩余给朝前分量
+        const double y_lo_room = (by - kCorridorMargin) / kCorridorPrepDist;
+        const double y_hi_room = (TeamContext::FIELD_WIDTH - kCorridorMargin - by) / kCorridorPrepDist;
+        double uy = clamp(dy, -std::max(0.0, y_hi_room), std::max(0.0, y_lo_room));
+        const double ux_mag = std::sqrt(std::max(0.0, 1.0 - uy * uy));
+        if (ux_mag < kCorridorMinFwd) continue;          // 只能横推 → 交给别的分支
+        const double ux = ad * ux_mag;
+
+        // 前 LaneLen cm 有人挡 → 换另一侧门点
+        CircleObstacle obs[PLAYERS_PER_SIDE];
+        int no = 0;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            if (i == gk_idx) continue;                   // 门将用门点偏向绕开，不算挡
+            obs[no].x = wm.opp[i].x; obs[no].y = wm.opp[i].y; obs[no].r = kLaneBlockR;
+            ++no;
+        }
+        if (!segment_clear_of_circles(bx, by, bx + ux * kLaneLen, by + uy * kLaneLen, obs, no)) continue;
+
+        plan.dir_x = ux; plan.dir_y = uy;
+        plan.aim_rot = angle_to(0.0, 0.0, ux, uy);
+        plan.aim_y = gate_y;
+        plan.gate_y = gate_y;
+        plan.target_x = bx - ux * 8.0;
+        plan.target_y = by - uy * 8.0;
+        plan.quality = 0.0;
+        plan.viable = true;
+        return plan;
+    }
+    return plan;
 }
 
 long bank_plan_count() { return g_bank_plans; }

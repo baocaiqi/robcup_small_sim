@@ -24,6 +24,9 @@ struct ShootPlan {
     double bounce_x = 0.0;
     double bank_quality = 0.0;
     double path_len = 0.0;
+    // 走廊拐弯方案（corridor=true）：不是射门，是把球从边路往门前中路走廊推
+    bool   corridor = false;
+    double gate_y = 90.0;
 };
 
 // 算最佳射门方案（直线 vs 借墙）；viable=false 表示没机会
@@ -31,6 +34,9 @@ ShootPlan plan_shoot(const WorldModel &wm, int shooter_id);
 
 // 蜂群推进专用：只算借墙，射程放宽到 kBankCarryMax
 ShootPlan plan_bank_carry(const WorldModel &wm);
+
+// 走廊拐弯：边路没射门机会时把球往门前中路推（viable=false 表示该走别的分支）
+ShootPlan plan_corridor(const WorldModel &wm, int shooter_id);
 
 // 借墙统计：机会次数 / 采纳帧数
 long bank_plan_count();

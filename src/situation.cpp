@@ -2,8 +2,17 @@
 #include "simuro5/field_info.hpp"
 #include <cmath>
 #include <algorithm>
+#define TUNABLE_PREFIX "situation."
+#include "simuro5/tunable.hpp"
 
 namespace simuro5 {
+
+// 尾随接应（前场边路）：球后 TrailDist cm、向中路走廊靠 TrailPull；离对方门 TrailZone cm 内且偏离中线 TrailLateral 才启用
+TUNABLE(kTrailEnabled, 1.0);
+TUNABLE(kTrailZone, 110.0);
+TUNABLE(kTrailLateral, 22.0);
+TUNABLE(kTrailDist, 26.0);
+TUNABLE(kTrailPull, 0.45);
 
 Situation SituationModule::analyze(const WorldModel &wm) {
     Situation sit;
@@ -64,15 +73,24 @@ void SituationModule::update_stand_points(WorldModel &wm) {
     double opp_box_edge = ctx.opp_goal_x() - ad * 85.0;
 
     double ax, ay, mx, my;
+    bool trail = false;
     if (attack) {
         ax = clamp(bx + ad * 40.0, 15.0, 205.0);
         ay = clamp(by + 40.0, 20.0, 160.0);
+        // 前场边路：助攻改成「跟球尾随 + 向中路靠」——球脱脚时有人接，回做也有人抢点
+        //   原来的「球前 40cm 偏上」在这种局面落在人堆/边线外，前点后点都不占
+        if (kTrailEnabled >= 0.5 && ctx.dist_opp_goal(bx) < kTrailZone && std::fabs(by - 90.0) > kTrailLateral) {
+            ax = clamp(bx - ad * kTrailDist, 15.0, 205.0);
+            ay = clamp(by + (90.0 - by) * kTrailPull, 20.0, 160.0);
+            trail = true;
+        }
         if (in_opp_penalty_area(ctx, ax, ay)) ax = opp_box_edge;
         mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
         my = clamp(by - 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, mx, my)) mx = opp_box_edge;
         // 门前半撤：球进对方罚球区或门线 55cm 内时，assist 留禁区外沿、mid 回中线
-        if (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < 55.0) {
+        //   尾随位不撤：它正是回做要用的那个接应点
+        if (!trail && (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < 55.0)) {
             ax = opp_box_edge; mx = 110.0;
         }
     } else {
