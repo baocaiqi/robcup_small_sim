@@ -390,6 +390,68 @@ static int test_goal_cover() {
     return 0;
 }
 
+// 黄位镜像单测（2026-10-07 补）：同一函数在黄队口径下必须给出"镜像后的同一个答案"。
+//   背景：goal_cover_point 里有一处用**绝对 x**判断"球是否比 door_x 更靠门"（`if (bx > door_x)`），
+//   只对蓝队成立；黄队 door_x=3 时"任何 bx>3"都成立 ⇒ 护门点被钉死在 x=3、再被门区闸推到 29，
+//   与球位无关（远球本该站到 75）。本用例是它的守卫，全部期望值 = 蓝位用例的 x 镜像（x' = 220 - x）。
+static int test_goal_cover_yellow() {
+    TeamContext ctx{false};   // 黄队守左门 x=0
+    WorldModel wm;
+    wm.ctx = ctx;
+    wm.ball.valid = true;
+
+    double cx = 0, cy = 0;
+
+    // 分区1 远球：球 (120,90)（离门 120cm）→ 站「球→门心」连线、球向门方向 45cm = (75,90)
+    //   ★ 这一条就是那个 bug 的守卫：错版本会给 (29,90)
+    wm.ball.x = 120; wm.ball.y = 90;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 远球应返回 true\n"); return 1; }
+    if (fabs(cx - 75.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
+        printf("FAIL: [黄] 远球护门点 (%.1f,%.1f) 应 (75,90)（= 镜像蓝队 145）\n", cx, cy); return 1;
+    }
+
+    // 分区2 中近球：球 (60,100)（离门 60cm）→ 门前 50cm 拦截线 = (50,100)
+    wm.ball.x = 60; wm.ball.y = 100;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 中近球应返回 true\n"); return 1; }
+    if (fabs(cx - 50.0) > 0.5 || fabs(cy - 100.0) > 0.5) {
+        printf("FAIL: [黄] 中近护门点 (%.1f,%.1f) 应 (50,100)（= 镜像蓝队 170）\n", cx, cy); return 1;
+    }
+
+    // 分区3 贴门球：球 (15,90)（离门 15cm）→ 护门点在裁判门区内 → 退到门线前 29cm = (29,90)
+    wm.ball.x = 15; wm.ball.y = 90;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 贴门球应返回 true\n"); return 1; }
+    if (fabs(cx - 29.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
+        printf("FAIL: [黄] 贴门护门点 (%.1f,%.1f) 应 (29,90)（= 镜像蓝队 191）\n", cx, cy); return 1;
+    }
+
+    // 斜向：球 (70,130)（离门 ~80cm，中近分区）→ 门前 50 线 x=50, y 夹回 107.5
+    wm.ball.x = 70; wm.ball.y = 130;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 斜向球应返回 true\n"); return 1; }
+    if (fabs(cx - 50.0) > 0.5 || fabs(cy - 107.5) > 0.5) {
+        printf("FAIL: [黄] 斜向护门点 (%.1f,%.1f) 应 (50,107.5)（= 镜像蓝队 170）\n", cx, cy); return 1;
+    }
+
+    // 极贴门：球 (2,90)（离门 2cm）→ 同样退到 (29,90)
+    wm.ball.x = 2; wm.ball.y = 90;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 极贴门球应返回 true\n"); return 1; }
+    if (fabs(cx - 29.0) > 0.5 || fabs(cy - 90.0) > 0.5) {
+        printf("FAIL: [黄] 极贴门护门点 (%.1f,%.1f) 应 (29,90)（= 镜像蓝队 191）\n", cx, cy); return 1;
+    }
+
+    // 分区3 深且偏（y 远离门框）：球 (30,130)（离门 30cm，贴门分区；y=130 在裁判门区 y 带 [59,121] 之外）
+    //   → 挡射线点 = 球朝门 8cm = (25.2,123.6)，且**不该**被门区闸改成 29。
+    //   ★ 这一条才是那个 bug 的真正守卫：错版本（用绝对 x 判断）会给 x=3，再被 kMinX=12 抬到 12
+    //     ⇒ 比正确答案浅 13.2cm，且位置与球位无关（球在 (30,130) 却站到门线侧后）。
+    wm.ball.x = 30; wm.ball.y = 130;
+    if (!goal_cover_point(wm, cx, cy)) { printf("FAIL: [黄] 深偏球应返回 true\n"); return 1; }
+    if (fabs(cx - 25.2) > 0.5 || fabs(cy - 123.6) > 0.5) {
+        printf("FAIL: [黄] 深偏护门点 (%.1f,%.1f) 应 (25.2,123.6)（不该被钉死在门线）\n", cx, cy); return 1;
+    }
+
+    printf("goal cover (yellow): OK (镜像蓝位全部用例)\n");
+    return 0;
+}
+
 // 攻防状态机单测：滞回防抖 + 事件标志 + 威胁分级
 static int test_team_state() {
     TeamContext ctx{true};               // 蓝队，门在 x=220
@@ -4790,6 +4852,7 @@ int main(int argc, char **argv) {
     rc |= test_defense_face_incoming();  // 第 103 轮：防守到位迎球朝向
     rc |= test_ball_meeting_point();     // 第 103 轮：会合点计算
     rc |= test_goal_cover();
+    rc |= test_goal_cover_yellow();   // 2026-10-07：黄位镜像用例（此前该函数只被蓝队测过）
     rc |= test_team_state();
     rc |= test_fixed_roles();
     rc |= test_pass();

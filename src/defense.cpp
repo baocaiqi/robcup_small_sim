@@ -315,7 +315,15 @@ bool goal_cover_point(const WorldModel &wm, double &out_x, double &out_y) {
         double door_x = ctx.our_goal_x() + ctx.attack_dir() * 3.0;
         double lo = std::min(bx, door_x), hi = std::max(bx, door_x);
         out_x = clamp(out_x, lo, hi);
-        if (bx > door_x) out_x = door_x;
+        // 球已比 door_x 更靠门（离门线更近）→ 护门点没空间，直接站 door_x 堵门。
+        //   ⚠️ 2026-10-07 修：原来这里是**绝对 x** 比较 `if (bx > door_x)`，只对蓝队成立
+        //   （蓝 door_x=217，要 bx>217 才算"更靠门"）；黄队 door_x=3 时"任何 bx>3"都成立
+        //   ⇒ 贴门分区的护门点被钉死在门线侧后（x=3，再被 kMinX 抬到 12），与球位无关。
+        //   实测偏深 13.2cm（球 (30,130) 应站 (25.2,123.6)，错版本给 (12.0,123.6)）；
+        //   黄位其它球位被"门区闸→29"和"kMinX=12"掩盖，所以此前没暴露。
+        //   改用与 in_goal_area_rule 同一套「离门线距离」口径 ⇒ 两侧同式，蓝位行为不变。
+        const double door_gap = (door_x - ctx.our_goal_x()) * ctx.attack_dir();   // 两侧同为 +3
+        if ((bx - ctx.our_goal_x()) * ctx.attack_dir() < door_gap) out_x = door_x;
         // 裁判门区（门线内 15cm）非门将一进就累计、离开不清零 → 满 20 帧判点球。
         //   护门点落在里面时退到门区外缘 +14cm（门口球交给门将），y 不变。
         if (in_goal_area_rule(ctx, out_x, out_y, 8.0, 6.0)) {

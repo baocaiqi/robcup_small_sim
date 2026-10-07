@@ -25,6 +25,10 @@ $cands = @(
   'C:\Strategy\hnnu_build\Strategy4Yellow.dll',
   'C:\Strategy\src\Strategy4Yellow\Release\Strategy4Yellow.dll'
 )
+# 用法：probe_teamname.ps1 [DLL路径...]  —— 传了路径就只探测这些（不传则用上面这份名单）；
+#   两侧队名入口都会试（SetYellowTeamName / SetBlueTeamName），所以蓝位 DLL 也能读。
+$argPaths = @($args) | Where-Object { $_ }
+if ($argPaths.Count -gt 0) { $cands = $argPaths }
 foreach ($f in $cands) {
   if (-not (Test-Path $f)) { continue }
   $h = [KP]::LoadLibraryA($f)
