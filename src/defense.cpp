@@ -14,6 +14,18 @@
 #include <algorithm>
 
 namespace simuro5 {
+// ============================================================
+// 犀利进攻防守总开关（队员 D，手动）—— docs/06
+//   默认 0 = 关，防守行为与现状逐位一致。真机遇到"进攻极其犀利"的对手时，
+//   把 defense.kSharpDefense 置 1（参数文件或改这里默认值），防守整体收紧：
+//     更早回防（威胁提前升档）+ 人盯人更贴身（贴距/预测/换人惩罚收紧）。
+//   收紧的具体值见 defense.hpp 的 sharp_* 内联常量；核心逻辑一字不动。
+// ============================================================
+TUNABLE(kSharpDefense, 1.0);   // 临时置 1 验证「犀利进攻防守档」（真机后按需改回 0）
+
+// 供跨 TU 读取（strategy.cpp / defense.hpp 的 mark_dist·mark_lead 都调它）。
+bool sharp_defense_on() { return kSharpDefense > 0.5; }
+
 // 拦截线距球门线的距离(cm)：球门前方多远处开始断球。
 //   越近 → 站位越靠门，堵门更稳，但断球更晚、留给反应的时间更少；
 //   越远 → 断球更早，但离门远、一旦被变向绕过就回不来。
@@ -494,6 +506,7 @@ int assign_marks(WorldModel &wm) {
     // —— ③ 约化代价 c(i→j)：我到"对手预测位置"的距离（EMA 平滑 + 量化）+ 换人惩罚 ——
     //   用预测位置（mark_lead 帧外推）而不是当前位置：防守是"截击"不是"追尾"，
     //   与执行侧 run_passive 的站位口径一致。
+    const double lambda = sharp_defense_on() ? sharp_mark_lambda() : kMarkLambda;
     double real[PLAYERS_PER_SIDE][M];
     for (int r = 0; r < nr; ++r) {
         const int i = rows[r];
@@ -507,9 +520,10 @@ int assign_marks(WorldModel &wm) {
                            ? std::floor(wm.mark_cost_ema[i][j] / kMarkQuant + 0.5) * kMarkQuant
                            : wm.mark_cost_ema[i][j];
             // 换人惩罚：目标不是上一帧那个 ⇒ 加 λ；承诺窗口内再加一个 λ（治"换回去"）
+            //   犀利进攻档（kSharpDefense=1）λ 25→15，危险换防更果断（更快贴住对手）。
             double lam = 0.0;
             if (wm.mark_prev_assign[i] >= 0 && wm.mark_prev_assign[i] != j) {
-                lam = kMarkLambda + ((wm.mark_commit[i] > 0) ? kMarkLambda : 0.0);
+                lam = lambda + ((wm.mark_commit[i] > 0) ? lambda : 0.0);
             }
             real[r][j] = q + lam;
         }

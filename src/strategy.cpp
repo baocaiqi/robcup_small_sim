@@ -298,8 +298,10 @@ double Strategy::threat_from_state(const WorldModel &wm) const {
     //   danger = 球朝己方门的速度分量（defense.hpp 点积投影），横滚/背离=0，不会误判。
     //   朝门且快 → 对方半场 0.4→0.6（提前触发人盯人）、己方半场 0.6→0.8（预留更高档）。
     //   下游阈值：>0.3 assist/mid 回防、>=0.6 passive 人盯人——升 0.6 是真正的提前回防收益。
-    const double kThreatDangerSpeed = 6.0;   // cm/帧：朝门有效速度阈值（同 kDribbleSpeed 量级，可调）
-    if (ball_danger_speed(wm) > kThreatDangerSpeed) {
+    // 朝门有效速度阈值：犀利进攻档（defense.kSharpDefense=1）降到 4 cm/帧，
+    //   对方刚提速推进就升档 → 全队提前回防/人盯人（默认 6）。
+    const double danger_speed = sharp_defense_on() ? sharp_danger_speed() : 6.0;
+    if (ball_danger_speed(wm) > danger_speed) {
         threat = our_half ? 0.8 : 0.6;
     }
     return threat;
