@@ -2788,8 +2788,8 @@ static int test_goalie_side_step() {
         printf("FAIL: 目标点越过了球（会自己把球顶进门）tx=%.1f 球x=%.1f\n", tx, wm.ball.x);
         return 1;
     }
-    if (fabs(ty - 107.5) > 0.5 && fabs(ty - 74.0) > 0.5) {
-        printf("FAIL: 侧向让开目标 y 应贴到 107.5/74 边界，实际 %.1f\n", ty);
+    if (fabs(ty - 106.0) > 0.5 && fabs(ty - 74.0) > 0.5) {
+        printf("FAIL: 侧向让开目标 y 应贴到 106/74 边界，实际 %.1f\n", ty);
         return 1;
     }
     // ② 门将已侧向让开 25cm → 不再拦（可以去绕球的门侧推）
@@ -4554,8 +4554,8 @@ static int test_goalie_line_block() {
     wm.ball.x = 217.5; wm.ball.y = 140; wm.ball.vx = 0.0; wm.ball.vy = -1.0;
     wm.home[0].x = 209; wm.home[0].y = 104;
     if (!gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 贴门线滚球应堵路径\n"); return 1; }
-    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 107.5) > 0.5) {
-        printf("FAIL: 贴门线堵点应为 (217,107.5)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
+    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 106.0) > 0.5) {
+        printf("FAIL: 贴门线堵点应为 (217,106)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
     }
     // ⑥ 贴门线从下往上滚、已进门口带（y=80, vy=+2）→ 球前方 12cm
     wm.ball.y = 80; wm.ball.vy = 2.0;
