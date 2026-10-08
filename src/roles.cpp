@@ -102,6 +102,9 @@ TUNABLE(kGkLastDitchGuard, 28.0); // cm：兜底规则"进门线"的触发距离
                                   //   离球 25.5cm，差 11cm 就永远不触发）
 TUNABLE(kGkHardMaxOut, 60.0);     // cm：门将离门线的硬上限。罚球区 80cm 深，但实测有 1.8~2.4%
                                   //   的帧离门线 >100cm、最大 184cm，说明有路径绕过 clamp_goalie_area
+TUNABLE(kGkStayHomeBall, 30.0);  // cm：球离门线 >= 本值就算"球还远"，门将一律缩回门里。
+                                 //   远射时站门线封角最大，跑出来只会把门口让开。
+TUNABLE(kGkMaxDepth, 5.0);       // cm："缩在门里"时允许的最大出位深度。
 TUNABLE(kGkNoPushDist, 64.8878);  // cm：球进我方门口这个距离内才管
 TUNABLE(kGkSideClear, 38.0544);  // cm：侧向让开距离
 TUNABLE(kGkBackOff, 9.358);  // cm：场侧回撤（目标是球后，绝不越球）
@@ -890,6 +893,14 @@ void run_goalie(WorldModel &wm, int id) {
         if (gctx.dist_our_goal(gr.x) > kGkHardMaxOut) {
             gk_goto(gctx, gr, gk_line_x(gctx, kGkGuardDist),
                     clamp(gr.y, kGkYLo, kGkYHi), motion::TM_PASS);
+        }
+        // 闸四（缩在门里）：球离门线还远（>= kGkStayHomeBall）时，把出位深度压回 kGkMaxDepth，
+        //   横向站位保持不变（只往回收 x，不动 y）。远射时站门线封角最大；
+        //   跑出来只会把门口让开 —— 实测丢球形状里门将常在离门 20~28cm 处。
+        //   只有"球进到近距离（需要推球/封堵）"或出球模式才准出来。
+        if (v.ball_goal >= kGkStayHomeBall && gctx.dist_our_goal(gr.x) > kGkMaxDepth) {
+            motion::position(gr, gk_line_x(gctx, kGkMaxDepth),
+                             clamp(gr.y, kGkYLo, kGkYHi), motion::TM_PASS);
         }
     }
 }
