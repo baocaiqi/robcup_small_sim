@@ -579,9 +579,13 @@ bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
 
 TUNABLE(kGkHoldSlide, 1.0);              // 0 = 回滚（贴球一律站定）
 constexpr double kGkHoldSlideDanger = 0.1;   // cm/帧：朝门速度高于此才算在滚进门
-TUNABLE(kGkHoldPassGap, 7.0);    // cm：门将在球的场侧要退回门线时，横向必须让开球这么多才准朝门驱动。
-                                 // 门将处于球场侧时离球常在 6cm 内（已在接触范围），此时朝门驱动
-                                 // = 把球推进自家门（乌龙）。让不开就只横向对 y、绝不朝门动。
+TUNABLE(kGkHoldPassGap, 9.0);    // cm：门将要从球的场侧绕到球前时，横向必须让开球这么多。
+                                 // 车身半径4 + 球半径2 = 6cm 就接触，9cm 留 3cm 富余保证蹭不到球。
+TUNABLE(kGkOwnGoalPad, 6.0);     // cm：防乌龙余量。球比门将更靠自家门（含此余量）时，门将这一帧
+                                 // 的动作整条换成安全动作，绝不允许朝自家门推进。
+TUNABLE(kGkFaceTol, 12.0);       // 度：守门时允许的机头偏差。超过就拧机头，把门将拧到直着对准球。
+TUNABLE(kGkSpinGain, 0.8);       // 轮速差 / 度：盯球拧机头的比例增益
+TUNABLE(kGkSpinMax, 60.0);       // 轮速差上限：盯球拧机头最多叠这么多（不动位移）
 TUNABLE(kGkHoldCover, 2.0);      // cm：门将中心离进门点小于此才算"已挡住"。
                                  // 原 5.0 太松：实测丢球时门将横向只偏 4.6cm 就自认挡住了、原地不动，
                                  // 球从它旁边滚进网。收紧后偏 2~5cm 会走下面的滑移分支贴到球的进门点。
@@ -763,18 +767,69 @@ void run_goalie(WorldModel &wm, int id) {
 #ifdef SIMURO5_HNNU_TRACE
     const char *hit = "none";
 #endif
-    if (gk_rule_penalty(wm, id, v)) { GK_HIT("penalty"); }
+    // 出球模式 = 门球推穿(restart_kick) / 点球守(penalty) / 死球(no_push)。
+    // 这三种动作本身就要求"机头对准出球方向 + 以速度推穿球"，下面的守门两闸会把它们打坏
+    // （离线测试已证：门球 200 帧碰不到球、横向 13cm 时高速直冲、点球守会离位），所以整段跳过。
+    bool gk_set_play = false;
+    if (gk_rule_penalty(wm, id, v)) { GK_HIT("penalty"); gk_set_play = true; }
     else if (gk_rule_line_block(wm, id, v)) { GK_HIT("line_block"); }
     else if (gk_rule_ball_behind(wm, id, v)) { GK_HIT("ball_behind"); }
     else {
         gk_update_opp_hold(wm, v);
         for (int i = 0; i < (int)(sizeof(kGoalieRules) / sizeof(kGoalieRules[0])); ++i) {
-            if (kGoalieRules[i](wm, id, v)) { GK_HIT(kGoalieRuleNames[i]); break; }
+            if (kGoalieRules[i](wm, id, v)) {
+                GK_HIT(kGoalieRuleNames[i]);
+                gk_set_play = (i == 0) || (i == 3);   // 0=no_push(死球)  3=restart_kick(门球)
+                break;
+            }
         }
     }
 #ifdef SIMURO5_HNNU_TRACE
     gk_trace(hit, wm, id, v);
 #endif
+
+    // ═══════ 守门两闸：只对守门模式生效，出球模式整段跳过 ═══════
+    RobotState &gr = wm.home[id];
+    const TeamContext &gctx = wm.ctx;
+    // 规则主动"站定不动"（vl=vr=0）时不加闸：那是规则按门前几何做的防乌龙决定
+    // （球就贴在自己脚下时，连原地转身都可能把它蹭进门），闸门不许把它解冻。
+    bool gk_frozen = (gr.vl == 0.0 && gr.vr == 0.0);
+    if (!gk_set_play && !gk_frozen) {
+
+        // 闸一（防乌龙）：球比门将更靠自家门（含余量）时，门将已经站在球的"场侧"了 ——
+        //   此时它只要朝自家门方向走一步，就是拿身体把球顶进自家门。所以从轮速里把
+        //   "朝自家门方向的平动分量"整条扣掉：转动分量保留（它照样能转身），横向平动也保留
+        //   （它照样能横移挡到球前），但绝不可能朝自家门推进一步。
+        //   横向已经让开球（> kGkHoldPassGap）时不干预：那条通道是安全的（车身4+球2<9），
+        //   门将本来就该从那儿全速插到球与自家门之间。
+        if (v.ball_goal < gctx.dist_our_goal(gr.x) + kGkOwnGoalPad &&
+            std::fabs(gr.y - v.by) <= kGkHoldPassGap) {
+            double vf = (gr.vl + gr.vr) * 0.5;      // 沿机头的平动分量
+            double spin = (gr.vr - gr.vl) * 0.5;    // 转动分量（差速，原样保留）
+            if (std::fabs(vf) > 1e-9) {
+                double dir = (vf >= 0.0) ? gr.rot : gr.rot + 180.0;   // 平动实际朝向
+                double goalward = (v.gside > 0.0) ? 0.0 : 180.0;       // 朝自家门的方向
+                if (std::cos((dir - goalward) * 3.14159265358979323846 / 180.0) > 0.0)
+                    vf = 0.0;                        // 有朝门分量 → 平动归零
+            }
+            gr.vl = vf - spin;
+            gr.vr = vf + spin;
+        }
+
+        // 闸二（时刻盯球）：门将在球与自家门之间时（朝球 = 朝场外，安全），机头必须直着对准球。
+        //   只给左右轮各加一个方向相反的转动分量：平动分量 (vl+vr)/2 完全不变，
+        //   所以门将的位移一点没改（横向挪到球前照样挪），只是机头被拧向球。
+        if ((gr.x - v.bx) * v.gside > 0.0) {
+            double aim = angle_to(gr.x, gr.y, v.bx, v.by);
+            double err = angle_diff(aim, gr.rot);
+            if (std::fabs(err) > kGkFaceTol) {
+                double spin = clamp((err > 0.0 ? err - kGkFaceTol : err + kGkFaceTol) * kGkSpinGain,
+                                    -kGkSpinMax, kGkSpinMax);
+                gr.vl -= spin;
+                gr.vr += spin;
+            }
+        }
+    }
 }
 #undef GK_HIT
 
