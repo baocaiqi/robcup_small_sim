@@ -265,7 +265,10 @@ TUNABLE(kGkAlignAcross, 3.0);   // "已站到球后"允许的横向偏差 cm。
                                 // 所以门限窄不会像旧代码那样被骑着来回翻（旧代码没有承诺位）。
 TUNABLE(kGkKickThrough, 45.0);  // 穿球目标：球前 cm（越远球被带得越快）
 TUNABLE(kGkServeReady, 3.0);     // cm：承诺期的解锁余量（冲到球前这么多就算推空）
-TUNABLE(kGkServeGlide, 12.0);    // cm：离后撤点还远于此值就带速滑过去，进此范围才刹车精调
+TUNABLE(kGkServeGlide, 12.0);   // cm：滑行段（TM_PASS）进此范围才切刹车精调。
+                                 //   ⚠️ 不能缩小：TM_PASS 满速约 150cm/s，4cm 内刹不住会冲过
+                                 //   准备点，导致"永远没到"来回抖（离线测试已证）。
+TUNABLE(kGkPrepNeedAlign, 0.0); // 0=就位段不要求已经对准（转正留给开哨后那一帧）    // cm：离后撤点还远于此值就带速滑过去，进此范围才刹车精调
 TUNABLE(kGkPrepPass, 1.0);      // 1=准备点带速走（TM_PASS）；0=精确站位
 constexpr double kGkBallBehindMargin = 6.0;    // 球比门将靠门超过此值 → 强制回门
 constexpr double kGkBallGoalSide     = 15.0;   // 强制回门：回到球的门侧 cm
@@ -540,9 +543,12 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     }
     if (wm.goalie_serve_phase == 0) {
         // 球贴门线（<15cm）且门将在球外侧：直奔球后会穿球把球顶进自家门 → 先横移到球侧 22cm
-        if (v.ball_goal < 15.0 && (r.x - v.bx) * v.gside < 0.0) {
+        // 贴门线且门将在球的场侧：直奔球后会穿球把球顶进自家门。但只在【横向让不开球】
+        // 时才需要横摆；横向已经让开就全速直插准备点。横摆本身也用 TM_PASS（目标离球 22cm）。
+        if (v.ball_goal < 15.0 && (r.x - v.bx) * v.gside < 0.0 &&
+            std::fabs(r.y - v.by) <= kGkHoldPassGap) {
             gk_goto(ctx, r, v.bx - v.gside * 10.0, v.by + gk_detour_side(v.by) * 22.0,
-                    motion::TM_STOP);
+                    motion::TM_PASS);
             return true;
         }
         // 三个动作各用一个只管一件事的原语，别混：
@@ -550,7 +556,7 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
         //   实测 position_aligned 59 帧只挪 4.5cm、arrive_facing 到位后转过头转不停。
         // 入口要求"停在后撤点附近且已对准"：后撤点是精确停靠点，因为从斜后方推球会把球拨偏。
         bool at_ready = std::hypot(r.x - px, r.y - pyc) <= kGkServeReady &&
-                        (clamped || gk_aligned(r, v, dx, dy));
+                        (clamped || kGkPrepNeedAlign < 0.5 || gk_aligned(r, v, dx, dy));
         if (!at_ready) {
             // 远距离接近要带速滑（别提前刹车，白磨帧数），但滑行停不准，
             // 所以进到 kGkServeGlide 之内就切回 TM_STOP 精调停靠 —— 两者按距离分工，不重叠。
@@ -569,6 +575,16 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
         wm.goalie_serve_phase = 0;
     }
     if (gk_turn_to(r, ax, ay)) return true;    // 只管原地转正
+    // ═══ 开哨后全部防乌龙保险就这两条，其余限制一律取消 ═══
+    //   ① 门将必须在球的门侧：否则朝球推进就是把球顶进自家门；
+    //   ② 出球方向必须有朝场外分量：否则等于主动往自家门推。
+    //   任一条不成立 → 立刻退回就位段全速重摆（TM_PASS），本帧绝不推球。
+    if ((r.x - v.bx) * v.gside <= 0.0 || ax * ctx.attack_dir() <= 0.0) {
+        wm.goalie_serve_phase = 0;
+        gk_goto(ctx, r, px, pyc, motion::TM_PASS);
+        return true;
+    }
+    if (gk_turn_to(r, ax, ay)) return true;
     gk_goto(ctx, r, v.bx + ax * kGkKickThrough, v.by + ay * kGkKickThrough, motion::TM_PASS);
     return true;
 }
