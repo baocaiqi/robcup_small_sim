@@ -52,23 +52,5 @@ void run_press(WorldModel &wm, int id);
 // 官方式分区站位（strategy.kZoneMode 开关），取代 PASSIVE/ASSIST/MIDFIELD 三套分支
 void run_zone(WorldModel &wm, int id);
 
-// 球权滞回刷新：门将除外最近队友 <=kPossessOn 判"在我们手上"、>=kPossessOff 判"无主"，
-//   中间沿用上一帧（40Hz 每帧翻转会让全队在两套站位之间来回抽搐）
-void update_our_possession(WorldModel &wm);
-
-// 球权中心化总闸：本帧是否由"无球收拢/有球接应"接管非持球人（传球链路生效期间一律不接管）；
-//   判定必须在帧初做一次，帧内复用，否则同帧前后会跑两套逻辑
-bool ball_centric_engaged(const WorldModel &wm);
-
-// 防聚集硬约束：目标点离任一非门将队友 < kTeammateGap 时，沿"远离该队友"方向推到 gap 外
-void separate_from_teammates(const WorldModel &wm, int id, double &tx, double &ty);
-
-// 球权中心化目标点：无球=朝球收拢占位（3 槽贪心），有球=球前接应两点+掩护一点
-//   返回 false 表示该队员不参与（门将/持球人/球无效）
-bool ball_centric_target(const WorldModel &wm, int id, double &tx, double &ty);
-
-// 按球权中心化目标点驱动该队员
-void run_ball_centric(WorldModel &wm, int id);
-
 }  // namespace simuro5
 #endif
