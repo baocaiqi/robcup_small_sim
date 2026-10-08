@@ -95,6 +95,13 @@ double spread_y(const WorldModel &wm, double bx, double by,
 
 // 守门员：每帧感知一次（GkView），按优先级逐条试规则表，第一条命中即出动作
 
+TUNABLE(kGkHoldPassGap, 9.0);    // cm：门将要从球的场侧绕到球前时，横向必须让开球这么多。
+                                 // 车身半径4 + 球半径2 = 6cm 就接触，9cm 留 3cm 富余保证蹭不到球。
+TUNABLE(kGkLastDitch, 22.0);      // cm：球离门线 < 本值 → 门前死守
+TUNABLE(kGkLastDitchGuard, 28.0); // cm：兜底规则"进门线"的触发距离（原写死 14，实测丢球时门将
+                                  //   离球 25.5cm，差 11cm 就永远不触发）
+TUNABLE(kGkHardMaxOut, 60.0);     // cm：门将离门线的硬上限。罚球区 80cm 深，但实测有 1.8~2.4%
+                                  //   的帧离门线 >100cm、最大 184cm，说明有路径绕过 clamp_goalie_area
 TUNABLE(kGkNoPushDist, 64.8878);  // cm：球进我方门口这个距离内才管
 TUNABLE(kGkSideClear, 38.0544);  // cm：侧向让开距离
 TUNABLE(kGkBackOff, 9.358);  // cm：场侧回撤（目标是球后，绝不越球）
@@ -428,6 +435,16 @@ bool gk_rule_ball_behind(WorldModel &wm, int id, const GkView &v) {
     double cx = gx, cy = clamp(gy, kGkYLo, kGkYHi);
     clamp_goalie_area(ctx, cx, cy);
     if (v.ball_goal < kGkNoRoom || gk_path_hits_ball(r, v, cx, cy)) {
+        // 门前死守区内：原实现在这里"站到球的场侧 10cm 等"（TM_STOP），实测就是它把门将钉在
+        //   离门 23cm 处连续 55 帧 0 位移，而球以 0.27cm/帧 从门将身后滚进网（13 个失球里约 10 个）。
+        //   改成主动绕：先全速横移到让开球的一侧（x 不动，绝不朝门推球），下一帧直线通了再插回门线。
+        if (v.ball_goal < kGkLastDitch) {
+            double s2 = (r.y >= v.by) ? 1.0 : -1.0;
+            motion::position(r, r.x,
+                             clamp(v.by + s2 * (kGkHoldPassGap + 2.0), kGkYLo, kGkYHi),
+                             motion::TM_PASS);
+            return true;
+        }
         double tx = v.bx - v.gside * kGkBehindBackOff, ty = gy;  // 球的场侧，y 只夹罚球区
         clamp_goalie_area(ctx, tx, ty);
         motion::position(r, tx, ty, motion::TM_STOP);
@@ -579,8 +596,6 @@ bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
 
 TUNABLE(kGkHoldSlide, 1.0);              // 0 = 回滚（贴球一律站定）
 constexpr double kGkHoldSlideDanger = 0.1;   // cm/帧：朝门速度高于此才算在滚进门
-TUNABLE(kGkHoldPassGap, 9.0);    // cm：门将要从球的场侧绕到球前时，横向必须让开球这么多。
-                                 // 车身半径4 + 球半径2 = 6cm 就接触，9cm 留 3cm 富余保证蹭不到球。
 TUNABLE(kGkOwnGoalPad, 6.0);     // cm：防乌龙余量。球比门将更靠自家门（含此余量）时，门将这一帧
                                  // 的动作整条换成安全动作，绝不允许朝自家门推进。
 TUNABLE(kGkFaceTol, 12.0);       // 度：守门时允许的机头偏差。超过就拧机头，把门将拧到直着对准球。
@@ -589,8 +604,11 @@ TUNABLE(kGkSpinMax, 60.0);       // 轮速差上限：盯球拧机头最多叠�
 TUNABLE(kGkHoldCover, 2.0);      // cm：门将中心离进门点小于此才算"已挡住"。
                                  // 原 5.0 太松：实测丢球时门将横向只偏 4.6cm 就自认挡住了、原地不动，
                                  // 球从它旁边滚进网。收紧后偏 2~5cm 会走下面的滑移分支贴到球的进门点。
+// 门前死守区：球离门线多近就进"死守"——此区内门将唯一正解是回到门线并让开球，
+//   任何"站到球外侧等着推"的预备位一律作废（20cm 内、十几 cm/s 的慢球根本不用推，站进门里就是挡）。
+
 bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
-    if (!(v.ball_goal < 15.0 && v.db < 14.0)) return false;
+    if (!(v.ball_goal < 15.0 && v.db < kGkLastDitchGuard)) return false;
     TRACE_MARK(wm.home[id]);
     RobotState &r = wm.home[id];
     // 门将在球的"场侧"= 球已经跑到门将身后了。原地冻住等于把门让开：
@@ -794,7 +812,27 @@ void run_goalie(WorldModel &wm, int id) {
     // 规则主动"站定不动"（vl=vr=0）时不加闸：那是规则按门前几何做的防乌龙决定
     // （球就贴在自己脚下时，连原地转身都可能把它蹭进门），闸门不许把它解冻。
     bool gk_frozen = (gr.vl == 0.0 && gr.vr == 0.0);
-    if (!gk_set_play && !gk_frozen) {
+    if (!gk_set_play) {
+        // 闸零（门前死守，最高优先，连"站定不动"也要让位）：球进死守区后，门将唯一允许的动作
+        //   是"让开球 + 回门线"。实测丢球形状：球在门前 14.7cm，门将在球的场侧 23~28cm 处站定，
+        //   球以 0.27cm/帧 滚进网，55 帧里门将一步没走。这里把这条死锁强行拆掉。
+        //   横向贴着球（|Δy| <= kGkHoldPassGap）时只横着让开（x 钉死，绝不朝门推球）；
+        //   让开后立刻全速插回门线并对到球的 y —— 此时直线与球有 >=9cm 横向间隔，蹭不到。
+        //   但只接管"门将已经站到球的场侧（死锁位）"或"离门线太远"这两种情况：
+        //   门将已经在球与门之间时是正常封角位，交给下面原有规则做滑移封挡，别抢它的活。
+        bool gk_field_side = ((gr.x - v.bx) * v.gside <= 0.0);
+        bool gk_too_far = (gctx.dist_our_goal(gr.x) > kGkLastDitch * 0.75);
+        if (v.ball_goal < kGkLastDitch && (gk_field_side || gk_too_far)) {
+            double side0 = (gr.y >= v.by) ? 1.0 : -1.0;
+            if (std::fabs(gr.y - v.by) <= kGkHoldPassGap)
+                motion::position(gr, gr.x,
+                                 clamp(v.by + side0 * (kGkHoldPassGap + 2.0), kGkYLo, kGkYHi),
+                                 motion::TM_PASS);
+            else
+                motion::position(gr, gk_line_x(gctx, 3.0), clamp(v.by, kGkYLo, kGkYHi),
+                                 motion::TM_PASS);
+        } else if (!gk_frozen) {
+        // 闸一（防乌龙）：
 
         // 闸一（防乌龙）：球比门将更靠自家门（含余量）时，门将已经站在球的"场侧"了 ——
         //   此时它只要朝自家门方向走一步，就是拿身体把球顶进自家门。所以从轮速里把
@@ -828,6 +866,14 @@ void run_goalie(WorldModel &wm, int id) {
                 gr.vl -= spin;
                 gr.vr += spin;
             }
+        }
+        }
+        // 闸三（硬边界）：门将绝不许离开己方站区。罚球区只有 80cm 深，实测却有 1.8~2.4% 的帧
+        //   离门线 >100cm、最大 184cm（最出位那帧我方五人全在对方半场、门将 184）—— 说明有路径
+        //   绕过了 clamp_goalie_area。这里在最外层兜底：一旦超限就全速拽回门线。
+        if (gctx.dist_our_goal(gr.x) > kGkHardMaxOut) {
+            gk_goto(gctx, gr, gk_line_x(gctx, kGkGuardDist),
+                    clamp(gr.y, kGkYLo, kGkYHi), motion::TM_PASS);
         }
     }
 }

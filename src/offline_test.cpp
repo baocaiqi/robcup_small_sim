@@ -4087,6 +4087,48 @@ static int test_live_play() {
 // 旧实现（defense.hpp:goalie_block_depth）写死 max_out=40：
 //   球离门 >=52cm 时门将一律站到离门线 40cm。真机实测门将 x 中位 14~16cm、p99 42cm、
 //   最大 49.8cm；由于回程太长，丢球时门将 x=8.6~27.7 而球已在门线上（球从门将身后进网）。
+// 回归：门前慢球死锁（真机实测形状，13 个失球里约 10 个是这一种）
+//   球在门前 14.7cm；门将在球的【场侧】23.1cm 处、横向已经让开约 24cm
+//   （= gk_rule_ball_behind 的兜底目标 kGkBallRetreatLat=30 被门框夹住后的结果）。
+//   球以 0.27cm/帧（约 11cm/s）滚进近门柱，门将整段没回来。
+//   要求：这种形状下门将必须【朝自家门线】驱动（rot=180 时即 vl+vr>0），不许再横向躲。
+static int test_gk_last_ditch_no_freeze() {
+    auto scene = []() {
+        WorldModel wm;
+        gk_test_field(wm);
+        wm.ctx = TeamContext{false};                 // 黄位：我方门 x=0，攻向 +x
+        wm.ball.valid = true;
+        wm.ball.x = 14.7; wm.ball.y = 78.7;          // 门前 14.7cm（实测值）
+        wm.ball.vx = -0.05; wm.ball.vy = 0.0;        // 慢到前置封线规则不触发（真机就是这样）
+        wm.home[0].x = 23.1; wm.home[0].y = 90.0;    // 场侧 23.1、横向让开约 11cm
+        wm.home[0].rot = 180.0;                      // 机头朝自家门（-x）
+        return wm;
+    };
+    set_param("roles.kGkLastDitch", 22.0);
+    WorldModel on = scene();
+    run_goalie(on, 0);
+    double fwd_on = on.home[0].vl + on.home[0].vr;   // >0 = 朝自家门驱动（rot=180）
+
+    set_param("roles.kGkLastDitch", 0.0);            // 反证：关掉门前死守 = 旧行为
+    WorldModel off = scene();
+    run_goalie(off, 0);
+    double fwd_off = off.home[0].vl + off.home[0].vr;
+    set_param("roles.kGkLastDitch", 22.0);
+
+    if (!(fwd_on > 5.0)) {
+        printf("FAIL: 门前慢球时门将没朝自家门线驱动 vl+vr=%.1f"
+               "（实测就是横向躲开 24cm、球从近门柱进）\n", fwd_on);
+        return 1;
+    }
+    if (!(fwd_on > fwd_off)) {
+        printf("FAIL: 门前死守没改变走位方向 on=%.1f off=%.1f\n", fwd_on, fwd_off);
+        return 1;
+    }
+    printf("gk last ditch: OK (门前 14.7cm 场侧：旧行为朝门分量 %.1f -> 现在 %.1f)\n",
+           fwd_off, fwd_on);
+    return 0;
+}
+
 static int test_gk_retreat_ball_side() {
     TeamContext ctx{true};                       // 蓝位：己方门 x=220
     const double max_out = 22.0, margin = 6.0, guard = 10.0;
@@ -4396,6 +4438,7 @@ int main(int argc, char **argv) {
     rc |= test_presser();
     rc |= test_goalie_line_cover();
     rc |= test_goalie_line_block();
+    rc |= test_gk_last_ditch_no_freeze();
     rc |= test_live_play();
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
