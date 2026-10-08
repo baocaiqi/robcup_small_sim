@@ -2052,4 +2052,242 @@ void run_zone(WorldModel &wm, int id) {
     motion::position(r, tx, ty, motion::TM_PASS);
 }
 
+
+// ===================== 球权中心化：无球全队抢球 / 有球掩护接应 / 防聚集 =====================
+// 术语：球权 = 球到底算"我们的"还是"无主的"。无主时全队只干一件事——谁近谁抢；
+//       有主时一个人护球推进，两个人跑到球前面当接应点，一个人堵住对手的射门线。
+
+// 球权滞回（cm）：<=On 判"在我们手上"，>=Off 判"无主"，中间沿用上一帧
+//   7cm 约等于车头贴住球、球已经能被推动；10cm 留 3cm 死区，防 40Hz 每帧翻转
+TUNABLE(kPossessOn, 7.0);
+TUNABLE(kPossessOff, 10.0);
+
+void update_our_possession(WorldModel &wm) {
+    if (!wm.ball.valid) { wm.our_possession = 0; return; }
+    // 接球锁定期间无条件算"在我们手上"：否则全队会掉头去抢自己人脚下的球
+    if (wm.coop_ball_control.active) { wm.our_possession = 1; return; }
+    double dmin = 1e9;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)   // 0 号门将不算持球人
+        dmin = std::min(dmin, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
+    if (wm.our_possession != 0) {
+        if (dmin >= kPossessOff) wm.our_possession = 0;
+    } else if (dmin <= kPossessOn) {
+        wm.our_possession = 1;
+    }
+}
+
+
+// ---- 槽位几何与防聚集 ----
+
+// 防聚集间距（cm）：30 差不多是两台车（车宽约 22）并排还能留一条缝，谁也不挡谁
+TUNABLE(kTeammateGap, 30.0);
+// 无球收拢槽：A/B 距球 30cm、各偏 ±35°（谁先到谁先出脚）；
+//   C 退到"球指向自家门"方向 55cm（球一旦丢，身后先有人）
+// 槽 A/B 落在球的哪一侧：1 = 朝对方门那一侧（默认，抢球从球前方上，冲过去不会把球顶向自家门）；
+//   0 = 朝自家门那一侧。方案原文写"以球为圆心、基准方向 = 球指向自家门、各偏 ±35°"，
+//   同时又写"朝对方门一侧"——两处口径互相打架，这里按后者（也是唯一不会自己把球捅进自家门的读法）实现，
+//   留一个开关，真机上一行参数即可切回去。
+TUNABLE(kBallCentricSlotNear, 30.0);
+TUNABLE(kBallCentricSlotAngle, 35.0);
+TUNABLE(kBallCentricSlotBack, 55.0);
+TUNABLE(kBallCentricSlotOppSide, 1.0);
+// 有球接应/掩护：接应站球前 40cm、左右各错 30cm；掩护站"对手-自家门"连线上距该对手 20cm
+TUNABLE(kBallCentricFront, 40.0);
+TUNABLE(kBallCentricSide, 30.0);
+TUNABLE(kBallCentricCover, 20.0);
+// 球前校验线（cm）：分完点必须有人满足 (x-球x)*attack_dir > 此值，否则强制把最近的非持球人顶到球前
+TUNABLE(kBallCentricFrontMin, 20.0);
+// 球权中心化总开关：0 = 整段回到旧的 run_assist/run_midfield/run_passive 站位
+TUNABLE(kBallCentric, 1.0);
+
+void separate_from_teammates(const WorldModel &wm, int id, double &tx, double &ty) {
+    // 一轮只处理"当前最近的那个"越界队友（按距离由近到远），最多 3 轮；
+    //   顺序完全确定：同样的输入必得同样的输出，没有遍历顺序带来的抖动
+    for (int iter = 0; iter < 3; ++iter) {
+        int near = -1;
+        double near_d = kTeammateGap;
+        for (int j = 1; j < PLAYERS_PER_SIDE; ++j) {          // 门将不参与（他只守门前一小块）
+            if (j == id) continue;
+            double d = dist(tx, ty, wm.home[j].x, wm.home[j].y);
+            if (d < near_d) { near_d = d; near = j; }
+        }
+        if (near < 0) return;                                  // 已经全部达标
+        double ux = tx - wm.home[near].x, uy = ty - wm.home[near].y;
+        double ul = std::hypot(ux, uy);
+        if (ul < 1e-6) { ux = 1.0; uy = 0.0; } else { ux /= ul; uy /= ul; }   // 完全重合 → 固定朝 +x 推开
+        tx = wm.home[near].x + ux * kTeammateGap;
+        ty = wm.home[near].y + uy * kTeammateGap;
+    }
+}
+
+namespace {
+// 本帧参与球权站位的三个非门将、非持球人（按 id 升序，保证确定性）
+int ball_centric_members(const WorldModel &wm, int out[3]) {
+    int n = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE && n < 3; ++i) {
+        if (i == wm.active_id || wm.role[i] == ROLE_GOALIE) continue;
+        out[n++] = i;
+    }
+    return n;
+}
+
+// 3×3 距离矩阵的确定性贪心：每轮取全局最小配对，平局取（人小、槽小）
+void greedy_slots(const double d[3][3], int slot_of[3]) {
+    bool used[3] = {false, false, false};
+    for (int k = 0; k < 3; ++k) slot_of[k] = -1;
+    for (int pick = 0; pick < 3; ++pick) {
+        int bk = -1, bs = -1;
+        double bd = 1e18;
+        for (int k = 0; k < 3; ++k) {
+            if (slot_of[k] >= 0) continue;
+            for (int s = 0; s < 3; ++s) {
+                if (used[s]) continue;
+                if (d[k][s] < bd - 1e-9) { bd = d[k][s]; bk = k; bs = s; }
+            }
+        }
+        if (bk < 0) return;
+        slot_of[bk] = bs; used[bs] = true;
+    }
+}
+
+// 槽位点收尾：夹进场内、躲开两个门区，再做防聚集，最后把门区纪律重做一遍。
+//   顺序有讲究：把"推开队友"放在门区夹取之后，是因为推开这一步可能又把人顶回禁区里——
+//   判点球（对方门区 2+ 人）比两个目标点挨得近严重得多，所以门区纪律最后复核一次。
+void finish_slot_point(const WorldModel &wm, int id, double &tx, double &ty) {
+    const TeamContext &ctx = wm.ctx;
+    tx = clamp(tx, 4.0, TeamContext::FIELD_LENGTH - 4.0);
+    ty = clamp(ty, 4.0, TeamContext::FIELD_WIDTH - 4.0);
+    if (in_goal_area(ctx, tx, ty)) {              // 自家门区 50×30 只有门将能站，顶到前沿外
+        tx = ctx.our_goal_x() + ctx.attack_dir() * 55.0;
+        ty = clamp(ty, 76.0, 104.0);
+    }
+    clamp_out_opp_goal_area(ctx, tx, ty);         // 对方门区 2+ 人即判点球，站点一律推回前缘外
+    separate_from_teammates(wm, id, tx, ty);      // 谁也不许贴着队友站
+    tx = clamp(tx, 4.0, TeamContext::FIELD_LENGTH - 4.0);
+    ty = clamp(ty, 4.0, TeamContext::FIELD_WIDTH - 4.0);
+    if (in_goal_area(ctx, tx, ty)) {
+        tx = ctx.our_goal_x() + ctx.attack_dir() * 55.0;
+        ty = clamp(ty, 76.0, 104.0);
+    }
+    clamp_out_opp_goal_area(ctx, tx, ty);         // 复核：推开时若又踩进禁区，再顶出来
+}
+
+// 无球：以球为圆心摆 3 个收拢槽。基准方向 = 球指向自家门——
+//   站在球的己门那一侧，出脚才推得动球往对方门走
+void offball_slots(const WorldModel &wm, double sx[3], double sy[3]) {
+    const TeamContext &ctx = wm.ctx;
+    const double bx = wm.ball.x, by = wm.ball.y;
+    double gx = ctx.our_goal_x() - bx, gy = 90.0 - by;     // 球 → 自家门
+    double gl = std::hypot(gx, gy);
+    if (gl < 1e-6) { gx = -ctx.attack_dir(); gy = 0.0; } else { gx /= gl; gy /= gl; }
+    // A/B 的基准方向：默认取"球 → 对方门"（= 球 → 自家门的反向）
+    const double ux = (kBallCentricSlotOppSide >= 0.5) ? -gx : gx;
+    const double uy = (kBallCentricSlotOppSide >= 0.5) ? -gy : gy;
+    const double a = kBallCentricSlotAngle * 3.14159265358979 / 180.0;
+    const double ca = std::cos(a), sa = std::sin(a);
+    sx[0] = bx + (ux * ca - uy * sa) * kBallCentricSlotNear;   // A：基准 +35°
+    sy[0] = by + (ux * sa + uy * ca) * kBallCentricSlotNear;
+    sx[1] = bx + (ux * ca + uy * sa) * kBallCentricSlotNear;   // B：基准 −35°
+    sy[1] = by + (-ux * sa + uy * ca) * kBallCentricSlotNear;
+    sx[2] = bx + gx * kBallCentricSlotBack;                    // C：正对自家门、退后保护
+    sy[2] = by + gy * kBallCentricSlotBack;
+}
+
+// 有球：两个接应位（球前 kBallCentricFront cm、左右各错 kBallCentricSide cm）+ 一个掩护位。
+//   接应站在球前 = 拿球的人一抬头就能把球送出去；掩护站"对手-自家门"连线上，堵他的射门线
+void support_slots(const WorldModel &wm, double sx[3], double sy[3]) {
+    const TeamContext &ctx = wm.ctx;
+    const double bx = wm.ball.x, by = wm.ball.y, ad = ctx.attack_dir();
+    sx[0] = bx + ad * kBallCentricFront; sy[0] = by + kBallCentricSide;   // 接应·左
+    sx[1] = bx + ad * kBallCentricFront; sy[1] = by - kBallCentricSide;   // 接应·右
+    int ot = -1;
+    double od = 1e18;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        double dd = dist(wm.opp[i].x, wm.opp[i].y, bx, by);
+        if (dd < od) { od = dd; ot = i; }
+    }
+    sx[2] = bx + ad * kBallCentricFront; sy[2] = by;   // 场上没有对手时的兜底：站球前
+    if (ot >= 0) {
+        // 方向 = 对手指向自家门：站在这条线上，对手正对球门的射门线就被身体挡着
+        double ux = ctx.our_goal_x() - wm.opp[ot].x, uy = 90.0 - wm.opp[ot].y;
+        double ul = std::hypot(ux, uy);
+        if (ul < 1e-6) { ux = -ad; uy = 0.0; } else { ux /= ul; uy /= ul; }
+        sx[2] = wm.opp[ot].x + ux * kBallCentricCover;
+        sy[2] = wm.opp[ot].y + uy * kBallCentricCover;
+    }
+}
+
+// 算出本帧 3 名非持球人的目标点（按队员 id 索引；未参与者留 0）
+void ball_centric_points(const WorldModel &wm, double out_x[PLAYERS_PER_SIDE], double out_y[PLAYERS_PER_SIDE]) {
+    int mem[3];
+    const int nm = ball_centric_members(wm, mem);
+    if (nm <= 0) return;
+    double sx[3], sy[3];
+    if (wm.our_possession != 0) support_slots(wm, sx, sy);   // 有球：接应×2 + 掩护×1
+    else                        offball_slots(wm, sx, sy);   // 无球：朝球收拢×3
+    double d[3][3];
+    for (int k = 0; k < 3; ++k)
+        for (int s = 0; s < 3; ++s)
+            d[k][s] = (k < nm) ? dist(wm.home[mem[k]].x, wm.home[mem[k]].y, sx[s], sy[s]) : 1e18;
+    int slot_of[3];
+    greedy_slots(d, slot_of);
+    double fx[3], fy[3];
+    for (int k = 0; k < 3; ++k) {
+        fx[k] = sx[0]; fy[k] = sy[0];                       // 兜底：万一没配上槽就站 A 槽
+        if (k >= nm || slot_of[k] < 0) continue;
+        fx[k] = sx[slot_of[k]]; fy[k] = sy[slot_of[k]];
+        finish_slot_point(wm, mem[k], fx[k], fy[k]);
+    }
+    // 有球强制校验：分完必须至少有一人真站到球前方 kBallCentricFrontMin 以外；
+    //   球前一个人都没有 = 拿了球也没人接应，那就把离球最近的那个非持球人顶过去
+    if (wm.our_possession != 0) {
+        const double ad = wm.ctx.attack_dir();
+        bool front_ok = false;
+        for (int k = 0; k < nm; ++k)
+            if ((fx[k] - wm.ball.x) * ad > kBallCentricFrontMin) front_ok = true;
+        if (!front_ok) {
+            int near = 0;
+            double nd = 1e18;
+            for (int k = 0; k < nm; ++k) {
+                double dd = dist(wm.home[mem[k]].x, wm.home[mem[k]].y, wm.ball.x, wm.ball.y);
+                if (dd < nd) { nd = dd; near = k; }
+            }
+            double gx = clamp(wm.ball.x + ad * kBallCentricFront, 4.0, TeamContext::FIELD_LENGTH - 4.0);
+            double gy = clamp(wm.ball.y, 4.0, TeamContext::FIELD_WIDTH - 4.0);
+            separate_from_teammates(wm, mem[near], gx, gy);   // 推开时基本只动 y，仍留在球前方
+            fx[near] = gx; fy[near] = gy;
+        }
+    }
+    for (int k = 0; k < nm; ++k) { out_x[mem[k]] = fx[k]; out_y[mem[k]] = fy[k]; }
+}
+}  // anonymous namespace
+
+bool ball_centric_engaged(const WorldModel &wm) {
+    if (kBallCentric < 0.5) return false;
+    if (!wm.ball.valid || !wm.live_play || wm.in_penalty_exec) return false;
+    if (wm.coop_pass_task.active || wm.coop_ball_control.active) return false;   // 传球链路优先，绝不抢戏
+    return true;   // 无球 = 全队抢球；有球 = 护球 + 接应 + 掩护，两套都接管非持球人
+}
+
+bool ball_centric_target(const WorldModel &wm, int id, double &tx, double &ty) {
+    if (id < 1 || id >= PLAYERS_PER_SIDE) return false;
+    if (wm.role[id] == ROLE_GOALIE || id == wm.active_id) return false;
+    if (!wm.ball.valid) return false;
+    int mem[3];
+    const int nm = ball_centric_members(wm, mem);
+    bool mine = false;
+    for (int k = 0; k < nm; ++k) if (mem[k] == id) mine = true;
+    if (!mine) return false;
+    double ox[PLAYERS_PER_SIDE] = {0}, oy[PLAYERS_PER_SIDE] = {0};
+    ball_centric_points(wm, ox, oy);
+    tx = ox[id]; ty = oy[id];
+    return true;
+}
+
+void run_ball_centric(WorldModel &wm, int id) {
+    double tx = 0.0, ty = 0.0;
+    if (!ball_centric_target(wm, id, tx, ty)) { motion::stop(wm.home[id]); return; }
+    motion::position(wm.home[id], tx, ty, motion::TM_PASS);
+}
+
 }  // namespace simuro5

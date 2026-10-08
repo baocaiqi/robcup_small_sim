@@ -52,6 +52,10 @@ void Strategy::run(WorldModel &wm) {
 
     update_team_state(wm);
 
+    // 球权滞回：必须在角色分配之前刷新——assign 按它决定"全队抢球换人"还是"持球不换人"，
+    //   roles 按它决定是"无球收拢"还是"有球接应掩护"
+    update_our_possession(wm);
+
     sit_.update_stand_points(wm);
 
     ra_.assign(wm);
@@ -65,6 +69,9 @@ void Strategy::run(WorldModel &wm) {
     steal_decide(wm);
 
     // 5. 按角色执行；冷却期内仍在对方门区则撤出并跳过角色函数（防抖振卡区）
+    // 球权中心化：帧初一次性判定本帧走不走"以球为中心"的站位。帧内不再翻转——
+    //   否则 ACTIVE 中途取消传球任务会让同一帧的后半段突然换一套逻辑
+    const bool ball_centric_frame = ball_centric_engaged(wm);
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
         if (wm.ga_cooldown[i] > 0) {
@@ -87,6 +94,8 @@ void Strategy::run(WorldModel &wm) {
         if (kZoneMode > 0.5 && wm.live_play && !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
         }
+        // 球权中心化接管：持球人（ACTIVE）仍走 run_active，其余三人走"无球收拢/有球接应"
+        if (ball_centric_frame && i != wm.active_id) { run_ball_centric(wm, i); continue; }
         if (i == wm.presser_id) { run_press(wm, i); continue; }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;

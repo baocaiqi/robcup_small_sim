@@ -110,6 +110,9 @@ struct WorldModel {
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
     bool we_have_ball = false;
+    // 球权滞回标志：1=球在我们脚下（有球模式），0=无球（全队抢球）。
+    //   每帧在角色分配之前由 update_our_possession() 刷新，role_assignment 与 roles 都读它
+    int our_possession = 0;
 
     TeamState team_state = TS_DEFENSE;
     int possession_frames = 0;
