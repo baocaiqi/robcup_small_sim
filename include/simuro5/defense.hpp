@@ -94,9 +94,15 @@ inline double ball_goal_side(const TeamContext &ctx, double bx) {
     return (ctx.our_goal_x() > bx) ? 1.0 : -1.0;
 }
 
-// 门将封角度深度(cm)：球-门连线上球前 12cm，夹在 [guard_dist, 40]
-inline double goalie_block_depth(const TeamContext &ctx, double bx, double guard_dist) {
-    return std::min(40.0, std::max(guard_dist, ctx.dist_our_goal(bx) - 12.0));
+// 门将封角度深度(cm)：球-门连线上球前 side_margin，夹在 [guard_dist, max_out]。
+// 旧实现写死 max_out=40：球离门 >=52cm 时门将一律站到离门线 40cm
+//   （真机实测门将 x 中位 14~16cm、p99 42cm、最大 49.8cm），球一逼近就得从 40 跑回 3cm，
+//   物理上回不来 —— 实测丢球时门将 x=8.6~27.7 而球已在门线上，球从门将身后进网。
+// 现在由调用方传入 max_out 与 side_margin：球越近门将越必须缩回门线。
+inline double goalie_block_depth(const TeamContext &ctx, double bx, double guard_dist,
+                                 double max_out, double side_margin) {
+    return std::max(guard_dist,
+                    std::min(std::min(ctx.dist_our_goal(bx) - side_margin, max_out), 40.0));
 }
 
 // 门前抢反弹位：罚球区前缘、预测入球点 ±y_side（+30 上侧 / -30 下侧），

@@ -240,6 +240,10 @@ constexpr double kGkTrackYLo         = 76.0;   // 常规站位 y 跟球范围（
 constexpr double kGkTrackYHi         = 104.0;
 constexpr double kGkMinSpeed         = 5.0;    // 朝门球速（cm/帧）低于此值不前压
 constexpr double kGkFastShotSpeed    = 12.0;   // 朝门球速达到此值 → 前压到罚球区前缘
+TUNABLE(kGkBlockMaxOut, 22.0);   // cm：门将封角站位的最外深度（旧实现写死 40，实测门将跑到
+                                 // 离门线 34~49cm 后回不来，丢球时球已在其身后）。
+TUNABLE(kGkBallSideMargin, 6.0); // cm：门将站位的最外深度 = 球离门线距离 - 本值。
+                                 // 即门将永远比赛球更靠门至少这么远，球越近它越必须缩回门线。
 constexpr double kGkOppPullback      = 20.0;   // 罚球区内每个对手让前压深度回缩（cm），防埋伏回敲
 constexpr double kGkOppFrontPad      = 8.0;    // 前压深度上限：对方最前插球员身后余量（cm）
 constexpr double kGkClearDist        = 20.0;   // 球进此距离 → 脚下清球
@@ -370,7 +374,8 @@ inline double gk_block_cy(const GkView &v, double tx) {
 }
 
 void gk_block_ball_line(const TeamContext &ctx, RobotState &r, const GkView &v) {
-    double cx = gk_line_x(ctx, goalie_block_depth(ctx, v.bx, kGkGuardDist));
+    double cx = gk_line_x(ctx, goalie_block_depth(ctx, v.bx, kGkGuardDist,
+                                                  kGkBlockMaxOut, kGkBallSideMargin));
     double cy = gk_block_cy(v, cx);
     clamp_goalie_area(ctx, cx, cy);
     motion::position(r, cx, cy);
@@ -574,11 +579,22 @@ bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
 
 TUNABLE(kGkHoldSlide, 1.0);              // 0 = 回滚（贴球一律站定）
 constexpr double kGkHoldSlideDanger = 0.1;   // cm/帧：朝门速度高于此才算在滚进门
-constexpr double kGkHoldCover       = 5.0;   // cm：门将中心离进门点小于此 = 已挡住
+TUNABLE(kGkHoldCover, 2.0);      // cm：门将中心离进门点小于此才算"已挡住"。
+                                 // 原 5.0 太松：实测丢球时门将横向只偏 4.6cm 就自认挡住了、原地不动，
+                                 // 球从它旁边滚进网。收紧后偏 2~5cm 会走下面的滑移分支贴到球的进门点。
 bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 15.0 && v.db < 14.0)) return false;
     TRACE_MARK(wm.home[id]);
     RobotState &r = wm.home[id];
+    // 门将在球的"场侧"= 球已经跑到门将身后了。这时原地冻住等于把门让开：
+    //   实测丢球形状就是——球 x=2.6 贴着门线从 y=16 滚到 y=72，门将连续 30 帧 0 位移，
+    //   最后球从 y=73.9 进网、门将当时在 y=78.3（偏 4.4cm）。
+    // 正确动作：退回门线（x≈3）同时横向对到球当前的 y，用身体把球挡在门外。
+    if ((r.x - v.bx) * v.gside <= 0.0) {
+        motion::position(wm.home[id], gk_line_x(wm.ctx, 3.0),
+                         clamp(v.by, kGkYLo, kGkYHi), motion::TM_PASS);
+        return true;
+    }
     if (kGkHoldSlide > 0.5 && v.danger > kGkHoldSlideDanger && v.on_target &&
         (r.x - v.bx) * v.gside > 0.0 && std::fabs(r.y - v.y_at_goal) > kGkHoldCover) {
         motion::position(r, r.x, clamp(v.y_at_goal, kGkYLo, kGkYHi), motion::TM_STOP);
@@ -652,7 +668,11 @@ bool gk_rule_shot_block(WorldModel &wm, int id, const GkView &v) {
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
         opp_front = std::min(opp_front, ctx.dist_our_goal(wm.opp[i].x));
     depth = std::max(kGkGuardDist, std::min(depth, opp_front - kGkOppFrontPad));
-    double out_x = gk_line_x(ctx, v.ball_goal < 15.0 ? 3.0 : depth);
+    // 球越近，门将越必须缩回门线；站位深度不得比球离门线的距离更靠外超过 kGkBallSideMargin。
+    // 旧写法在 15cm 处硬切换（>15 用 depth、<=15 用 3.0）：球在 16cm 时门将冲到 30cm 外
+    // （实测最远 34.3cm），球一到 14.9cm 又要求它瞬间回 3cm —— 物理上回不来，于是丢球。
+    double out_depth = std::min(depth, std::max(3.0, v.ball_goal - kGkBallSideMargin));
+    double out_x = gk_line_x(ctx, out_depth);
     double iy = 90.0;
     if (!predict_y_at_x(v.bx, v.by, v.vx, v.vy, out_x, iy)) {
         if (std::fabs(v.bx - ctx.our_goal_x()) > 1e-6) {

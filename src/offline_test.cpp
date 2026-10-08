@@ -4083,6 +4083,38 @@ static int test_live_play() {
     return 0;
 }
 
+// 回归：门将封角站位深度必须"越近越贴门线"，且不许站到太外面。
+// 旧实现（defense.hpp:goalie_block_depth）写死 max_out=40：
+//   球离门 >=52cm 时门将一律站到离门线 40cm。真机实测门将 x 中位 14~16cm、p99 42cm、
+//   最大 49.8cm；由于回程太长，丢球时门将 x=8.6~27.7 而球已在门线上（球从门将身后进网）。
+static int test_gk_retreat_ball_side() {
+    TeamContext ctx{true};                       // 蓝位：己方门 x=220
+    const double max_out = 22.0, margin = 6.0, guard = 10.0;
+    double d60 = goalie_block_depth(ctx, ctx.our_goal_x() - 60.0, guard, max_out, margin);
+    double d20 = goalie_block_depth(ctx, ctx.our_goal_x() - 20.0, guard, max_out, margin);
+    double d8  = goalie_block_depth(ctx, ctx.our_goal_x() -  8.0, guard, max_out, margin);
+    if (d60 > max_out + 1e-9) {
+        printf("FAIL: 门将封角深度 %.1f 超过上限 %.1f（旧写死 40，实测站到 34~49cm 后回不来）\n",
+               d60, max_out);
+        return 1;
+    }
+    if (d20 > (20.0 - margin) + 1e-9) {
+        printf("FAIL: 球在 20cm 时门将深度 %.1f 没有比球更靠门 %.1fcm（会站到球外侧）\n",
+               d20, margin);
+        return 1;
+    }
+    if (!(d60 >= d20 - 1e-9 && d20 >= d8 - 1e-9)) {
+        printf("FAIL: 封角深度未随球逼近单调收缩（60cm→%.1f / 20cm→%.1f / 8cm→%.1f）\n",
+               d60, d20, d8);
+        return 1;
+    }
+    if (d8 < guard - 1e-9) {
+        printf("FAIL: 球贴门线时门将深度 %.1f 跌破常规站位 %.1f\n", d8, guard);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_goalie_line_block() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220
@@ -4385,6 +4417,7 @@ int main(int argc, char **argv) {
     rc |= test_pass_threat_weight();
     rc |= test_goalie_scenarios();
     rc |= test_goalie_og_fixes();
+    rc |= test_gk_retreat_ball_side();
     rc |= test_roles_spread();
     rc |= test_segment_circle();
     rc |= test_route_straight();
