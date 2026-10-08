@@ -579,6 +579,9 @@ bool gk_rule_press_door(WorldModel &wm, int id, const GkView &v) {
 
 TUNABLE(kGkHoldSlide, 1.0);              // 0 = 回滚（贴球一律站定）
 constexpr double kGkHoldSlideDanger = 0.1;   // cm/帧：朝门速度高于此才算在滚进门
+TUNABLE(kGkHoldPassGap, 7.0);    // cm：门将在球的场侧要退回门线时，横向必须让开球这么多才准朝门驱动。
+                                 // 门将处于球场侧时离球常在 6cm 内（已在接触范围），此时朝门驱动
+                                 // = 把球推进自家门（乌龙）。让不开就只横向对 y、绝不朝门动。
 TUNABLE(kGkHoldCover, 2.0);      // cm：门将中心离进门点小于此才算"已挡住"。
                                  // 原 5.0 太松：实测丢球时门将横向只偏 4.6cm 就自认挡住了、原地不动，
                                  // 球从它旁边滚进网。收紧后偏 2~5cm 会走下面的滑移分支贴到球的进门点。
@@ -586,13 +589,19 @@ bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 15.0 && v.db < 14.0)) return false;
     TRACE_MARK(wm.home[id]);
     RobotState &r = wm.home[id];
-    // 门将在球的"场侧"= 球已经跑到门将身后了。这时原地冻住等于把门让开：
-    //   实测丢球形状就是——球 x=2.6 贴着门线从 y=16 滚到 y=72，门将连续 30 帧 0 位移，
-    //   最后球从 y=73.9 进网、门将当时在 y=78.3（偏 4.4cm）。
-    // 正确动作：退回门线（x≈3）同时横向对到球当前的 y，用身体把球挡在门外。
+    // 门将在球的"场侧"= 球已经跑到门将身后了。原地冻住等于把门让开：
+    //   实测丢球形状——球 x=2.6 贴着门线从 y=16 滚到 y=72，门将连续 30 帧 0 位移。
+    // 但"退回门线"这一步本身是朝自家门驱动，而此分支下场侧意味着门将离球常在 6cm 内
+    // （已在接触范围）—— 朝门驱动就是把球推进自家门（乌龙）。所以分两种走法：
+    //   ① 横向已让开球（> kGkHoldPassGap）→ 可以安全退回门线并对到球的 y；
+    //   ② 横向贴着球 → 只横向对 y，x 原地不动，绝不朝门动一下。
     if ((r.x - v.bx) * v.gside <= 0.0) {
-        motion::position(wm.home[id], gk_line_x(wm.ctx, 3.0),
-                         clamp(v.by, kGkYLo, kGkYHi), motion::TM_PASS);
+        double ty = clamp(v.by, kGkYLo, kGkYHi);
+        if (std::fabs(r.y - v.by) > kGkHoldPassGap) {
+            motion::position(r, gk_line_x(wm.ctx, 3.0), ty, motion::TM_STOP);
+        } else {
+            motion::position(r, r.x, ty, motion::TM_STOP);
+        }
         return true;
     }
     if (kGkHoldSlide > 0.5 && v.danger > kGkHoldSlideDanger && v.on_target &&
