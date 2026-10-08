@@ -3992,6 +3992,9 @@ static int test_gk_goal_kick_reach() {
         printf("   (y66/72/78)\n");
     }
     if (new72 < 0 || new78 < 0 || new66 < 0) { printf("FAIL: 门球静止球门将 200 帧内未触球\n"); return 1; }
+    // 发球必须利落：y78 是 formation_set_ball 实际摆的球门球落点，改前要 130 帧（3.25 秒左右磨蹭）
+    if (new78 > 60) { printf("FAIL: 门球 y78 发球拖沓 %d 帧（应 <=60；改前 130 帧，属左右磨蹭回归）\n", new78); return 1; }
+    if (new66 > 70 || new72 > 90) { printf("FAIL: 门球 y66/y72 发球拖沓 %d/%d 帧（应 <=70/<=90；改前 83/121）\n", new66, new72); return 1; }
     return 0;
 }
 

@@ -243,12 +243,18 @@ constexpr double kGkFastShotSpeed    = 12.0;   // 朝门球速达到此值 → �
 constexpr double kGkOppPullback      = 20.0;   // 罚球区内每个对手让前压深度回缩（cm），防埋伏回敲
 constexpr double kGkOppFrontPad      = 8.0;    // 前压深度上限：对方最前插球员身后余量（cm）
 constexpr double kGkClearDist        = 20.0;   // 球进此距离 → 脚下清球
-constexpr double kGkClearAlignTol    = 20.0;   // 穿球前允许的机头偏差（度）
+TUNABLE(kGkClearAlignTol, 7.0);   // 穿球前允许的机头偏差（度）：必须够小
+                                // （原 20° 时门将带着 19° 偏航开推，球被越推越偏，
+                                //   最后门将冲过球、球往自家门滚，触发新一轮来回蹭）
 constexpr double kGkPushDist         = 8.0;    // 推球准备点：球后 cm
 constexpr double kGkLateral          = 30.0;   // 静止球在门将身后时绕球侧移（cm）
 
-TUNABLE(kGkAlignAcross, 3.0);   // 推球前允许的横向偏差 cm（>5 有擦不到球的风险）
+TUNABLE(kGkAlignAcross, 3.0);   // "已站到球后"允许的横向偏差 cm。
+                                // 它只当"承诺发球"的入口；入门之后一律不再重判，
+                                // 所以门限窄不会像旧代码那样被骑着来回翻（旧代码没有承诺位）。
 TUNABLE(kGkKickThrough, 45.0);  // 穿球目标：球前 cm（越远球被带得越快）
+TUNABLE(kGkServeReady, 3.0);     // cm：承诺期的解锁余量（冲到球前这么多就算推空）
+TUNABLE(kGkServeGlide, 12.0);    // cm：离后撤点还远于此值就带速滑过去，进此范围才刹车精调
 TUNABLE(kGkPrepPass, 1.0);      // 1=准备点带速走（TM_PASS）；0=精确站位
 constexpr double kGkBallBehindMargin = 6.0;    // 球比门将靠门超过此值 → 强制回门
 constexpr double kGkBallGoalSide     = 15.0;   // 强制回门：回到球的门侧 cm
@@ -331,6 +337,10 @@ void gk_goto(const TeamContext &ctx, RobotState &r, double x, double y,
 inline double gk_across(const RobotState &r, const GkView &v, double dx, double dy) {
     return (r.x - v.bx) * (-dy) + (r.y - v.by) * dx;
 }
+
+// 绕球往哪一侧躲：只看球离门中心哪边近，就往另一边绕。
+// 绝不能用门将自己的 y 来选边——门将一移动就跨过球的 y 线，选边当帧翻转，目标点横跳几十 cm。
+inline double gk_detour_side(double by) { return (by < 90.0) ? 1.0 : -1.0; }
 
 bool gk_aligned(const RobotState &r, const GkView &v, double dx, double dy) {
     double along = (r.x - v.bx) * dx + (r.y - v.by) * dy;
@@ -486,40 +496,58 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
     bool contested = v.opp_dmin < 40.0;
-    bool goal_side = (r.x - v.bx) * v.gside > 0.0;
-    if ((v.ball_goal < 20.0 || contested) && goal_side) {
-        double dx = ctx.attack_dir(), dy = 0.0;
-        if (!contested) {
-            gk_restart_direction(wm, id, v.bx, v.by, dx, dy);
-        }
-        gk_reachable_dir(ctx, v, dx, dy);
-        if (v.db < 25.0 && gk_aligned(r, v, dx, dy)) {
-            if (!gk_turn_to(r, dx, dy))
-                gk_goto(ctx, r, v.bx + dx * kGkKickThrough, v.by + dy * kGkKickThrough,
-                        motion::TM_PASS);
+    double dx = ctx.attack_dir(), dy = 0.0;
+    if (!contested) gk_restart_direction(wm, id, v.bx, v.by, dx, dy);
+    gk_reachable_dir(ctx, v, dx, dy);
+    // 发球拆成两段，中间用一个承诺位隔开：
+    //   第 0 段：走到"球后 kGkPushDist"这个准备点，并且到位时顺带把机头对准出球方向；
+    //   第 1 段：承诺之后只干一件事——朝球后 45cm 一口气推穿，绝不再回头重判到位/横向/距离。
+    // 为什么必须承诺：推穿这个动作本身会把门将带离准备点、也会让横向偏差变大，
+    // 一旦拿这些量当"要不要继续推"的条件，门将就会在"推穿"和"绕回球后"之间每 3 帧翻一次，
+    // 结果原地左右蹭（实测旧逻辑要 130 帧 = 3.25 秒才把球弄出去）。
+    double px = v.bx - dx * kGkPushDist, py = v.by - dy * kGkPushDist;
+    // 门将活动范围 y∈[kGkYLo,kGkYHi]，球贴着下沿时理论后撤点够不到，只能取夹住后的点
+    double pyc = clamp(py, kGkYLo, kGkYHi);
+    bool clamped = (pyc != py);
+    double ax = dx, ay = dy;                 // 实际推球方向
+    if (clamped) {
+        // 够不到理论后撤点 → 门将只能站在球的斜后上方，这时若还朝出球方向推，
+        // 会从球旁边擦过去把球拨错方向 → 改成"机头对准球、沿门将→球这条线推出去"。
+        double bdx = v.bx - r.x, bdy = v.by - r.y, n = std::hypot(bdx, bdy);
+        if (n > 1e-6) { ax = bdx / n; ay = bdy / n; }
+    }
+    if (wm.goalie_serve_phase == 0) {
+        // 球贴门线（<15cm）且门将在球外侧：直奔球后会穿球把球顶进自家门 → 先横移到球侧 22cm
+        if (v.ball_goal < 15.0 && (r.x - v.bx) * v.gside < 0.0) {
+            gk_goto(ctx, r, v.bx - v.gside * 10.0, v.by + gk_detour_side(v.by) * 22.0,
+                    motion::TM_STOP);
             return true;
         }
-        gk_goto(ctx, r, v.bx - dx * kGkPushDist, v.by - dy * kGkPushDist, motion::TM_PASS);
-        return true;
+        // 三个动作各用一个只管一件事的原语，别混：
+        //   position_aligned / arrive_facing 都想"又要走位又要转正"，两个目标互相扯，
+        //   实测 position_aligned 59 帧只挪 4.5cm、arrive_facing 到位后转过头转不停。
+        // 入口要求"停在后撤点附近且已对准"：后撤点是精确停靠点，因为从斜后方推球会把球拨偏。
+        bool at_ready = std::hypot(r.x - px, r.y - pyc) <= kGkServeReady &&
+                        (clamped || gk_aligned(r, v, dx, dy));
+        if (!at_ready) {
+            // 远距离接近要带速滑（别提前刹车，白磨帧数），但滑行停不准，
+            // 所以进到 kGkServeGlide 之内就切回 TM_STOP 精调停靠 —— 两者按距离分工，不重叠。
+            double to_prep = std::hypot(r.x - px, r.y - pyc);
+            bool gliding = !contested && !clamped && kGkPrepPass > 0.5 &&
+                           to_prep > kGkServeGlide &&
+                           std::fabs(gk_across(r, v, dx, dy)) <= kGkAlignAcross * 2.0;
+            gk_goto(ctx, r, px, pyc, gliding ? motion::TM_PASS : motion::TM_STOP);
+            return true;
+        }
+        wm.goalie_serve_phase = 1;
     }
-    double dx = 0.0, dy = 0.0;
-    gk_restart_direction(wm, id, v.bx, v.by, dx, dy);   // 推出 20cm 外后同样朝前
-    gk_reachable_dir(ctx, v, dx, dy);
-    bool ready = v.db < 25.0 && gk_aligned(r, v, dx, dy);
-    if (ready && gk_turn_to(r, dx, dy)) return true;
-    // 球贴门线（<15cm）且门将在球外侧：直奔球后会穿球把球顶进自家门 → 先横移到球侧 22cm
-    if (v.ball_goal < 15.0 && (r.x - v.bx) * v.gside < 0.0) {
-        double side = (r.y >= v.by) ? 1.0 : -1.0;
-        gk_goto(ctx, r, v.bx - v.gside * 10.0, v.by + side * 22.0, motion::TM_STOP);
-        return true;
+    // 承诺期唯一的解锁条件：真的冲到球前面去了（说明这一下没擦到球，推空了）
+    // ——只有推空才会满足，正常推穿时球一直被顶在门将前面，所以不会把状态翻回去。
+    if ((r.x - v.bx) * ax + (r.y - v.by) * ay > kGkServeReady) {
+        wm.goalie_serve_phase = 0;
     }
-    if (ready) {
-        gk_goto(ctx, r, v.bx + dx * kGkKickThrough, v.by + dy * kGkKickThrough, motion::TM_PASS);
-    } else if (kGkPrepPass > 0.5 && std::fabs(gk_across(r, v, dx, dy)) <= kGkAlignAcross * 2.0) {
-        gk_goto(ctx, r, v.bx - dx * kGkPushDist, v.by - dy * kGkPushDist, motion::TM_PASS);
-    } else {
-        gk_goto(ctx, r, v.bx - dx * kGkPushDist, v.by - dy * kGkPushDist, motion::TM_STOP);
-    }
+    if (gk_turn_to(r, ax, ay)) return true;    // 只管原地转正
+    gk_goto(ctx, r, v.bx + ax * kGkKickThrough, v.by + ay * kGkKickThrough, motion::TM_PASS);
     return true;
 }
 
@@ -579,7 +607,7 @@ bool gk_rule_clear(WorldModel &wm, int id, const GkView &v) {
     double tx, ty;
     motion::TargetMode mode;
     if (v.ball_goal < ctx.dist_our_goal(r.x)) {
-        double side = (r.y >= v.by) ? 1.0 : -1.0;
+        double side = gk_detour_side(v.by);               // 只看球的位置选边，避免左右翻
         double lat  = v.ball_still ? kGkLateral : 12.0;   // 球在动：小侧移贴近截下
         tx = v.bx + v.gside * kGkPushDist;
         ty = clamp(v.by + side * lat, kGkYLo, kGkYHi);

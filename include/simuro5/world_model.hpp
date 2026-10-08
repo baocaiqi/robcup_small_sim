@@ -108,6 +108,7 @@ struct WorldModel {
     double threat_level = 0.0; // 0~1
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
+    int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
     bool we_have_ball = false;
 
     TeamState team_state = TS_DEFENSE;
