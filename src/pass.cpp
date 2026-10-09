@@ -174,36 +174,22 @@ bool ordinary_pass_target_safe(const WorldModel &wm, double target_x, double tar
     return true;
 }
 
-}  // anonymous namespace
-
-bool pass_receiver_ready(const WorldModel &wm) {
-    const CoopPassTask &task = wm.coop_pass_task;
-    if (!task.active || task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
-        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
-        RECEIVER_READY_SPEED <= 1e-6 || PASS_BALL_SPEED <= 1e-6) return false;
-
-    const RobotState &receiver = wm.home[task.receiver_id];
-    const double t_receiver = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
-    const double t_ball = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
-    return t_receiver <= t_ball + RECEIVER_READY_TOLERANCE;
-}
-
-bool pass_opponent_arrives_first(const WorldModel &wm) {
-    const CoopPassTask &task = wm.coop_pass_task;
-    if (!task.active || task.phase != CoopPassPhase::Preparing ||
-        task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
-        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+// Ordinary 创建前候选筛选与活动任务复查共用同一套 ETA 证据和阈值。
+bool opponent_arrives_first_for_target(const WorldModel &wm, int receiver_id,
+                                      double target_x, double target_y) {
+    if (receiver_id < 0 || receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(target_x) || !std::isfinite(target_y) ||
         !std::isfinite(RECEIVER_READY_SPEED) || !std::isfinite(OPPONENT_REACH_SPEED) ||
         !std::isfinite(OPPONENT_MOTION_HORIZON) || !std::isfinite(OPPONENT_FIRST_MARGIN) ||
         RECEIVER_READY_SPEED <= 1e-6 || OPPONENT_REACH_SPEED <= 1e-6 ||
         OPPONENT_MOTION_HORIZON < 0.0 || OPPONENT_FIRST_MARGIN < 0.0) return false;
 
-    const RobotState &receiver = wm.home[task.receiver_id];
+    const RobotState &receiver = wm.home[receiver_id];
     if (!std::isfinite(receiver.x) || !std::isfinite(receiver.y)) return false;
-    const double receiver_time = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double receiver_time = dist(receiver.x, receiver.y, target_x, target_y) / RECEIVER_READY_SPEED;
     double opponent_time = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        const double dx = task.rx - wm.opp[i].x, dy = task.ry - wm.opp[i].y;
+        const double dx = target_x - wm.opp[i].x, dy = target_y - wm.opp[i].y;
         const double distance = std::hypot(dx, dy);
         if (!std::isfinite(distance)) continue;
 
@@ -223,6 +209,26 @@ bool pass_opponent_arrives_first(const WorldModel &wm) {
         opponent_time = std::min(opponent_time, eta);
     }
     return opponent_time + OPPONENT_FIRST_MARGIN < receiver_time;
+}
+
+}  // anonymous namespace
+
+bool pass_receiver_ready(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+        RECEIVER_READY_SPEED <= 1e-6 || PASS_BALL_SPEED <= 1e-6) return false;
+
+    const RobotState &receiver = wm.home[task.receiver_id];
+    const double t_receiver = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double t_ball = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
+    return t_receiver <= t_ball + RECEIVER_READY_TOLERANCE;
+}
+
+bool pass_opponent_arrives_first(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.phase != CoopPassPhase::Preparing) return false;
+    return opponent_arrives_first_for_target(wm, task.receiver_id, task.rx, task.ry);
 }
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
@@ -280,6 +286,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
             if (!std::isfinite(pass_dist) || pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) continue;
             if (route_blocked(wm, px, py, tx, ty)) continue;
             if (!ordinary_pass_target_safe(wm, tx, ty)) continue;
+            if (opponent_arrives_first_for_target(wm, id, tx, ty)) continue;
 
             double threat = count_near_opponent(wm, tx, ty);
             int front_threat = count_front_opponent(wm, tx, ty, ad);
