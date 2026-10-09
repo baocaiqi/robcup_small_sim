@@ -90,6 +90,8 @@ constexpr double ARRIVE_MARGIN    = 1.0;
 constexpr double SPEED_BASE       = 2.0;
 constexpr double ORDINARY_MOVE_COST_W = 0.25;
 constexpr double ORDINARY_OWNERSHIP_W = 0.35;
+constexpr double ORDINARY_LOCAL_STEP = 15.0;
+constexpr double ORDINARY_ANCHOR_DEVIATION_W = 0.5;
 
 // 假球位问 plan_shoot：只看球位/门将，即可判接应点有无射门开口
 bool receive_point_can_shoot(const WorldModel &wm, double tx, double ty) {
@@ -147,6 +149,29 @@ double ordinary_receiver_score_delta(const WorldModel &wm, int receiver_id,
     if (!has_opponent) nearest_opp_dist = move_cost;
     const double ownership_margin = nearest_opp_dist - move_cost;
     return ORDINARY_MOVE_COST_W * move_cost - ORDINARY_OWNERSHIP_W * ownership_margin;
+}
+
+// Ordinary 候选沿用 Admission 已有的目标合法区、接球点净空和球到目标线路规则。
+bool ordinary_pass_target_safe(const WorldModel &wm, double target_x, double target_y) {
+    if (!std::isfinite(target_x) || !std::isfinite(target_y) ||
+        target_x < 0.0 || target_x > TeamContext::FIELD_LENGTH ||
+        target_y < 0.0 || target_y > TeamContext::FIELD_WIDTH ||
+        in_opp_goal_area(wm.ctx, target_x, target_y) ||
+        in_goal_area(wm.ctx, target_x, target_y) || in_no_push_zone(target_x, target_y)) return false;
+
+    CircleObstacle obstacles[PLAYERS_PER_SIDE];
+    int obstacle_count = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (!std::isfinite(wm.opp[i].x) || !std::isfinite(wm.opp[i].y)) continue;
+        if (dist(target_x, target_y, wm.opp[i].x, wm.opp[i].y) < 20.0) return false;
+        obstacles[obstacle_count++] = {wm.opp[i].x, wm.opp[i].y, 8.0};
+    }
+    if (wm.ball.valid) {
+        if (!std::isfinite(wm.ball.x) || !std::isfinite(wm.ball.y) ||
+            !segment_clear_of_circles(wm.ball.x, wm.ball.y, target_x, target_y,
+                                      obstacles, obstacle_count)) return false;
+    }
+    return true;
 }
 
 }  // anonymous namespace
@@ -212,6 +237,11 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     double best_score = 1e9;
     double best_tx = 0, best_ty = 0;
 
+    const double local_offsets[5][2] = {
+        {0.0, 0.0}, {ORDINARY_LOCAL_STEP, 0.0}, {-ORDINARY_LOCAL_STEP, 0.0},
+        {0.0, ORDINARY_LOCAL_STEP}, {0.0, -ORDINARY_LOCAL_STEP}
+    };
+
     for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
 
@@ -224,40 +254,55 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
             default: break;
         }
 
-        double tx = base_x + ad * OFFSET_BASE;
-        double ty = base_y;
-        clamp_receive_point(ctx, tx, ty);
+        double center_x = base_x + ad * OFFSET_BASE;
+        double center_y = base_y;
+        clamp_receive_point(ctx, center_x, center_y);
+        if (!std::isfinite(center_x) || !std::isfinite(center_y)) continue;
 
-        double pass_dist = dist(px, py, tx, ty);
-        if (pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) {
-            continue;
-        }
+        double seen_x[5] = {};
+        double seen_y[5] = {};
+        int seen_count = 0;
+        for (int p = 0; p < 5; ++p) {
+            double tx = center_x + ad * local_offsets[p][0];
+            double ty = center_y + local_offsets[p][1];
+            clamp_receive_point(ctx, tx, ty);
+            if (!std::isfinite(tx) || !std::isfinite(ty) ||
+                dist(center_x, center_y, tx, ty) > ORDINARY_LOCAL_STEP + 1e-6) continue;
 
-        if (route_blocked(wm, px, py, tx, ty)) {
-            continue;
-        }
+            bool duplicate = false;
+            for (int d = 0; d < seen_count; ++d)
+                duplicate = duplicate || (std::fabs(tx - seen_x[d]) <= 1e-6 &&
+                                          std::fabs(ty - seen_y[d]) <= 1e-6);
+            if (duplicate) continue;
+            seen_x[seen_count] = tx; seen_y[seen_count] = ty; ++seen_count;
 
-        double threat = count_near_opponent(wm, tx, ty);
-        int front_threat = count_front_opponent(wm, tx, ty, ad);
+            const double pass_dist = dist(px, py, tx, ty);
+            if (!std::isfinite(pass_dist) || pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) continue;
+            if (route_blocked(wm, px, py, tx, ty)) continue;
+            if (!ordinary_pass_target_safe(wm, tx, ty)) continue;
 
-        bool can_shoot = receive_point_can_shoot(wm, tx, ty);
-        double t_opp = opp_arrive_time(wm, tx, ty);
-        double t_our = dist(wm.home[id].x, wm.home[id].y, tx, ty) / OUR_ARRIVE_SPEED;
-        bool opp_first = t_opp < t_our * ARRIVE_MARGIN;
-        double spd_threat = speed_threat(wm, tx, ty);
+            double threat = count_near_opponent(wm, tx, ty);
+            int front_threat = count_front_opponent(wm, tx, ty, ad);
 
-        double goal_dist = std::fabs(tx - ctx.opp_goal_x());
-        double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
-        if (can_shoot) score -= SHOOT_BONUS;
-        if (opp_first) score += ARRIVE_PENALTY;
-        score += spd_threat * SPEED_THREAT_W;
-        score += ordinary_receiver_score_delta(wm, id, tx, ty);
+            bool can_shoot = receive_point_can_shoot(wm, tx, ty);
+            double t_opp = opp_arrive_time(wm, tx, ty);
+            double t_our = dist(wm.home[id].x, wm.home[id].y, tx, ty) / OUR_ARRIVE_SPEED;
+            bool opp_first = t_opp < t_our * ARRIVE_MARGIN;
+            double spd_threat = speed_threat(wm, tx, ty);
 
-        if (score < best_score) {
-            best_score = score;
-            best = id;
-            best_tx = tx;
-            best_ty = ty;
+            double goal_dist = std::fabs(tx - ctx.opp_goal_x());
+            double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
+            if (can_shoot) score -= SHOOT_BONUS;
+            if (opp_first) score += ARRIVE_PENALTY;
+            score += spd_threat * SPEED_THREAT_W;
+            score += ordinary_receiver_score_delta(wm, id, tx, ty);
+            score += ORDINARY_ANCHOR_DEVIATION_W * dist(center_x, center_y, tx, ty);
+            if (score < best_score) {
+                best_score = score;
+                best = id;
+                best_tx = tx;
+                best_ty = ty;
+            }
         }
     }
 
