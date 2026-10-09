@@ -9,6 +9,13 @@ namespace simuro5 {
 // 推球守卫总开关：true = 死球/摆位期或球在角区时一律不碰球（防 No pushing 犯规）
 constexpr bool kNoPushGuardEnabled = false;
 
+namespace detail {
+// 纯推球许可判断；显式守卫参数仅用于测试 seam，比赛路径始终传正式配置值。
+bool push_allowed_with_guard(const WorldModel &wm, bool guard_enabled);
+// 带机器人身份的测试 seam；RestartSetup 例外仍须由现有 restart 归属/执行者确定。
+bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool guard_enabled);
+}  // namespace detail
+
 // 门将门线封堵：球在门框内轨迹上且快到门线时，把门线预测落点（贴线 3cm）写入 (tx,ty)
 bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty);
 

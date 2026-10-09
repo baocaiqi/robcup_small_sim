@@ -293,7 +293,9 @@ static void tgt_write_header(FILE *fp) {
 }
 
 static void tgt_write_row(FILE *fp, const SimState &s, const WorldModel &wm) {
-    fprintf(fp, "%d,%d,%d,%.2f,%.2f", s.frames, wm.live_play ? 1 : 0, (int)wm.team_state, s.bx, s.by);
+    // 合并（2026-10-12）：live_play 被队员改成 RuntimePhase，语义等价（Running 即活球）
+    fprintf(fp, "%d,%d,%d,%.2f,%.2f", s.frames,
+            (wm.runtime_phase == RuntimePhase::Running) ? 1 : 0, (int)wm.team_state, s.bx, s.by);
     for (int i = 0; i < 5; ++i) {
         const RobotState &r = wm.home[i];
         int line = 0;
@@ -870,8 +872,9 @@ static long g_og_by_id[5] = {0,0,0,0,0};
 static long g_pz_us = 0, g_pz_opp = 0, g_pz_both = 0, g_pz_none = 0, g_pz_both_us = 0;
 static long g_pz_opp_gk = 0, g_pz_opp_zone[3] = {0, 0, 0};   // 仅对方帧：对方门将 / 球在对方门前40·对方半场·我方半场
 static void count_active_swap(const WorldModel &wm, int &prev_id, bool &prev_live) {
-    if (prev_live && wm.live_play && wm.active_id != prev_id) ++g_active_swaps;
-    prev_id = wm.active_id; prev_live = wm.live_play;
+    const bool running = wm.runtime_phase == RuntimePhase::Running;
+    if (prev_live && running && wm.active_id != prev_id) ++g_active_swaps;
+    prev_id = wm.active_id; prev_live = running;
 }
 
 // 一场比赛

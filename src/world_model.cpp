@@ -4,7 +4,7 @@
 namespace simuro5 {
 
 const char *coop_outcome_name(CoopOutcome result) {
-    static const char *names[] = {"success", "prepare_timeout", "receive_timeout", "game_state",
+    static const char *names[] = {"success", "prepare_timeout", "receive_timeout", "phase_interrupted",
         "invalid_ball", "penalty", "high_threat", "corner", "intercepted", "emergency_defense",
         "incoming_shot", "invalid_target", "goal_discipline", "receiver_marked", "lane_blocked",
         "push_forbidden", "dead_ball", "degenerate_target", "prep_point", "match_end",
@@ -42,10 +42,6 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
     ctx = ctx_;
     game_state_last = game_state;
     game_state = (int)env->gameState;
-    if (game_state != game_state_last) {
-        coop_finish(CoopOutcome::GameState);
-        coop_control_end(CoopOutcome::GameState);
-    }
     whos_ball = env->whosBall;
     field = env->fieldBounds;
     goal = env->goalBounds;
@@ -67,12 +63,18 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
         const bool jump = std::fabs(ball.x - ball_last.x) > kMaxBallVel ||
                           std::fabs(ball.y - ball_last.y) > kMaxBallVel;
         if (game_state == PM_PlayOn) {
-            live_play = true; restart_armed = false;
+            runtime_phase = RuntimePhase::Running; restart_armed = false;
         } else if (!restart_armed || jump || game_state != game_state_last) {
-            restart_armed = true; restart_x = ball.x; restart_y = ball.y; live_play = false;
-        } else if (!live_play && std::hypot(ball.x - restart_x, ball.y - restart_y) > kLiveMoveDist) {
-            live_play = true;
+            restart_armed = true; restart_x = ball.x; restart_y = ball.y;
+            runtime_phase = RuntimePhase::RestartSetup;
+        } else if (runtime_phase != RuntimePhase::Running &&
+                   std::hypot(ball.x - restart_x, ball.y - restart_y) > kLiveMoveDist) {
+            runtime_phase = RuntimePhase::Running;
         }
+    }
+    if (runtime_phase != RuntimePhase::Running) {
+        coop_finish(CoopOutcome::PhaseInterrupted);
+        coop_control_end(CoopOutcome::PhaseInterrupted);
     }
     ball_pred.x = env->predictedBall.pos.x; ball_pred.y = env->predictedBall.pos.y;
     ball_pred.valid = true;

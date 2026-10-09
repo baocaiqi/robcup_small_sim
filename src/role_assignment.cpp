@@ -36,7 +36,7 @@ static double ball_cost(const WorldModel &wm, int i) {
 //   "只保留角色表" net 3.975 / 自己门区2+人 8.1 帧；再叠加"立刻换人" → 3.192；
 //   再把"重启抢球"也开上 → 3.083。⇒ 越激进越差，**只留保留角色表那一条**。
 TUNABLE(kActDeadInstant, 0.0);
-// 额外的"球静止"判定（cm/帧）：默认 0 = 关。只用 live_play 判重启 —— 实测（sim 默认口径球速恒 0、
+// 额外的"球静止"判定（cm/帧）：默认 0 = 关。只用 runtime_phase 判重启 —— 实测（sim 默认口径球速恒 0、
 // 真机慢滚球也常见）一旦拿"球速小"当条件，本规则会整场都在免确认换人，把滞回/冻结全废掉。
 TUNABLE(kActDeadStill, 0.0);
 // 重启期是否保留原角色表：1 = 保留（新，默认）；0 = 回滚成"每帧重置成固定档"（HEAD 行为，A/B 对照用）
@@ -48,20 +48,24 @@ TUNABLE(kActDeadConfirm, 0.0);
 void RoleAssignment::assign(WorldModel &wm) {
     const bool table_ok = wm.active_id >= 1 && wm.active_id < PLAYERS_PER_SIDE &&
                           wm.role[0] == ROLE_GOALIE && wm.role[wm.active_id] == ROLE_ACTIVE;
-    const bool old_freeze = !wm.live_play && kActKeepRoleDead < 0.5;   // HEAD：重启期每帧重置成固定档
+    // ⚠️ 合并取舍（2026-10-12）：队员 d9b1225 在 frozen 里加了 `runtime_phase != Running`，
+    //   效果等于"重启期每帧重置成固定档" —— 这正是我们第 72 轮用 kActKeepRoleDead 修掉的行为
+    //   （240 局 A/B：净胜 3.383→3.975，自家门区"2+ 人"犯规风险 −41%）。
+    //   故这里保留我们的旋钮口径；想退回那个行为把 kActKeepRoleDead 设成 0 即可。
+    const bool old_freeze = wm.runtime_phase != RuntimePhase::Running && kActKeepRoleDead < 0.5;
     if (kActDynamic < 0.5 || wm.in_penalty_exec || !wm.ball.valid || old_freeze || !table_ok) {
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.role[i] = kFixedRole[i];
         wm.active_id = 1; wm.active_cand = -1; wm.active_cand_frames = 0; wm.active_hold = 0;
         return;
     }
-    // ★ 重启/死球：球还没离开摆放点(live_play=false)或基本静止 → **本帧就把主攻交给离球最近的人**，
+    // ★ 重启/死球：球还没离开摆放点(runtime_phase=RestartSetup)或基本静止 → **本帧就把主攻交给离球最近的人**，
     //   不等 kActSwapFrames(8 帧) 确认、也不受 active_hold(球在我方 110cm 内时 70 帧) 冻结。
     //   为什么必须立刻：逐帧取证（sim_trace --target-csv）——复位那一帧离球 7.5cm 的那台是"抢球"，
     //   49cm 外的那台才是"主攻"；7 帧(0.18s)后才换过来，而这 0.18 秒球已经被推走 16~21cm。
     //   球一旦滚起来（live_play=true 且球速起来）就退回原来的滞回口径，避免整场都在换人。
-    const bool ball_dead = !wm.live_play ||
+    const bool ball_dead = wm.runtime_phase != RuntimePhase::Running ||
                            (kActDeadStill > 0.0 && std::hypot(wm.ball.vx, wm.ball.vy) <= kActDeadStill);
-    const bool dead = !wm.live_play;   // 球还钉在重启摆放点 = 重启窗口
+    const bool dead = wm.runtime_phase != RuntimePhase::Running;   // 球还钉在重启摆放点 = 重启窗口
     if (kActDeadInstant > 0.5 && ball_dead) {
         const int cur = wm.active_id;
         int best = -1;

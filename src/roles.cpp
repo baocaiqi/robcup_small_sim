@@ -15,6 +15,78 @@
 namespace simuro5 {
 
 namespace {
+bool touch_policy_allows(const WorldModel &wm, bool stage_allows_touch, bool guard_enabled) {
+    if (!stage_allows_touch) return false;
+    if (!guard_enabled) return true;
+    return !in_no_push_zone(wm.ball.x, wm.ball.y);
+}
+
+enum class RestartOwner { Unknown, Blue, Yellow };
+
+RestartOwner restart_owner(int game_state) {
+    switch (game_state) {
+        case PM_PlaceKick_Blue:
+        case PM_PenaltyKick_Blue:
+        case PM_FreeKick_Blue:
+        case PM_GoalKick_Blue:
+            return RestartOwner::Blue;
+        case PM_PlaceKick_Yellow:
+        case PM_PenaltyKick_Yellow:
+        case PM_FreeKick_Yellow:
+        case PM_GoalKick_Yellow:
+            return RestartOwner::Yellow;
+        default:
+            return RestartOwner::Unknown;  // FreeBall 只给区域，不给球队归属
+    }
+}
+
+bool restart_owned_by_us(const WorldModel &wm) {
+    const RestartOwner owner = restart_owner(wm.game_state);
+    return (wm.ctx.is_blue && owner == RestartOwner::Blue) ||
+           (!wm.ctx.is_blue && owner == RestartOwner::Yellow);
+}
+
+bool is_our_goal_kick(const WorldModel &wm) {
+    return (wm.ctx.is_blue && wm.game_state == PM_GoalKick_Blue) ||
+           (!wm.ctx.is_blue && wm.game_state == PM_GoalKick_Yellow);
+}
+
+bool restart_exception_for_actor(const WorldModel &wm, int id) {
+    if (wm.runtime_phase != RuntimePhase::RestartSetup || !wm.restart_armed ||
+        !restart_owned_by_us(wm)) return false;
+
+    if (is_our_goal_kick(wm))
+        return id == 0 && wm.role[0] == ROLE_GOALIE;
+
+    switch (wm.game_state) {
+        case PM_PlaceKick_Blue:
+        case PM_PlaceKick_Yellow:
+        case PM_PenaltyKick_Blue:
+        case PM_PenaltyKick_Yellow:
+        case PM_FreeKick_Blue:
+        case PM_FreeKick_Yellow:
+            return id == wm.active_id && id > 0 && id < PLAYERS_PER_SIDE &&
+                   wm.role[id] == ROLE_ACTIVE;
+        default:
+            return false;
+    }
+}
+}  // namespace
+
+namespace detail {
+bool push_allowed_with_guard(const WorldModel &wm, bool guard_enabled) {
+    return touch_policy_allows(wm, wm.runtime_phase == RuntimePhase::Running, guard_enabled);
+}
+
+bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool guard_enabled) {
+    if (robot_id < 0 || robot_id >= PLAYERS_PER_SIDE) return false;
+    const bool stage_allows_touch = wm.runtime_phase == RuntimePhase::Running ||
+                                    restart_exception_for_actor(wm, robot_id);
+    return touch_policy_allows(wm, stage_allows_touch, guard_enabled);
+}
+}  // namespace detail
+
+namespace {
 // 门将 y 夹取范围（门框 y∈[70,110]），下缘留 4cm 防撞下门柱
 // ⚠️ 2026-10-10 试过放宽到 70/110（真机 8 场 20 个失球里 55% 从离门柱 12cm 内进，
 //   想让它能站到门柱上），**实测把门球几何搞坏了、已回退**：
@@ -84,9 +156,11 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
 
 // 推球守卫：死球/摆位期或球在角区时不碰球（平台 No pushing 犯规，每 4 次送对手 1 球）
 bool push_allowed(const WorldModel &wm) {
-    if (!kNoPushGuardEnabled) { (void)wm; return true; }       // 守卫关闭：不拦
-    if (wm.game_state != PM_PlayOn) return false;             // 死球/摆位/重启期
-    return !in_no_push_zone(wm.ball.x, wm.ball.y);            // 球未贴角
+    return detail::push_allowed_with_guard(wm, kNoPushGuardEnabled);
+}
+
+bool robot_touch_allowed(const WorldModel &wm, int id) {
+    return detail::actor_touch_allowed_with_guard(wm, id, kNoPushGuardEnabled);
 }
 
 bool prep_point_ok(double px, double py) {
@@ -108,7 +182,7 @@ void hold_out_of_corner(WorldModel &wm, RobotState &r) {
 //   · 抢球角色把目标取在球心 ⇒ 机头与目标夹角一旦落到 60~95°，`motion::position`
 //     只会"先转身再走"（85~95° 前进分量硬性为 0）⇒ 实测 85~95° 档 92.5% 的帧**没有靠近球**。
 // 做法（一条硬规则，不参与上层分支）：
-//   球还钉在重启摆放点（live_play=false）或基本静止时，**球后（推进方向反侧）离球最近**的
+//   球还钉在重启摆放点（runtime_phase=RestartSetup）或基本静止时，**球后（推进方向反侧）离球最近**的
 //   我方场上队员，目标取「沿"我→球"方向再往前 kRestartThrough cm」——
 //   即**穿过球**。这样目标方向与"机头对准球"方向完全共线（夹角≈0），
 //   距离恒 ≥ kRestartThrough ⇒ 不会触发 de<1 停车、也不会被侧方死区拦住，必然直着推穿。
@@ -117,7 +191,7 @@ void hold_out_of_corner(WorldModel &wm, RobotState &r) {
 //   叠加本规则后 net 3.975 → 3.083、自己门区2+人 8.1 → 8.0 帧。**在 sim 上更差，所以不随构建生效**，
 //   真机 A/B 想要"重启必直穿球"就把它改成 1.0 重编（用例 test_restart_charge 已把语义钉住）。
 TUNABLE(kRestartCharge, 0.0);
-// 额外的"球静止"判定（cm/帧）：默认 0 = 关。只用 live_play 判重启 —— 因为实测（sim 默认口径球速
+// 额外的"球静止"判定（cm/帧）：默认 0 = 关。只用 runtime_phase 判重启 —— 因为实测（sim 默认口径球速
 // 恒为 0、真机慢滚球也常见）一旦拿"球速小"当条件，本规则会在活球里抢走 53% 的帧，整场行为被换掉。
 // 若真机发现某个重启态平台既不换 gameState、球也没跳 >30cm（live_play 不翻假），再把它设成 0.3 重编。
 TUNABLE(kRestartStill, 0.0);
@@ -180,7 +254,7 @@ bool restart_charge(WorldModel &wm, int id) {
     if (kRestartCharge < 0.5 || id <= 0 || id >= PLAYERS_PER_SIDE) return false;
     if (!wm.ball.valid || wm.in_penalty_exec) return false;
     if (wm.game_state != PM_PlayOn && !our_restart(wm)) return false;   // 对方开球：不许去抢
-    if (wm.live_play) return false;   // 只在"球还钉在重启摆放点"时接管（活球一律交回原逻辑）
+    if (wm.runtime_phase == RuntimePhase::Running) return false;   // 只在"球还钉在重启摆放点"时接管（活球一律交回原逻辑）
     const TeamContext &ctx = wm.ctx;
     const double bx = wm.ball.x, by = wm.ball.y;
     if (!std::isfinite(bx) || !std::isfinite(by)) return false;
@@ -570,7 +644,7 @@ inline bool gk_ball_replaced(const WorldModel &wm) {
 }
 
 void gk_update_opp_hold(WorldModel &wm, GkView &v) {
-    if (v.opp_dmin < 15.0) {
+    if (wm.possession == Possession::Opponent) {
         wm.goalie_opp_hold = kGkOppHoldFrames;
     } else if (wm.goalie_opp_hold > 0) {
         --wm.goalie_opp_hold;
@@ -757,7 +831,7 @@ bool gk_rule_line_block(WorldModel &wm, int id, const GkView &v) {
 }
 
 bool gk_rule_no_push(WorldModel &wm, int id, const GkView &v) {
-    if (push_allowed(wm)) return false;
+    if (robot_touch_allowed(wm, id)) return false;
     motion::position(wm.home[id], gk_line_x(wm.ctx, kGkGuardDist),
                      clamp(v.by, kGkTrackYLo, kGkTrackYHi), motion::TM_STOP);
     return true;
@@ -1425,15 +1499,19 @@ TUNABLE(kRecvArriveDist, 8.0);  // cm：进入即停车转正迎球
 TUNABLE(kRecvNoReverse, 1.0);   // 1=接球路径禁止倒车
 
 bool pass_context_safe_impl(const WorldModel &wm) {
-    if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
+    // 合并取舍（2026-10-12，由队员的用例定案）：
+    //   他的用例 `internal Running pass entry was blocked by stale raw game state` 断言
+    //   runtime_phase == Running 时不得被陈旧的 raw game_state 挡住。他的设计是
+    //   "game_state 只是裁判事件/重启类型，RuntimePhase 才是唯一常规动作闸"。
+    //   ⇒ 撤掉我们原来的 game_state != PM_PlayOn（runtime_phase 已覆盖重启态）。
+    if (!wm.ball.valid || wm.runtime_phase != RuntimePhase::Running ||
+        wm.in_penalty_exec ||
         wm.threat_level >= 0.6 || in_no_push_zone(wm.ball.x, wm.ball.y)) return false;
-    double ours = 1e9, theirs = 1e9;
+    double theirs = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        ours = std::min(ours, dist(wm.ball.x, wm.ball.y, wm.home[i].x, wm.home[i].y));
         theirs = std::min(theirs, dist(wm.ball.x, wm.ball.y, wm.opp[i].x, wm.opp[i].y));
     }
-    if ((theirs < 12.0 && theirs + 5.0 < ours) ||
-        (wm.whos_ball == 2 && !(ours < 12.0 && ours + 5.0 < theirs))) return false;
+    if (wm.possession == Possession::Opponent) return false;
     if (wm.ctx.dist_our_goal(wm.ball.x) < 80.0 &&
         std::hypot(wm.ball.vx, wm.ball.vy) < 3.0 && theirs < 100.0) return false;
     if (shot_on_target(wm) && ball_danger_speed(wm) > rebound_min_danger()) return false;
@@ -1460,8 +1538,10 @@ bool pass_target_safe_impl(const WorldModel &wm, int passer, int receiver,
 
 bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
+    // 合并（2026-10-12）：去掉我们的 coop_ball_control.game_state 锁 —— 该字段被队员的
+    //   球权统一删掉了，其语义（"临时控球不能跨比赛阶段存活"）由 runtime_phase + 任务生命周期取消覆盖
     return pass_context_safe_impl(wm) && id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
-        wm.coop_ball_control.game_state == wm.game_state && wm.ga_cooldown[id] <= 0 &&
+        wm.ga_cooldown[id] <= 0 &&
         wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
 }
@@ -1470,7 +1550,8 @@ void observe_pass_lifecycle(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     if (task.active && task.passer_id == wm.active_id && task.receiver_id >= 1 && task.receiver_id <= 4 &&
         task.receiver_id != task.passer_id &&
-        task.frames_left > 0 && task.game_state == wm.game_state && pass_context_safe_impl(wm)) {
+        // 合并（2026-10-12）：用队员的 runtime_phase 替代我们的 task.game_state 锁（同一语义）
+        task.frames_left > 0 && wm.runtime_phase == RuntimePhase::Running && pass_context_safe_impl(wm)) {
         if (task.phase == CoopPassPhase::Preparing && task.observing_push) {
             const RobotState &passer = wm.home[task.passer_id];
             double progress = (wm.ball.x - task.push_ball_x) * task.push_dir_x +
@@ -1491,14 +1572,14 @@ void observe_pass_lifecycle(WorldModel &wm) {
                 opp_min = std::min(opp_min, dist(wm.opp[i].x, wm.opp[i].y, wm.ball.x, wm.ball.y));
                 if (i != task.receiver_id) teammate_min = std::min(teammate_min, dist(wm.home[i].x, wm.home[i].y, wm.ball.x, wm.ball.y));
             }
-            bool evidence = wm.we_have_ball || wm.whos_ball == 1 || db + 5.0 < opp_min;
+            bool evidence = wm.possession == Possession::Ours || db + 5.0 < opp_min;
             bool received = db < kPassReceiveDistance && db < teammate_min && db < opp_min && evidence &&
                             std::hypot(wm.ball.vx, wm.ball.vy) <= kPassReceiveSpeed;
             task.receive_frames = received ? task.receive_frames + 1 : 0;
             if (task.receive_frames >= kPassReceiveFrames &&
                 pass_target_safe_impl(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
                 task.phase = CoopPassPhase::Received;
-                wm.coop_ball_control = {true, task.receiver_id, wm.game_state, 0};
+                wm.coop_ball_control = {true, task.receiver_id, 0};
                 wm.coop_finish(CoopOutcome::Success);
                 wm.coop_control_entered();
             }
@@ -1545,17 +1626,17 @@ void carry_pass_ball(WorldModel &wm, int id) {
 
 void cancel_unsafe_pass_task(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
-    if (task.active && (task.frames_left <= 0 || task.game_state != wm.game_state ||
+    if (task.active && (wm.runtime_phase != RuntimePhase::Running || task.frames_left <= 0 ||
         !pass_target_safe_impl(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
                           task.phase == CoopPassPhase::Preparing))) {
         CoopOutcome reason = CoopOutcome::InvalidTarget;
-        if (task.game_state != wm.game_state) reason = CoopOutcome::GameState;
+        if (wm.runtime_phase != RuntimePhase::Running) reason = CoopOutcome::PhaseInterrupted;
         else if (task.frames_left <= 0)
             reason = task.phase == CoopPassPhase::Preparing ? CoopOutcome::PrepareTimeout : CoopOutcome::ReceiveTimeout;
         else if (wm.in_penalty_exec) reason = CoopOutcome::Penalty;
         else if (in_no_push_zone(wm.ball.x, wm.ball.y)) reason = CoopOutcome::Corner;
         else if (wm.threat_level >= 0.6) reason = CoopOutcome::HighThreat;
-        else if (wm.whos_ball == 2) reason = CoopOutcome::Intercepted;
+        else if (wm.possession == Possession::Opponent) reason = CoopOutcome::Intercepted;
         else if (wm.active_ga_frames > kActiveGaLimit || wm.active_ga_total > kActiveGaTotal ||
                  wm.ga_cooldown[task.passer_id] > 0 || wm.ga_cooldown[task.receiver_id] > 0)
             reason = CoopOutcome::GoalDiscipline;
@@ -1577,7 +1658,9 @@ void cancel_unsafe_pass_task(WorldModel &wm) {
         wm.coop_finish(reason);
     }
     if (task.active && pass_opponent_arrives_first(wm)) wm.coop_finish(CoopOutcome::OpponentFirst);
-    if (wm.coop_ball_control.active && !pass_control_safe(wm)) wm.coop_control_end(CoopOutcome::InvalidTarget);
+    if (wm.coop_ball_control.active && !pass_control_safe(wm))
+        wm.coop_control_end(wm.runtime_phase == RuntimePhase::Running ?
+                            CoopOutcome::InvalidTarget : CoopOutcome::PhaseInterrupted);
 }
 
 double pass_receive_facing(const WorldModel &wm, const CoopPassTask &task, const RobotState &receiver) {
@@ -1750,7 +1833,7 @@ void run_active(WorldModel &wm, int id) {
         wm.corner_ball_frames = 0;
     }
 
-    if (!push_allowed(wm)) { if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PushForbidden); hold_out_of_corner(wm, r); return; }
+    if (!robot_touch_allowed(wm, id)) { if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PushForbidden); hold_out_of_corner(wm, r); return; }
 
     // 对方门球/定位球重启：球停死在对方门区，别冲进去抢；先站罚球区外沿外等开球
     //   例外：我方主罚点球（in_penalty_exec）必须去踢
@@ -1941,7 +2024,7 @@ void run_active(WorldModel &wm, int id) {
             wm.coop_pass_task = {};
             wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
             wm.coop_pass_task.receiver_id = cp.receiver_id; wm.coop_pass_task.rx = cp.rx; wm.coop_pass_task.ry = cp.ry;
-            wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
+            wm.coop_pass_task.frames_left = kPassTaskFrames;
             wm.coop_pass_task.kind = PassTaskKind::Coop; wm.coop_created();
         }
         if (coop_pass && !pass_receiver_ready(wm)) {
@@ -2044,7 +2127,7 @@ void run_active(WorldModel &wm, int id) {
             wm.coop_pass_task = {};
             wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
             wm.coop_pass_task.receiver_id = pp.receiver_id; wm.coop_pass_task.rx = pp.target_x; wm.coop_pass_task.ry = pp.target_y;
-            wm.coop_pass_task.frames_left = kPassTaskFrames; wm.coop_pass_task.game_state = wm.game_state;
+            wm.coop_pass_task.frames_left = kPassTaskFrames;
             wm.coop_pass_task.kind = PassTaskKind::Ordinary; wm.coop_created();
         }
         if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
@@ -2334,7 +2417,7 @@ void swarm_move(WorldModel &wm, int id, double tx, double ty) {
 bool run_swarm(WorldModel &wm, int id, double lane) {
     if (!kSwarmEnabled) return false;
     const TeamContext &ctx = wm.ctx;
-    if (!wm.live_play || wm.in_penalty_exec) return false;   // 认活球（平台 gameState 不回 PlayOn）
+    if (wm.runtime_phase != RuntimePhase::Running || wm.in_penalty_exec) return false;
     if (wm.coop_pass_task.active &&
         (id == wm.coop_pass_task.passer_id || id == wm.coop_pass_task.receiver_id)) return false;
     if (wm.coop_ball_control.active && id == wm.coop_ball_control.receiver_id) return false;

@@ -29,13 +29,16 @@ Situation SituationModule::analyze(const WorldModel &wm) {
     // 平台 whosBall 语义不可靠，只留作标定计数（whos_mismatch）
     bool near_ours   = (our_min < 20.0) && (our_min + 5.0 < opp_min);
     bool near_theirs = (opp_min < 20.0) && (opp_min + 5.0 < our_min);
-    if (near_ours) {
-        sit.we_have_ball = true;
-    } else if (near_theirs) {
-        sit.we_have_ball = false;
-    } else {
-        sit.we_have_ball = by_distance;
+    if (wm.runtime_phase == RuntimePhase::Running) {
+        if (near_ours) {
+            sit.possession = Possession::Ours;
+        } else if (near_theirs) {
+            sit.possession = Possession::Opponent;
+        } else {
+            sit.possession = by_distance ? Possession::Ours : Possession::Loose;
+        }
     }
+    sit.we_have_ball = sit.possession == Possession::Ours;
     if (wm.whos_ball != 0) sit.whos_mismatch = ((wm.whos_ball == 1) != by_distance);
 
     sit.ball_in_our_half = ctx.attack_dir() > 0 ? (bx < 110.0) : (bx > 110.0);
