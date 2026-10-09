@@ -32,7 +32,7 @@ static double ball_cost(const WorldModel &wm, int i) {
 }
 
 void RoleAssignment::assign(WorldModel &wm) {
-    const bool frozen = kActDynamic < 0.5 || !wm.live_play || wm.in_penalty_exec ||
+    const bool frozen = kActDynamic < 0.5 || wm.runtime_phase != RuntimePhase::Running || wm.in_penalty_exec ||
                         !wm.ball.valid;
     if (frozen || wm.active_id < 1 || wm.active_id >= PLAYERS_PER_SIDE ||
         wm.role[0] != ROLE_GOALIE || wm.role[wm.active_id] != ROLE_ACTIVE) {   // 未初始化或被外部改写

@@ -13,6 +13,14 @@ enum TeamState {
     TS_DEFENSE = 1
 };
 
+enum class RuntimePhase {
+    RestartSetup,
+    Running
+};
+
+// 运动战球权只表达场上空间关系；定位球归属仍由 raw game_state 单独识别。
+enum class Possession { Unknown, Ours, Opponent, Loose };
+
 struct RobotState {
     double x = 0, y = 0;
     double rot = 0;
@@ -30,7 +38,7 @@ enum class PassTaskKind { Coop, Ordinary };
 
 // 结算原因，只用于记账
 enum class CoopOutcome {
-    Success, PrepareTimeout, ReceiveTimeout, GameState, InvalidBall, Penalty,
+    Success, PrepareTimeout, ReceiveTimeout, PhaseInterrupted, InvalidBall, Penalty,
     HighThreat, Corner, Intercepted, EmergencyDefense, IncomingShot,
     InvalidTarget, GoalDiscipline, ReceiverMarked, LaneBlocked, PushForbidden,
     DeadBall, DegenerateTarget, PrepPoint, MatchEnd, LooseBall, TeammateTakeover,
@@ -49,7 +57,6 @@ struct CoopPassTask {
     int passer_id = -1, receiver_id = -1;
     double rx = 0.0, ry = 0.0;
     int frames_left = 0;
-    int game_state = 0;
     CoopPassPhase phase = CoopPassPhase::Preparing;
     // 推球指令只开观察窗口，之后的球位/速度/人球分离才是出球证据
     bool observing_push = false;
@@ -62,7 +69,6 @@ struct CoopPassTask {
 struct CoopBallControl {
     bool active = false;
     int receiver_id = -1;
-    int game_state = 0;
     int loose_frames = 0;
 };
 
@@ -92,13 +98,13 @@ struct WorldModel {
 
     Bounds field;
     Bounds goal;
-    int game_state = 0;      // PlayMode
+    int game_state = 0;      // raw PlayMode: referee events/restart type, not normal-action permission
     int game_state_last = 0;
-    // 活球判定：真机 gameState 从不回 PlayOn，故用"球已离开重启摆放点"补判
-    bool live_play = true;
+    // RuntimePhase is the sole normal-play action gate; update() derives it from PlayMode and restart-ball motion.
+    RuntimePhase runtime_phase = RuntimePhase::Running;
     bool restart_armed = false;
     double restart_x = 0.0, restart_y = 0.0;
-    long whos_ball = 0;      // 平台球权 0=未知；whos_disagree 为与自算不一致帧数
+    long whos_ball = 0;      // raw platform possession hint; retained for diagnostics, not our possession authority
     int whos_disagree = 0;
     // 我方点球执行中：roles 用它区分"对方门球(不抢)"与"我方点球(必须射门)"
     bool in_penalty_exec = false;
@@ -109,7 +115,8 @@ struct WorldModel {
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
-    bool we_have_ball = false;
+    bool we_have_ball = false;  // in-play possession inferred by Situation; separate from phase/restart ownership
+    Possession possession = Possession::Unknown;  // Situation 的唯一球权结果；bool 字段仅为兼容投影
 
     TeamState team_state = TS_DEFENSE;
     int possession_frames = 0;

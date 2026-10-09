@@ -34,7 +34,8 @@ bool we_take_penalty_spot(const WorldModel &wm) {
 
 void Strategy::run(WorldModel &wm) {
     Situation sit = sit_.analyze(wm);
-    wm.we_have_ball = sit.we_have_ball;
+    wm.possession = sit.possession;
+    wm.we_have_ball = (wm.possession == Possession::Ours);
     if (sit.whos_mismatch) ++wm.whos_disagree;
 
     // 我方点球执行期：平台执行期不报点球态，改用「球静止在对方罚球点」判据
@@ -84,7 +85,8 @@ void Strategy::run(WorldModel &wm) {
                 continue;
             }
         }
-        if (kZoneMode > 0.5 && wm.live_play && !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
+        if (kZoneMode > 0.5 && wm.runtime_phase == RuntimePhase::Running &&
+            !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
         }
         if (i == wm.presser_id) { run_press(wm, i); continue; }
@@ -172,7 +174,8 @@ void Strategy::update_team_state(WorldModel &wm) {
     if (wm.we_have_ball) { ++wm.possession_frames; wm.no_possession_frames = 0; }
     else                 { ++wm.no_possession_frames; wm.possession_frames = 0; }
 
-    if (wm.we_have_ball && !wm.prev_we_have_ball && wm.game_state == PM_PlayOn) {
+    if (wm.we_have_ball && !wm.prev_we_have_ball &&
+        wm.runtime_phase == RuntimePhase::Running) {
         wm.counter_attack_frames = kCounterWindowFrames;
     }
     if (wm.counter_attack_frames > 0) --wm.counter_attack_frames;
@@ -256,7 +259,7 @@ void Strategy::update_presser(WorldModel &wm) {
 
     if (kPressEnabled <= 0.0) return;
     if (!wm.ball.valid) return;
-    if (!wm.live_play) return;
+    if (wm.runtime_phase != RuntimePhase::Running) return;
     if (wm.we_have_ball) return;
 
     const TeamContext &ctx = wm.ctx;

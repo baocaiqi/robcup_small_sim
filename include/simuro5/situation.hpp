@@ -7,6 +7,7 @@
 namespace simuro5 {
 
 struct Situation {
+    Possession possession = Possession::Unknown;
     bool we_have_ball = false;
     bool whos_mismatch = false;  // 平台球权与自算不一致（标定用）
     bool ball_in_our_half = true;
