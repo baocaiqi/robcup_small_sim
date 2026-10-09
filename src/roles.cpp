@@ -1357,6 +1357,17 @@ static void execute_ordinary_pass_prep(WorldModel &wm, int id) {
     const bool heading_ok = std::isfinite(heading_error) &&
                             std::fabs(heading_error) <= kPrepAngTol;
 
+    // 首次合法 Push 后只执行固定穿球点；本帧的安全取消已在 run_active 入口完成。
+    if (task.push_target_locked) {
+        if (!task.observing_push && db < kPassReceiveDistance) {
+            task.observing_push = true;
+            task.push_ball_x = wm.ball.x;
+            task.push_ball_y = wm.ball.y;
+        }
+        motion::position(r, task.locked_push_target_x, task.locked_push_target_y, motion::TM_PASS);
+        return;
+    }
+
     if (!std::isfinite(prep_x) || !std::isfinite(prep_y) || !prep_point_ok(prep_x, prep_y)) {
         motion::stop(r);
         return;
@@ -1433,13 +1444,20 @@ static void execute_ordinary_pass_prep(WorldModel &wm, int id) {
         return;
     }
 
+    // 出球动作与实际 Release 分开：这里锁定 waypoint，球的证据仍由生命周期观察器判定。
+    task.push_target_locked = true;
+    task.push_start_ball_x = wm.ball.x;
+    task.push_start_ball_y = wm.ball.y;
+    task.push_start_dir_x = dir_x;
+    task.push_start_dir_y = dir_y;
+    task.locked_push_target_x = task.push_start_ball_x + task.push_start_dir_x * 20.0;
+    task.locked_push_target_y = task.push_start_ball_y + task.push_start_dir_y * 20.0;
     if (!task.observing_push && db < kPassReceiveDistance) {
         task.observing_push = true;
         task.push_ball_x = wm.ball.x;
         task.push_ball_y = wm.ball.y;
     }
-    motion::position(r, wm.ball.x + dir_x * 20.0,
-                     wm.ball.y + dir_y * 20.0, motion::TM_PASS);
+    motion::position(r, task.locked_push_target_x, task.locked_push_target_y, motion::TM_PASS);
 }
 
 void run_active(WorldModel &wm, int id) {

@@ -64,10 +64,21 @@ struct CoopPassTask {
     bool observing_push = false;
     double push_ball_x = 0.0, push_ball_y = 0.0;
     double push_dir_x = 0.0, push_dir_y = 0.0;
+    // 普通传球首次合法 Push 时固定穿球目标；出球或任务结束后清除。
+    bool push_target_locked = false;
+    double push_start_ball_x = 0.0, push_start_ball_y = 0.0;
+    double push_start_dir_x = 0.0, push_start_dir_y = 0.0;
+    double locked_push_target_x = 0.0, locked_push_target_y = 0.0;
     int receive_frames = 0;
     PassTaskKind kind = PassTaskKind::Coop;
     OrdinaryPassPrepPhase ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepPoint;
     int ordinary_prep_side = 0;
+    void clear_push_target_lock() {
+        push_target_locked = false;
+        push_start_ball_x = push_start_ball_y = 0.0;
+        push_start_dir_x = push_start_dir_y = 0.0;
+        locked_push_target_x = locked_push_target_y = 0.0;
+    }
 };
 
 struct CoopBallControl {

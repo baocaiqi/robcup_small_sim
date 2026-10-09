@@ -3416,6 +3416,297 @@ static int ordinary_prep_does_not_change_coop_or_shooting() {
     return 0;
 }
 
+static WorldModel ordinary_push_ready_scene() {
+    WorldModel wm = ordinary_prep_scene();
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Prepared;
+    wm.home[1].x = 138.0; wm.home[1].y = 90.0; wm.home[1].rot = 180.0;
+    return wm;
+}
+
+static WorldModel ordinary_push_committed_scene() {
+    WorldModel wm = ordinary_push_ready_scene();
+    run_active(wm, 1);
+    return wm;
+}
+
+static int ordinary_push_locks_target_on_first_commit() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.home[2].x = 145.0;
+    if (pass_receiver_ready(wm)) { printf("FAIL: Push lock WAIT fixture is ready\n"); return 1; }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: Ordinary Push committed before ReceiverReady\n"); return 1;
+    }
+    wm.home[2].x = 90.0;
+    RobotState expected = wm.home[1];
+    motion::position(expected, 110.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    const auto &task = wm.coop_pass_task;
+    if (!task.active || task.phase != CoopPassPhase::Preparing || !task.push_target_locked ||
+        !task.observing_push || task.push_start_ball_x != 130.0 || task.push_start_ball_y != 90.0 ||
+        fabs(task.push_start_dir_x + 1.0) > 1e-9 || fabs(task.push_start_dir_y) > 1e-9 ||
+        fabs(task.locked_push_target_x - 110.0) > 1e-9 ||
+        fabs(task.locked_push_target_y - 90.0) > 1e-9 ||
+        wm.coop_stats.released != 0 || !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: first legal Ordinary Push did not lock ball + direction*20cm separately from Release\n"); return 1;
+    }
+    printf("ordinary push locks target on first commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_commit_and_observation_are_separate() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.home[1].x = wm.ball.x + get_param("roles.kPrepDist", 23.5578);
+    run_active(wm, 1);
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.observing_push || wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+        wm.coop_stats.released != 0) {
+        printf("FAIL: first Push command, commitment, and Release observation were conflated\n"); return 1;
+    }
+    wm.home[1].x = 138.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        !wm.coop_pass_task.observing_push || wm.coop_pass_task.locked_push_target_x != push_x ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
+        printf("FAIL: approaching the ball did not open observation without faking Release\n"); return 1;
+    }
+    printf("ordinary push commitment and observation are separate: OK\n");
+    return 0;
+}
+
+static int ordinary_push_target_remains_fixed_across_frames() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: fixed-target fixture did not commit\n"); return 1; }
+    const double fixed_x = wm.coop_pass_task.locked_push_target_x;
+    const double fixed_y = wm.coop_pass_task.locked_push_target_y;
+    int p24_target_updates = 0, p25_target_updates = 0;
+    double last_p24_x = wm.ball.x - 20.0, last_p25_x = fixed_x;
+    for (double ball_x : {129.0, 128.0, 127.0}) {
+        wm.ball.x = ball_x; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+        RobotState expected = wm.home[1];
+        motion::position(expected, fixed_x, fixed_y, motion::TM_PASS);
+        run_active(wm, 1);
+        if (fabs((ball_x - 20.0) - last_p24_x) > 1e-9) ++p24_target_updates;
+        if (fabs(wm.coop_pass_task.locked_push_target_x - last_p25_x) > 1e-9) ++p25_target_updates;
+        last_p24_x = ball_x - 20.0;
+        last_p25_x = wm.coop_pass_task.locked_push_target_x;
+        if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+            wm.coop_pass_task.locked_push_target_x != fixed_x ||
+            wm.coop_pass_task.locked_push_target_y != fixed_y ||
+            !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: committed Push waypoint drifted with the ball\n"); return 1;
+        }
+    }
+    if (p24_target_updates != 3 || p25_target_updates != 0) {
+        printf("FAIL: scripted target update count P2.4=%d P2.5=%d\n", p24_target_updates, p25_target_updates);
+        return 1;
+    }
+    printf("ordinary push target remains fixed across frames: OK (P2.4 updates=%d, P2.5 updates=%d)\n",
+           p24_target_updates, p25_target_updates);
+    return 0;
+}
+
+static int ordinary_push_does_not_recheck_receiver_ready_after_commit() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[2].x = 145.0;
+    if (pass_receiver_ready(wm)) { printf("FAIL: ReceiverReady fluctuation fixture stayed ready\n"); return 1; }
+    RobotState expected = wm.home[1];
+    motion::position(expected, push_x, push_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: committed Ordinary Push waited for ReceiverReady again\n"); return 1;
+    }
+    printf("ordinary push does not recheck receiver ready after commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_does_not_return_to_align_after_commit() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[1].x += 0.5; wm.home[1].rot += 20.0;
+    RobotState expected = wm.home[1];
+    motion::position(expected, push_x, push_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: committed Ordinary Push returned to Align after small pose noise\n"); return 1;
+    }
+    printf("ordinary push does not return to align after commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_keeps_receiver_target_locked() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.assist_x = 55.0; wm.assist_y = 145.0;
+    wm.home[2].x = 95.0; wm.home[2].y = 92.0;
+    wm.ball.x = 129.0; wm.ball.vx = 0.0;
+    run_active(wm, 1);
+    const auto &task = wm.coop_pass_task;
+    if (!task.active || !task.push_target_locked || task.receiver_id != 2 ||
+        task.rx != 90.0 || task.ry != 90.0 ||
+        task.locked_push_target_x != push_x || task.locked_push_target_y != push_y ||
+        task.locked_push_target_x == task.rx) {
+        printf("FAIL: committed waypoint or locked receiver target changed\n"); return 1;
+    }
+    printf("ordinary push keeps receiver target locked: OK\n");
+    return 0;
+}
+
+static int ordinary_push_requires_real_release_evidence() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked || !wm.coop_pass_task.observing_push) {
+        printf("FAIL: Release-evidence fixture did not start observation\n"); return 1;
+    }
+    wm.home[1].x = 139.0; // 机器人移动，球不动：不能算 Release。
+    run_active(wm, 1);
+    if (wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
+        printf("FAIL: robot movement or Push lock fabricated Release\n"); return 1;
+    }
+    wm.ball.x = 125.0; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
+    run_active(wm, 1); // 进展仅 5cm，其余条件可满足，仍不得 Release。
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
+        printf("FAIL: sub-threshold ball motion fabricated Release\n"); return 1;
+    }
+    printf("ordinary push requires real release evidence: OK\n");
+    return 0;
+}
+
+static int ordinary_fixed_push_reaches_release() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    int continuous_push_frames = 1;
+    for (double ball_x : {128.0, 125.0}) {
+        wm.ball.vx = ball_x - wm.ball.x; wm.ball.vy = 0.0; wm.ball.x = ball_x;
+        RobotState expected = wm.home[1];
+        motion::position(expected, push_x, push_y, motion::TM_PASS);
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+            !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: fixed Push did not continue before real Release\n"); return 1;
+        }
+        ++continuous_push_frames;
+    }
+    wm.ball.vx = -2.0; wm.ball.x = 123.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving ||
+        wm.coop_pass_task.push_target_locked || wm.coop_stats.released != 1 ||
+        wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+        printf("FAIL: real ball progress/speed/separation did not end committed Push in Receiving\n"); return 1;
+    }
+    printf("ordinary fixed push reaches release: OK (continuous Push=%d frames; real Release=1)\n",
+           continuous_push_frames);
+    return 0;
+}
+
+static int ordinary_push_commitment_respects_safety_cancel() {
+    for (int case_id = 0; case_id < 3; ++case_id) {
+        WorldModel wm = ordinary_push_committed_scene();
+        if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: safety fixture did not commit\n"); return 1; }
+        CoopOutcome expected = CoopOutcome::PhaseInterrupted;
+        if (case_id == 0) wm.runtime_phase = RuntimePhase::RestartSetup;
+        if (case_id == 1) { wm.coop_pass_task.frames_left = 1; expected = CoopOutcome::PrepareTimeout; }
+        if (case_id == 2) { wm.possession = Possession::Opponent; expected = CoopOutcome::Intercepted; }
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+            wm.coop_stats.outcomes[(int)expected] != 1) {
+            printf("FAIL: committed Push ignored existing safety cancellation case=%d\n", case_id); return 1;
+        }
+    }
+    printf("ordinary push commitment respects safety cancel: OK\n");
+    return 0;
+}
+
+static int ordinary_push_lock_resets_after_task_end() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: reset fixture did not commit\n"); return 1; }
+    wm.coop_finish(CoopOutcome::InvalidTarget);
+    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.locked_push_target_x != 0.0 ||
+        wm.coop_pass_task.locked_push_target_y != 0.0) {
+        printf("FAIL: ended task retained committed Push target\n"); return 1;
+    }
+    wm.coop_pass_task = {}; // 与 Ordinary planner 的新建任务初始化一致。
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.kind = PassTaskKind::Ordinary;
+    task.passer_id = 1; task.receiver_id = 2; task.rx = 90.0; task.ry = 110.0;
+    task.frames_left = 80; task.ordinary_prep_phase = OrdinaryPassPrepPhase::Prepared;
+    wm.home[2].x = task.rx; wm.home[2].y = task.ry;
+    const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    const double dx = (task.rx - wm.ball.x) / len, dy = (task.ry - wm.ball.y) / len;
+    wm.home[1].x = wm.ball.x - dx * 8.0; wm.home[1].y = wm.ball.y - dy * 8.0;
+    wm.home[1].rot = angle_to(0.0, 0.0, dx, dy);
+    if (task.push_target_locked || task.locked_push_target_x != 0.0) {
+        printf("FAIL: new Ordinary task inherited the old waypoint before Push\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!task.active || !task.push_target_locked ||
+        fabs(task.locked_push_target_x - (130.0 + dx * 20.0)) > 1e-8 ||
+        fabs(task.locked_push_target_y - (90.0 + dy * 20.0)) > 1e-8 ||
+        fabs(task.locked_push_target_y - 90.0) < 1e-8) {
+        printf("FAIL: second Ordinary task reused the first task's Push waypoint\n"); return 1;
+    }
+    printf("ordinary push lock resets after task end: OK\n");
+    return 0;
+}
+
+static int ordinary_push_does_not_change_coop_pass() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.coop_pass_task.kind = PassTaskKind::Coop;
+    RobotState expected = wm.home[1];
+    motion::position(expected, 110.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Coop ||
+        wm.coop_pass_task.push_target_locked || !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: Ordinary Push commitment changed CoopPass's initial command\n"); return 1;
+    }
+    wm.ball.x = 129.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    expected = wm.home[1];
+    motion::position(expected, 109.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: CoopPass was incorrectly given the Ordinary fixed waypoint\n"); return 1;
+    }
+    printf("ordinary push does not change coop pass: OK\n");
+    return 0;
+}
+
+static int ordinary_push_waypoint_stall_keeps_real_release_rule() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[1].x = push_x; wm.home[1].y = push_y;
+    wm.ball.vx = wm.ball.vy = 0.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+        printf("FAIL: fixed-waypoint stall must wait for evidence, not fabricate Release\n"); return 1;
+    }
+    wm.coop_pass_task.frames_left = 1;
+    run_active(wm, 1);
+    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout] != 1) {
+        printf("FAIL: existing timeout did not end stalled Ordinary Push\n"); return 1;
+    }
+    printf("ordinary push waypoint stall keeps real release rule: OK (no false Release; existing timeout exits)\n");
+    return 0;
+}
+
 static bool ordinary_target_is_opponent_first(const WorldModel &source, int receiver_id,
                                               double target_x, double target_y) {
     WorldModel probe = source;
@@ -5848,6 +6139,18 @@ int main(int argc, char **argv) {
         rc |= ordinary_prep_keeps_locked_pass_target();
         rc |= ordinary_prep_respects_existing_safety_cancel();
         rc |= ordinary_prep_does_not_change_coop_or_shooting();
+        rc |= ordinary_push_locks_target_on_first_commit();
+        rc |= ordinary_push_commit_and_observation_are_separate();
+        rc |= ordinary_push_target_remains_fixed_across_frames();
+        rc |= ordinary_push_does_not_recheck_receiver_ready_after_commit();
+        rc |= ordinary_push_does_not_return_to_align_after_commit();
+        rc |= ordinary_push_keeps_receiver_target_locked();
+        rc |= ordinary_push_requires_real_release_evidence();
+        rc |= ordinary_fixed_push_reaches_release();
+        rc |= ordinary_push_commitment_respects_safety_cancel();
+        rc |= ordinary_push_lock_resets_after_task_end();
+        rc |= ordinary_push_does_not_change_coop_pass();
+        rc |= ordinary_push_waypoint_stall_keeps_real_release_rule();
         rc |= test_pass_readiness_gate();
         rc |= test_receiver_meet_ball();
         rc |= test_pass_opponent_first_cancel();
@@ -5907,6 +6210,18 @@ int main(int argc, char **argv) {
     rc |= ordinary_prep_keeps_locked_pass_target();
     rc |= ordinary_prep_respects_existing_safety_cancel();
     rc |= ordinary_prep_does_not_change_coop_or_shooting();
+    rc |= ordinary_push_locks_target_on_first_commit();
+    rc |= ordinary_push_commit_and_observation_are_separate();
+    rc |= ordinary_push_target_remains_fixed_across_frames();
+    rc |= ordinary_push_does_not_recheck_receiver_ready_after_commit();
+    rc |= ordinary_push_does_not_return_to_align_after_commit();
+    rc |= ordinary_push_keeps_receiver_target_locked();
+    rc |= ordinary_push_requires_real_release_evidence();
+    rc |= ordinary_fixed_push_reaches_release();
+    rc |= ordinary_push_commitment_respects_safety_cancel();
+    rc |= ordinary_push_lock_resets_after_task_end();
+    rc |= ordinary_push_does_not_change_coop_pass();
+    rc |= ordinary_push_waypoint_stall_keeps_real_release_rule();
     rc |= test_pass_readiness_gate();
     rc |= test_receiver_meet_ball();
     rc |= test_pass_opponent_first_cancel();
