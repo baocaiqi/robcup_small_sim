@@ -2894,7 +2894,7 @@ static int ordinary_pass_prefers_receiver_owned_target() {
 static int ordinary_pass_scoring_does_not_relax_hard_safety() {
     WorldModel wm = ordinary_scoring_scene();
     wm.home[2].x = 120.0; wm.home[2].y = 80.0;  // 被挡候选的移动成本为 0
-    wm.home[3].x = 120.0; wm.home[3].y = 150.0; // 安全候选的移动成本为 50cm
+    wm.home[3].x = 120.0; wm.home[3].y = 140.0; // 安全候选仍明显更远，但不触发 OpponentFirst
     wm.opp[0].x = 152.5; wm.opp[0].y = 85.0;   // 挡住 2 的线路，离其锁点仍约 33cm
     PassPlan plan = plan_pass(wm, 1);
     if (!plan.viable || plan.receiver_id != 3 || fabs(plan.target_y - 100.0) > 1e-6) {
@@ -3072,6 +3072,232 @@ static int ordinary_pass_local_search_does_not_change_coop_pass() {
         return 1;
     }
     printf("ordinary pass local search leaves CoopPass unchanged: OK\n");
+    return 0;
+}
+
+static WorldModel ordinary_dynamic_scene(double receiver_x, double receiver_y,
+                                         double opp_x, double opp_y,
+                                         double ball_x = 70.0, double ball_y = 90.0) {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.valid = true; wm.ball.x = ball_x; wm.ball.y = ball_y;
+    wm.ball.vx = 0.0; wm.ball.vy = 4.0; // 避免触发既有的自家门前慢球传球禁令
+    wm.home[0].x = 210.0; wm.home[0].y = 90.0;
+    wm.home[1].x = 75.0; wm.home[1].y = 90.0;
+    wm.home[2].x = receiver_x; wm.home[2].y = receiver_y;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    wm.assist_x = 120.0; wm.assist_y = 90.0; // 普通计划中心为 (109.9,90)
+    wm.mid_x = 180.0; wm.mid_y = 150.0;
+    wm.passive_x = 180.0; wm.passive_y = 40.0;
+    wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.opp_vel_ready = false;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+        wm.opp_vx[i] = wm.opp_vy[i] = 0.0;
+    }
+    wm.opp[0].x = opp_x; wm.opp[0].y = opp_y;
+    return wm;
+}
+
+static bool ordinary_target_is_opponent_first(const WorldModel &source, int receiver_id,
+                                              double target_x, double target_y) {
+    WorldModel probe = source;
+    probe.coop_pass_task = {};
+    probe.coop_pass_task.active = true;
+    probe.coop_pass_task.phase = CoopPassPhase::Preparing;
+    probe.coop_pass_task.kind = PassTaskKind::Ordinary;
+    probe.coop_pass_task.passer_id = 1;
+    probe.coop_pass_task.receiver_id = receiver_id;
+    probe.coop_pass_task.rx = target_x;
+    probe.coop_pass_task.ry = target_y;
+    probe.coop_pass_task.frames_left = 40;
+    return pass_opponent_arrives_first(probe);
+}
+
+static bool ordinary_plan_is_opponent_first(const WorldModel &source, const PassPlan &plan) {
+    return plan.viable && ordinary_target_is_opponent_first(
+        source, plan.receiver_id, plan.target_x, plan.target_y);
+}
+
+struct OrdinaryLocalAudit {
+    int template_points = 0;
+    int static_viable = 0;
+    int opponent_first = 0;
+    int eligible = 0;
+};
+
+// 只用于固定场景审计：复核角色2现有五点模板被旧硬条件和动态证据分别筛掉多少。
+static OrdinaryLocalAudit audit_ordinary_local_template(const WorldModel &wm,
+                                                         double center_x, double center_y) {
+    const double ad = wm.ctx.attack_dir();
+    const double offsets[5][2] = {
+        {0.0, 0.0}, {ad * 15.0, 0.0}, {-ad * 15.0, 0.0}, {0.0, 15.0}, {0.0, -15.0}
+    };
+    OrdinaryLocalAudit audit;
+    CircleObstacle obstacles[PLAYERS_PER_SIDE];
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        obstacles[i] = {wm.opp[i].x, wm.opp[i].y, 8.0};
+    for (int p = 0; p < 5; ++p) {
+        ++audit.template_points;
+        const double tx = center_x + offsets[p][0], ty = center_y + offsets[p][1];
+        const double pass_dist = dist(wm.home[1].x, wm.home[1].y, tx, ty);
+        if (!std::isfinite(pass_dist) || pass_dist <= get_param("pass.PASS_MIN_DIST", 8.0) ||
+            pass_dist >= get_param("pass.PASS_MAX_DIST", 69.4267) ||
+            in_opp_goal_area(wm.ctx, tx, ty) || in_goal_area(wm.ctx, tx, ty) ||
+            in_no_push_zone(tx, ty)) continue;
+        bool safe = true;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            if (dist(tx, ty, wm.opp[i].x, wm.opp[i].y) < 20.0 ||
+                point_to_segment_dist(wm.opp[i].x, wm.opp[i].y,
+                                      wm.home[1].x, wm.home[1].y, tx, ty) <
+                    get_param("pass.BLOCK_THRESHOLD", 7.4329)) safe = false;
+        }
+        if (!safe || !segment_clear_of_circles(wm.ball.x, wm.ball.y, tx, ty,
+                                               obstacles, PLAYERS_PER_SIDE)) continue;
+        ++audit.static_viable;
+        if (ordinary_target_is_opponent_first(wm, 2, tx, ty)) ++audit.opponent_first;
+        else ++audit.eligible;
+    }
+    return audit;
+}
+
+static int ordinary_pass_rejects_clear_opponent_first_at_creation() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 90.0, 110.0, 50.0);
+    wm.opp_vel_ready = true; wm.opp_vy[0] = 8.0;
+    const double center_x = wm.assist_x + wm.ctx.attack_dir() * get_param("pass.OFFSET_BASE", 10.1);
+    WorldModel evidence = wm;
+    evidence.coop_pass_task.active = true; evidence.coop_pass_task.phase = CoopPassPhase::Preparing;
+    evidence.coop_pass_task.receiver_id = 2; evidence.coop_pass_task.rx = center_x;
+    evidence.coop_pass_task.ry = wm.assist_y;
+    const bool clear_evidence = pass_opponent_arrives_first(evidence);
+    const PassPlan plan_with_first_opponent = plan_pass(wm, 1);
+    const bool selected_plan_first = ordinary_plan_is_opponent_first(wm, plan_with_first_opponent);
+    WorldModel clear_lane = wm;
+    clear_lane.opp[0].x = 200.0; clear_lane.opp[0].y = 20.0;
+    clear_lane.opp_vx[0] = clear_lane.opp_vy[0] = 0.0;
+    PassPlan clear_lane_plan = plan_pass(clear_lane, 1);
+    const OrdinaryLocalAudit audit = audit_ordinary_local_template(wm, center_x, wm.assist_y);
+    printf("clear-first candidates: static=%d opponent-first=%d; current-plan=%d target=(%.1f,%.1f) first=%d\n",
+           audit.static_viable, audit.opponent_first, (int)plan_with_first_opponent.viable,
+           plan_with_first_opponent.target_x, plan_with_first_opponent.target_y, (int)selected_plan_first);
+    run_active(clear_lane, 1);
+    run_active(wm, 1);
+    printf("clear-first task outcome: no-risk-task=%d clear-risk-task=%d\n",
+           (int)clear_lane.coop_pass_task.active, (int)wm.coop_pass_task.active);
+    if (!clear_lane.coop_pass_task.active || clear_lane.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        !clear_lane_plan.viable || !clear_evidence || audit.static_viable <= 0 ||
+        audit.opponent_first != audit.static_viable || wm.coop_pass_task.active || plan_with_first_opponent.viable) {
+        printf("FAIL: clear OpponentFirst must be rejected before Ordinary task creation\n"); return 1;
+    }
+    printf("ordinary pass rejects clear opponent-first at creation: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_accepts_close_arrival_race() {
+    WorldModel wm = ordinary_dynamic_scene(150.0, 90.0, 120.0, 50.0);
+    PassPlan baseline = plan_pass(wm, 1);
+    WorldModel evidence = wm;
+    evidence.coop_pass_task.active = true;
+    evidence.coop_pass_task.phase = CoopPassPhase::Preparing;
+    evidence.coop_pass_task.passer_id = 1; evidence.coop_pass_task.receiver_id = 2;
+    evidence.coop_pass_task.rx = baseline.target_x; evidence.coop_pass_task.ry = baseline.target_y;
+    const double receiver_eta = dist(wm.home[2].x, wm.home[2].y, baseline.target_x, baseline.target_y) / 2.0;
+    double nearest_opp = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        nearest_opp = std::min(nearest_opp, dist(wm.opp[i].x, wm.opp[i].y, baseline.target_x, baseline.target_y));
+    const double opponent_eta = 3.0 + nearest_opp / 2.0;
+    if (!baseline.viable || pass_opponent_arrives_first(evidence) ||
+        receiver_eta <= opponent_eta || receiver_eta - opponent_eta >= 3.0) {
+        printf("FAIL: close race should remain within the existing 3-frame cushion (receiver=%.1f opponent=%.1f)\n",
+               receiver_eta, opponent_eta); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary) {
+        printf("FAIL: close arrival race lost the Ordinary task opportunity\n"); return 1;
+    }
+    printf("ordinary pass accepts close arrival race: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_tries_alternative_safe_local_point() {
+    WorldModel wm = ordinary_dynamic_scene(135.0, 90.0, 95.0, 65.0);
+    wm.assist_x = 120.1; wm.assist_y = 90.0; // 中心 (110,90)，前移候选 (95,90)
+    PassPlan plan = plan_pass(wm, 1);
+    const bool selected_first = ordinary_plan_is_opponent_first(wm, plan);
+    const bool old_best_is_first = ordinary_target_is_opponent_first(wm, 2, 95.0, 90.0);
+    const OrdinaryLocalAudit audit = audit_ordinary_local_template(wm, 110.0, 90.0);
+    run_active(wm, 1);
+    printf("ordinary local alternative: static=%d opponent-first=%d eligible=%d; old-best=(95,90) first=%d; selected=(%.1f,%.1f) first=%d task=%d@%.1f,%.1f\n",
+           audit.static_viable, audit.opponent_first, audit.eligible, (int)old_best_is_first,
+           plan.target_x, plan.target_y, (int)selected_first, (int)wm.coop_pass_task.active,
+           wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    if (!old_best_is_first || !plan.viable || plan.receiver_id != 2 || selected_first ||
+        (fabs(plan.target_x - 95.0) < 1e-6 && fabs(plan.target_y - 90.0) < 1e-6) ||
+        audit.static_viable < 2 || audit.opponent_first < 1 || audit.eligible < 1) {
+        printf("FAIL: planner did not substitute a safe local candidate\n"); return 1;
+    }
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.receiver_id != plan.receiver_id ||
+        fabs(wm.coop_pass_task.rx - plan.target_x) > 1e-6 ||
+        fabs(wm.coop_pass_task.ry - plan.target_y) > 1e-6) {
+        printf("FAIL: alternative safe local point was not locked into the task\n"); return 1;
+    }
+    printf("ordinary pass tries alternative safe local point: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_does_not_block_receiver_travel() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 90.0, 220.0, 90.0);
+    PassPlan plan = plan_pass(wm, 1);
+    run_active(wm, 1);
+    if (!plan.viable || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.kind != PassTaskKind::Ordinary || pass_receiver_ready(wm)) {
+        printf("FAIL: receiver travel/readiness must remain a post-creation preparation state\n"); return 1;
+    }
+    printf("ordinary pass does not block receiver travel: OK\n");
+    return 0;
+}
+
+static int preparing_pass_still_cancels_on_new_opponent_first() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 80.0, 120.0, 45.0);
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.phase = CoopPassPhase::Preparing; task.kind = PassTaskKind::Ordinary;
+    task.passer_id = 1; task.receiver_id = 2; task.rx = 120.0; task.ry = 80.0; task.frames_left = 40;
+    if (pass_opponent_arrives_first(wm)) { printf("FAIL: initial stable opponent state should not cancel\n"); return 1; }
+    wm.opp_vel_ready = true; wm.opp_vy[0] = 8.0;
+    if (!pass_opponent_arrives_first(wm)) { printf("FAIL: updated approach evidence should trigger the existing OpponentFirst check\n"); return 1; }
+    cancel_unsafe_coop_pass(wm);
+    if (wm.coop_pass_task.active || wm.coop_stats.outcomes[(int)CoopOutcome::OpponentFirst] != 1) {
+        printf("FAIL: Preparing task no longer cancels after new OpponentFirst evidence\n"); return 1;
+    }
+    printf("preparing pass still cancels on new opponent first: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_does_not_tighten_existing_hard_gates() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.vy = 4.0;
+    wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.mid_x = 0.0; wm.mid_y = 0.0;
+    wm.passive_x = 0.0; wm.passive_y = 180.0;
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 95.0) > 1e-6) {
+        printf("FAIL: existing safe 15cm local rescue was changed by OpponentFirst gating\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        fabs(wm.coop_pass_task.rx - plan.target_x) > 1e-6 ||
+        fabs(wm.coop_pass_task.ry - plan.target_y) > 1e-6) {
+        printf("FAIL: existing distance/line/target admission no longer creates this safe task\n"); return 1;
+    }
+    printf("ordinary pass does not tighten existing hard gates: OK\n");
     return 0;
 }
 
@@ -5260,6 +5486,12 @@ int main(int argc, char **argv) {
         rc |= ordinary_pass_local_search_respects_hard_safety();
         rc |= ordinary_pass_local_target_is_locked_after_task_creation();
         rc |= ordinary_pass_local_search_does_not_change_coop_pass();
+        rc |= ordinary_pass_rejects_clear_opponent_first_at_creation();
+        rc |= ordinary_pass_accepts_close_arrival_race();
+        rc |= ordinary_pass_tries_alternative_safe_local_point();
+        rc |= ordinary_pass_does_not_block_receiver_travel();
+        rc |= preparing_pass_still_cancels_on_new_opponent_first();
+        rc |= ordinary_pass_does_not_tighten_existing_hard_gates();
         rc |= ordinary_pass_prefers_lower_receiver_travel();
         rc |= ordinary_pass_prefers_receiver_owned_target();
         rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
@@ -5305,6 +5537,12 @@ int main(int argc, char **argv) {
     rc |= ordinary_pass_local_search_respects_hard_safety();
     rc |= ordinary_pass_local_target_is_locked_after_task_creation();
     rc |= ordinary_pass_local_search_does_not_change_coop_pass();
+    rc |= ordinary_pass_rejects_clear_opponent_first_at_creation();
+    rc |= ordinary_pass_accepts_close_arrival_race();
+    rc |= ordinary_pass_tries_alternative_safe_local_point();
+    rc |= ordinary_pass_does_not_block_receiver_travel();
+    rc |= preparing_pass_still_cancels_on_new_opponent_first();
+    rc |= ordinary_pass_does_not_tighten_existing_hard_gates();
     rc |= ordinary_pass_prefers_lower_receiver_travel();
     rc |= ordinary_pass_prefers_receiver_owned_target();
     rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
