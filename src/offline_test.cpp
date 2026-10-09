@@ -3569,15 +3569,25 @@ static int ordinary_push_requires_real_release_evidence() {
         printf("FAIL: Release-evidence fixture did not start observation\n"); return 1;
     }
     wm.home[1].x = 139.0; // 机器人移动，球不动：不能算 Release。
+    RobotState expected = wm.home[1];
+    motion::position(expected, wm.coop_pass_task.locked_push_target_x,
+                     wm.coop_pass_task.locked_push_target_y, motion::TM_PASS);
     run_active(wm, 1);
-    if (wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
-        printf("FAIL: robot movement or Push lock fabricated Release\n"); return 1;
+    if (wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        !same_drive_command(wm.home[1], expected) ||
+        (fabs(wm.home[1].vl) < 1e-9 && fabs(wm.home[1].vr) < 1e-9)) {
+        printf("FAIL: with a static ball, controller should still drive toward the committed waypoint\n"); return 1;
     }
     wm.ball.x = 125.0; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
+    expected = wm.home[1];
+    motion::position(expected, wm.coop_pass_task.locked_push_target_x,
+                     wm.coop_pass_task.locked_push_target_y, motion::TM_PASS);
     run_active(wm, 1); // 进展仅 5cm，其余条件可满足，仍不得 Release。
     if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
-        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
-        printf("FAIL: sub-threshold ball motion fabricated Release\n"); return 1;
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        !same_drive_command(wm.home[1], expected) ||
+        (fabs(wm.home[1].vl) < 1e-9 && fabs(wm.home[1].vr) < 1e-9)) {
+        printf("FAIL: small ball movement must keep pushing without fabricating Release\n"); return 1;
     }
     printf("ordinary push requires real release evidence: OK\n");
     return 0;
@@ -3697,13 +3707,27 @@ static int ordinary_push_waypoint_stall_keeps_real_release_rule() {
         wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
         printf("FAIL: fixed-waypoint stall must wait for evidence, not fabricate Release\n"); return 1;
     }
-    wm.coop_pass_task.frames_left = 1;
-    run_active(wm, 1);
-    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
-        wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout] != 1) {
-        printf("FAIL: existing timeout did not end stalled Ordinary Push\n"); return 1;
+    int callbacks_after_commit = 1, stationary_push_frames = 1; // 已包含上面的到点确认帧。
+    while (wm.coop_pass_task.active && callbacks_after_commit < 80) {
+        run_active(wm, 1);
+        ++callbacks_after_commit;
+        if (!wm.coop_pass_task.active) break;
+        if (!wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+            wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+            printf("FAIL: static-ball waypoint arrival must remain parked without false Release\n"); return 1;
+        }
+        ++stationary_push_frames;
     }
-    printf("ordinary push waypoint stall keeps real release rule: OK (no false Release; existing timeout exits)\n");
+    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_stats.released != 0 ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout] != 1 ||
+        callbacks_after_commit != 79 || stationary_push_frames != 78) {
+        printf("FAIL: expected existing 80-frame task timeout after 78 parked callbacks (callbacks=%d parked=%d)\n",
+               callbacks_after_commit, stationary_push_frames); return 1;
+    }
+    printf("ordinary push waypoint stall keeps real release rule: OK (parked=%d callbacks; timeout callback=%d; no false Release)\n",
+           stationary_push_frames, callbacks_after_commit);
     return 0;
 }
 
