@@ -2833,6 +2833,121 @@ static WorldModel coop_task_scene() {
         return wm;
 }
 
+// 普通 PassPlan 评分夹具：两个中心点对称且都在现有传球距离内。
+static WorldModel ordinary_scoring_scene() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    wm.ball.x = 185.0; wm.ball.y = 90.0;
+    wm.home[0].x = 200.0; wm.home[0].y = 10.0;
+    wm.home[1].x = 185.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0;
+    wm.home[4].x = 20.0; wm.home[4].y = 160.0;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    const double offset = get_param("pass.OFFSET_BASE", 10.1);
+    wm.assist_x = 120.0 + offset; wm.assist_y = 80.0;
+    wm.mid_x = 120.0 + offset; wm.mid_y = 100.0;
+    wm.passive_x = 20.0; wm.passive_y = 160.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 220.0; wm.opp[i].y = 20.0 + 35.0 * i;
+    }
+    return wm;
+}
+
+// 同等中心候选下，接球人离自身中心越近，普通计划越应选中他。
+static int ordinary_pass_prefers_lower_receiver_travel() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 130.0; // 候选 2 距中心 50cm
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0; // 候选 3 已在中心
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3) {
+        printf("FAIL: 普通传球应选移动成本更低的接球人3 got viable=%d recv=%d\n",
+               (int)plan.viable, plan.receiver_id); return 1;
+    }
+    printf("ordinary pass prefers lower receiver travel: OK\n");
+    return 0;
+}
+
+// 两个中心点其他原有评分因素相同，接球人相对最近对手占点更有利者胜出。
+static int ordinary_pass_prefers_receiver_owned_target() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0;
+    wm.opp[0].x = 120.0; wm.opp[0].y = 35.0; // 对点 2 为 45cm，对点 3 为 65cm
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3) {
+        printf("FAIL: 普通传球应选己方相对占点更有利的接球人3 got viable=%d recv=%d\n",
+               (int)plan.viable, plan.receiver_id); return 1;
+    }
+    printf("ordinary pass prefers receiver-owned target: OK\n");
+    return 0;
+}
+
+// 高 ownership 分不能越过原有线路硬筛选。
+static int ordinary_pass_scoring_does_not_relax_hard_safety() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;  // 被挡候选的移动成本为 0
+    wm.home[3].x = 120.0; wm.home[3].y = 150.0; // 安全候选的移动成本为 50cm
+    wm.opp[0].x = 152.5; wm.opp[0].y = 85.0;   // 挡住 2 的线路，离其锁点仍约 33cm
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3 || fabs(plan.target_y - 100.0) > 1e-6) {
+        printf("FAIL: 高 ownership 分不得放行被挡线路 got viable=%d recv=%d target=(%.2f,%.2f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass scoring keeps hard safety: OK\n");
+    return 0;
+}
+
+// 评分只改变接球人排序，不得把角色中心改成局部搜索点。
+static int ordinary_pass_scoring_keeps_anchor_target() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 150.0;
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 80.0) > 1e-6) {
+        printf("FAIL: 评分后仍须锁定角色锚点中心(120,80) got viable=%d recv=%d target=(%.2f,%.2f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass scoring keeps anchor target: OK\n");
+    return 0;
+}
+
+// 普通中心计划通过现有 Admission 安全检查后才建立 Ordinary 任务。
+static int test_ordinary_pass_admission() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running; wm.possession = Possession::Ours;
+    wm.ball.valid = true; wm.ball.x = 70.0; wm.ball.y = 90.0;
+    wm.we_have_ball = true; wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180.0; wm.home[i].y = 30.0 + 25.0 * i;
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+    }
+    wm.home[0].x = 210.0; wm.home[0].y = 90.0;
+    wm.home[1].x = 75.0; wm.home[1].y = 90.0; wm.home[1].rot = 0.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 90.0;
+    wm.assist_x = 120.0; wm.assist_y = 90.0;
+    wm.mid_x = 180.0; wm.mid_y = 150.0;
+    wm.passive_x = 180.0; wm.passive_y = 40.0;
+    wm.opp[0].x = 50.0; wm.opp[0].y = 90.0;
+    PassPlan planned = plan_pass(wm, 1);
+    if (!planned.viable) { printf("FAIL: ordinary admission fixture lacks center candidate\n"); return 1; }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.passer_id != 1 || wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        wm.coop_pass_task.rx != planned.target_x || wm.coop_pass_task.ry != planned.target_y) {
+        printf("FAIL: safe ordinary candidate did not pass existing Admission unchanged active=%d kind=%d\n",
+               (int)wm.coop_pass_task.active, (int)wm.coop_pass_task.kind); return 1;
+    }
+    printf("ordinary pass admission: OK (safe center candidate creates locked ordinary task)\n");
+    return 0;
+}
+
 static WorldModel possession_pass_scene() {
     WorldModel wm;
     wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
@@ -5011,6 +5126,11 @@ int main(int argc, char **argv) {
         rc |= test_coop_pass();
         rc |= test_coop_pass_task();
         rc |= test_coop_lifecycle();
+        rc |= ordinary_pass_prefers_lower_receiver_travel();
+        rc |= ordinary_pass_prefers_receiver_owned_target();
+        rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
+        rc |= ordinary_pass_scoring_keeps_anchor_target();
+        rc |= test_ordinary_pass_admission();
         rc |= test_ordinary_pass_task();
         rc |= test_pass_readiness_gate();
         rc |= test_receiver_meet_ball();
@@ -5045,6 +5165,11 @@ int main(int argc, char **argv) {
     rc |= restart_interrupts_temporary_control();
     rc |= old_pass_task_does_not_resume_after_restart();
     rc |= possession_cancel_still_works();
+    rc |= ordinary_pass_prefers_lower_receiver_travel();
+    rc |= ordinary_pass_prefers_receiver_owned_target();
+    rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
+    rc |= ordinary_pass_scoring_keeps_anchor_target();
+    rc |= test_ordinary_pass_admission();
     rc |= test_ordinary_pass_task();
     rc |= test_pass_readiness_gate();
     rc |= test_receiver_meet_ball();

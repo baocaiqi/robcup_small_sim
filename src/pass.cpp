@@ -88,6 +88,8 @@ constexpr double OUR_ARRIVE_SPEED = 2.0;
 constexpr double OPP_MIN_SPEED    = 1.0;
 constexpr double ARRIVE_MARGIN    = 1.0;
 constexpr double SPEED_BASE       = 2.0;
+constexpr double ORDINARY_MOVE_COST_W = 0.25;
+constexpr double ORDINARY_OWNERSHIP_W = 0.35;
 
 // 假球位问 plan_shoot：只看球位/门将，即可判接应点有无射门开口
 bool receive_point_can_shoot(const WorldModel &wm, double tx, double ty) {
@@ -122,6 +124,29 @@ double speed_threat(const WorldModel &wm, double x, double y) {
         }
     }
     return threat;
+}
+
+// 普通传球排序项：低行程成本、且己方相对最近对手更容易占点时得分更低。
+double ordinary_receiver_score_delta(const WorldModel &wm, int receiver_id,
+                                     double target_x, double target_y) {
+    if (receiver_id < 0 || receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(target_x) || !std::isfinite(target_y) ||
+        !std::isfinite(wm.home[receiver_id].x) || !std::isfinite(wm.home[receiver_id].y)) return 0.0;
+    const RobotState &receiver = wm.home[receiver_id];
+    const double move_cost = dist(receiver.x, receiver.y, target_x, target_y);
+    double nearest_opp_dist = 1e9;
+    bool has_opponent = false;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (!std::isfinite(wm.opp[i].x) || !std::isfinite(wm.opp[i].y)) continue;
+        const double opponent_dist = dist(wm.opp[i].x, wm.opp[i].y, target_x, target_y);
+        if (!has_opponent || opponent_dist < nearest_opp_dist) {
+            nearest_opp_dist = opponent_dist;
+            has_opponent = true;
+        }
+    }
+    if (!has_opponent) nearest_opp_dist = move_cost;
+    const double ownership_margin = nearest_opp_dist - move_cost;
+    return ORDINARY_MOVE_COST_W * move_cost - ORDINARY_OWNERSHIP_W * ownership_margin;
 }
 
 }  // anonymous namespace
@@ -226,6 +251,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
         if (can_shoot) score -= SHOOT_BONUS;
         if (opp_first) score += ARRIVE_PENALTY;
         score += spd_threat * SPEED_THREAT_W;
+        score += ordinary_receiver_score_delta(wm, id, tx, ty);
 
         if (score < best_score) {
             best_score = score;
