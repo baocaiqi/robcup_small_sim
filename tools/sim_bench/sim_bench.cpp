@@ -118,7 +118,10 @@ TUNABLE(kPushGain, 0.98998);         // 推球时机器人速度注入的比例
 //   失球归因：16 个失球 12 个是我们自己最后触球、10 个是高速球 ⇒ 门前触球方向是主因。
 //   只切掉「朝自家门(+x)」那一个分量，横向/朝外分量保留，所以横传和解围到边上不受影响。
 TUNABLE(kOwnGoalTouchGuard, 1.0);    // 0 = 整条关闭（回滚）
-TUNABLE(kOwnGoalTouchDist, 40.0);    // cm：球离我方门线这么近时，蓝方触球受本闸约束
+// ⚠️ 触发距离 2026-10-08 由 40 放宽到 150：逐球取证发现乌龙**不是门前捅进去的** ——
+//   我们碰球的位置离自家门线中位 98cm（最远 186cm），12/15 个乌龙在 60cm 之外，
+//   即"在自家后场把球碰向自家门，然后它一路滚进去"。40cm 的闸压根够不到这些球。
+TUNABLE(kOwnGoalTouchDist, 150.0);   // cm：球离己方门线这么近时，本方触球受本闸约束
 TUNABLE(kOwnGoalTouchKeep, 0.0);     // 朝门分量的保留比例（0 = 完全切掉）
 TUNABLE(kOwnGoalTouchMax, 0.0);      // cm/帧：朝门分量上限（0 = 不许朝门加速）
 // —— 脚本对手速度（原来写死 80/30/50/40；实测"对手慢一半"的根因就在这里） ——
@@ -521,14 +524,18 @@ static void step_physics(SimState &s) {
             s.bvx = s.bvx * kPushKeep + rvx * kPushGain;
             s.bvy = s.bvy * kPushKeep + rvy * kPushGain;
             // ═══ 门前禁止把球朝自家门推（防乌龙，2026-10-08）═══
-            //   实测归因：16 个失球里 12 个是**我们自己最后触球**、10 个是高速球，
-            //   其中门将 4 个。根因就是门前触球时把球朝自家门加速。
-            //   这里只切掉「朝自家门」那一个分量，横向分量保留 ⇒ 照样能横传/解围到边上，
-            //   只是不再"越解越往门里送"。
-            if (kOwnGoalTouchGuard > 0.5 && carry_blue) {
-                if (220.0 - s.bx < kOwnGoalTouchDist) {
-                    if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;   // +x = 朝我方球门(x=220)
+            //   实测归因：16 个失球里 12 个是**我们自己最后触球**、10 个是高速球。
+            //   判据必须**按"守哪个门"分**：蓝队守 x=220（+x 是自家门），黄队守 x=0（−x 是自家门）。
+            //   ⚠️ 之前只写了蓝队那半边 ⇒ 把我们换成黄队时这条闸完全不生效，镜像对比不公平。
+            if (kOwnGoalTouchGuard > 0.5) {
+                const bool cyan_guard = carry_blue && (220.0 - s.bx < kOwnGoalTouchDist);
+                const bool cyan_guard_y = !carry_blue && (s.bx < kOwnGoalTouchDist);
+                if (cyan_guard) {
+                    if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;   // +x = 朝蓝方自家门
                     if (s.bvx > kOwnGoalTouchMax) s.bvx = kOwnGoalTouchMax;
+                } else if (cyan_guard_y) {
+                    if (s.bvx < 0.0) s.bvx *= kOwnGoalTouchKeep;   // −x = 朝黄方自家门
+                    if (s.bvx < -kOwnGoalTouchMax) s.bvx = -kOwnGoalTouchMax;
                 }
             }
         }
@@ -558,11 +565,15 @@ static void step_physics(SimState &s) {
                 if (s.dbg_contacts) printf("  [碰撞] %s%d 挡球 v(%.0f,%.0f)→", t ? "黄" : "蓝", i, s.bvx, s.bvy);
                 s.bvx -= (1.0 + kDeflect) * rel_vn * nx;
                 s.bvy -= (1.0 + kDeflect) * rel_vn * ny;
-                // 门前防乌龙（同携带路径）：挡球时不许把球朝自家门(+x)弹出去。
-                //   实测：16 个失球里门将自己送进 4 个，就是从这条反弹来的。
-                if (kOwnGoalTouchGuard > 0.5 && t == 0 && 220.0 - s.bx < kOwnGoalTouchDist) {
-                    if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;
-                    if (s.bvx > kOwnGoalTouchMax) s.bvx = kOwnGoalTouchMax;
+                // 门前防乌龙（同携带路径，同样按"守哪个门"分）
+                if (kOwnGoalTouchGuard > 0.5) {
+                    if (t == 0 && 220.0 - s.bx < kOwnGoalTouchDist) {
+                        if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;
+                        if (s.bvx > kOwnGoalTouchMax) s.bvx = kOwnGoalTouchMax;
+                    } else if (t == 1 && s.bx < kOwnGoalTouchDist) {
+                        if (s.bvx < 0.0) s.bvx *= kOwnGoalTouchKeep;
+                        if (s.bvx < -kOwnGoalTouchMax) s.bvx = -kOwnGoalTouchMax;
+                    }
                 }
                 if (s.dbg_contacts) printf("(%.0f,%.0f) 球(%.0f,%.0f) 机(%.0f,%.0f)\n",
                                            s.bvx, s.bvy, s.bx, s.by, r.x, r.y);
@@ -589,8 +600,33 @@ static void og_record(const SimState &s) {
 //   为什么需要：原来只有 debug 打的一行 `[失球]`，看不到"丢球前那 1 秒到底怎么走的"。
 //   分析口子在 Python 侧自己找进球（球越线那帧），所以这里不需要任何判定。
 static std::FILE *g_def_csv = nullptr;
+// 记「最后一脚触碰（不含门将）时球在哪」——用来看这一球是从多远/哪个方向打进的。
+//   为什么排除门将：门将"挡"一下也会被记成触球，会把射门起点拉到门线上，
+//   把远射误判成门前捅射。
+static double g_last_kick_bx = 0.0, g_last_kick_by = 0.0;
+static int    g_last_kick_frame = -1, g_last_kick_id = -1, g_last_kick_team = -1;
 static void def_csv_row(const SimState &s) {
     if (!g_def_csv) return;
+    // 更新"最后一脚"：只认非门将触球（蓝 1~4 / 黄 1~4）
+    {
+        int bt = -1, yt = -1;
+        for (int i = 1; i < 5; ++i) {
+            if (bt < 0 && (s.touch_blue & (1u << i))) bt = i;
+            if (yt < 0 && (s.touch_yellow & (1u << i))) yt = i;
+        }
+        int pick_team = -1, pick_id = -1;
+        if (bt >= 0 && yt >= 0) {
+            double db = std::hypot(s.bx - s.blue[bt].x, s.by - s.blue[bt].y);
+            double dy = std::hypot(s.bx - s.yellow[yt].x, s.by - s.yellow[yt].y);
+            pick_team = (db <= dy) ? 0 : 1;
+            pick_id = pick_team == 0 ? bt : yt;
+        } else if (bt >= 0) { pick_team = 0; pick_id = bt; }
+        else if (yt >= 0)   { pick_team = 1; pick_id = yt; }
+        if (pick_team >= 0) {
+            g_last_kick_bx = s.bx; g_last_kick_by = s.by;
+            g_last_kick_frame = s.frames; g_last_kick_id = pick_id; g_last_kick_team = pick_team;
+        }
+    }
     double opp_dmin = 1e9; int opp_i = -1;
     for (int i = 0; i < 5; ++i) {
         double d = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
@@ -611,14 +647,16 @@ static void def_csv_row(const SimState &s) {
     std::fprintf(g_def_csv,
         "%d,%d,%.2f,%.2f,%.3f,%.3f,%.2f,%.2f,%.2f,"
         "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
-        "%d,%.2f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%s\n",
+        "%d,%.2f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%s,"
+        "%d,%d,%.2f,%.2f,%d\n",
         s.frames, s.score_blue - s.score_yellow,
         s.bx, s.by, s.bvx, s.bvy, std::hypot(s.bvx, s.bvy), 220.0 - s.bx,
         std::hypot(s.bx - s.blue[0].x, s.by - s.blue[0].y),
         s.blue[0].x, s.blue[0].y, s.blue[1].x, s.blue[1].y, s.blue[2].x, s.blue[2].y,
         s.blue[3].x, s.blue[3].y, s.blue[4].x, s.blue[4].y,
         s.last_touch_team, s.lt_dv, s.last_touch_id, opp_dmin, opp_i, blue_dmin, blue_i,
-        y_at_goal, heading_goal ? 1 : 0, gk_probe_rule());
+        y_at_goal, heading_goal ? 1 : 0, gk_probe_rule(),
+        g_last_kick_team, g_last_kick_id, g_last_kick_bx, g_last_kick_by, g_last_kick_frame);
 }
 
 // 进球判定 + 重置（带随机摆位）；debug>0 时打印进球详情
@@ -1190,7 +1228,8 @@ int main(int argc, char **argv) {
         std::fprintf(g_def_csv,
             "frame,diff,bx,by,bvx,bvy,bspd,ball_goal,gk_db,"
             "gk_x,gk_y,b1x,b1y,b2x,b2y,b3x,b3y,b4x,b4y,"
-            "last_team,lt_dv,last_id,opp_dmin,opp_i,blue_dmin,blue_i,y_at_goal,heading_goal,gk_rule\n");
+            "last_team,lt_dv,last_id,opp_dmin,opp_i,blue_dmin,blue_i,y_at_goal,heading_goal,gk_rule,"
+            "kick_team,kick_id,kick_bx,kick_by,kick_frame\n");
     }
     const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : (opp_mode == 3 ? "门线堆人墙" : "脚本对手"));
     if (coop_path) {

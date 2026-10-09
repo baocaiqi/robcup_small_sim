@@ -29,15 +29,19 @@ TUNABLE(kPenaltySpotStill, 1.0);
 //   做法与门将已有的「闸一」同源：从轮速里**只扣掉朝自家门的平动分量**，
 //   转动分量与横向分量全部保留 ⇒ 照样能转身、能横传、能把球捅到边路，
 //   只是不许再朝自家门那一侧产生位移。
-//   触发条件刻意收窄（球在己方罚球区 + 离球 ≤ 触球半径），避免影响正常跑位。
+//   触发条件：球在己方半场靠近自家门（默认 150cm 内）+ 离球 ≤ 触球半径。
+//   ⚠️ 距离 2026-10-08 由 40 放宽到 150：逐球取证发现乌龙**不是门前捅进去的** ——
+//      我们碰球的位置离自家门线中位 98cm（最远 186cm），12/15 个乌龙在 60cm 之外，
+//      即"在自家后场把球碰向自家门、然后一路滚进去"。40cm 的闸压根够不到这些球。
 TUNABLE(kOwnGoalGuard, 1.0);         // 0 = 整条关闭（回滚）
 TUNABLE(kOwnGoalGuardR, 8.0);        // cm：离球这么近才可能触球，才需要戴闸
+TUNABLE(kOwnGoalGuardDist, 150.0);   // cm：球离己方门线这么近才戴闸
 
 // 作用域：只对 1~4 号（门将有它自己的闸一，别重复扣）
 void enforce_no_own_goal_touch(WorldModel &wm) {
     if (kOwnGoalGuard < 0.5 || !wm.ball.valid) return;
     const TeamContext &ctx = wm.ctx;
-    if (!in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return;   // 球不在己方罚球区 → 不关这事
+    if (ctx.dist_our_goal(wm.ball.x) > kOwnGoalGuardDist) return;   // 球还远 → 不关这事
     for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
         RobotState &r = wm.home[i];
         if (!std::isfinite(r.x) || !std::isfinite(r.y)) continue;
