@@ -444,7 +444,7 @@ static int test_fixed_roles() {
     return 0;
 }
 
-// 传球选点单测：威胁惩罚 / 边界夹取 / 短传优先
+// 传球选点单测：威胁惩罚 / 边界夹取 / 局部候选遵守接球安全区
 static int test_pass() {
     TeamContext ctx{true};               // 蓝队：门在 x=220，攻向左(对方门 x=0)
     WorldModel wm;
@@ -495,8 +495,11 @@ static int test_pass() {
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     {
         PassPlan p = plan_pass(wm, 0);
-        if (!p.viable || p.receiver_id != 1) {
-            printf("FAIL: 场景③应优先短传A(home[1]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+        const double expected_center_x = 60.0 - get_param("pass.OFFSET_BASE", 10.1);
+        if (!p.viable || p.receiver_id != 2 || fabs(p.target_x - expected_center_x) > 1e-6 ||
+            fabs(p.target_y - 50.0) > 1e-6) {
+            printf("FAIL: A中心点在对方门区，应沿用目标安全规则选择B中心 (viable=%d recv=%d target=(%.1f,%.1f))\n",
+                   p.viable, p.receiver_id, p.target_x, p.target_y);
             return 1;
         }
     }
@@ -521,15 +524,17 @@ static int test_pass() {
             printf("FAIL: 场景④应联动站位点选ASSIST(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
             return 1;
         }
-        const double off = simuro5::get_param("pass.OFFSET_BASE", 6.0);
-        if (fabs(p.target_x - (60.0 - off)) > 0.5 || fabs(p.target_y - 70.0) > 0.5) {
-            printf("FAIL: 场景④接应点未基于站位点 (%.1f,%.1f) 期望 x=%.1f（60 - OFFSET_BASE=%.1f）\n",
-                   p.target_x, p.target_y, 60.0 - off, off);
+        const double off = simuro5::get_param("pass.OFFSET_BASE", 10.1);
+        const double anchor_x = 60.0 - off;
+        const double expected_local_x = anchor_x + 15.0; // 蓝队向左进攻，后移点在锚点右侧
+        if (fabs(p.target_x - expected_local_x) > 1e-6 || fabs(p.target_y - 70.0) > 1e-6) {
+            printf("FAIL: 场景④应从站位锚点选择合法局部点 (%.1f,%.1f)，期望 (%.1f,70.0)\n",
+                   p.target_x, p.target_y, expected_local_x);
             return 1;
         }
     }
 
-    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点)\n");
+    printf("pass: OK (威胁惩罚/边界夹取/目标安全/联动站位点与局部搜索)\n");
     return 0;
 }
 
@@ -2948,6 +2953,128 @@ static int test_ordinary_pass_admission() {
     return 0;
 }
 
+static WorldModel ordinary_local_search_scene() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.ball.x = 160.0; wm.ball.y = 90.0;
+    wm.home[1].x = 160.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 95.0;
+    wm.home[3].x = 20.0; wm.home[3].y = 150.0;
+    wm.home[4].x = 20.0; wm.home[4].y = 20.0;
+    wm.mid_x = 20.0; wm.mid_y = 150.0;
+    wm.passive_x = 20.0; wm.passive_y = 20.0;
+    wm.opp[0].x = 138.0; wm.opp[0].y = 84.5; // 中心线和中心点不安全，+15cm 横移可清开
+    return wm;
+}
+
+static int ordinary_pass_local_search_keeps_center_candidate() {
+    WorldModel wm = ordinary_local_search_scene();
+    const double offset = get_param("pass.OFFSET_BASE", 10.1);
+    wm.assist_x = 150.0 + offset; wm.assist_y = 80.0;
+    wm.home[2].x = 150.0; wm.home[2].y = 80.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 220.0; wm.opp[i].y = 20.0 + 35.0 * i;
+    }
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 150.0) > 1e-6 || fabs(plan.target_y - 80.0) > 1e-6) {
+        printf("FAIL: best center candidate was not retained (viable=%d id=%d target=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search keeps center candidate: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_finds_safer_nearby_point() {
+    WorldModel wm = ordinary_local_search_scene();
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 95.0) > 1e-6) {
+        printf("FAIL: blocked center should be rescued by safe nearby point (viable=%d id=%d target=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search finds safer nearby point: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_stays_near_anchor() {
+    WorldModel wm = ordinary_local_search_scene();
+    PassPlan plan = plan_pass(wm, 1);
+    const double dx = plan.target_x - 120.0, dy = plan.target_y - 80.0;
+    const bool template_point =
+        (fabs(dx) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx + 15.0) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx - 15.0) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx) < 1e-6 && fabs(dy - 15.0) < 1e-6) ||
+        (fabs(dx) < 1e-6 && fabs(dy + 15.0) < 1e-6);
+    if (!plan.viable || plan.receiver_id != 2 || !template_point || hypot(dx, dy) > 15.0 + 1e-6) {
+        printf("FAIL: local target escaped five-point template (viable=%d id=%d delta=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, dx, dy); return 1;
+    }
+    printf("ordinary pass local search stays near anchor: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_respects_hard_safety() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.opp[0].x = wm.home[1].x; wm.opp[0].y = wm.home[1].y; // 每条候选线路都从被占据的 passer 点出发
+    PassPlan plan = plan_pass(wm, 1);
+    if (plan.viable) {
+        printf("FAIL: local search forced a pass despite every candidate line being blocked target=(%.1f,%.1f)\n",
+               plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search respects hard safety: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_target_is_locked_after_task_creation() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.vy = 4.0; wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    PassPlan planned = plan_pass(wm, 1);
+    if (!planned.viable || planned.receiver_id != 2 || fabs(planned.target_y - 95.0) > 1e-6) {
+        printf("FAIL: local target lock fixture did not select nearby point\n"); return 1;
+    }
+    run_active(wm, 1);
+    const double locked_x = wm.coop_pass_task.rx, locked_y = wm.coop_pass_task.ry;
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        fabs(locked_x - planned.target_x) > 1e-6 || fabs(locked_y - planned.target_y) > 1e-6) {
+        printf("FAIL: local target was not published as locked Ordinary task\n"); return 1;
+    }
+    wm.assist_x = 60.0; wm.assist_y = 145.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        fabs(wm.coop_pass_task.rx - locked_x) > 1e-6 || fabs(wm.coop_pass_task.ry - locked_y) > 1e-6) {
+        printf("FAIL: role anchor change moved the created local target\n"); return 1;
+    }
+    printf("ordinary pass local target locks after task creation: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_does_not_change_coop_pass() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.ball.valid = true;
+    wm.ball.x = 90.0; wm.ball.y = 90.0;
+    wm.assist_x = 60.0; wm.assist_y = 65.0;
+    wm.mid_x = 90.0; wm.mid_y = 120.0;
+    wm.passive_x = 150.0; wm.passive_y = 90.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 150.0; wm.home[i].y = 90.0;
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 40.0 * i;
+    }
+    CoopPass plan = plan_coop_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 || fabs(plan.rx - 60.0) > 1e-9 ||
+        fabs(plan.ry - 65.0) > 1e-9 || fabs(plan.score - 0.493728272727) > 1e-9 ||
+        fabs(plan.dir_x + 0.768221279597) > 1e-9 || fabs(plan.dir_y + 0.640184399664) > 1e-9) {
+        printf("FAIL: CoopPass changed from P2.1 baseline (viable=%d recv=%d target=%.6f,%.6f score=%.12f dir=%.12f,%.12f)\n",
+               (int)plan.viable, plan.receiver_id, plan.rx, plan.ry, plan.score, plan.dir_x, plan.dir_y);
+        return 1;
+    }
+    printf("ordinary pass local search leaves CoopPass unchanged: OK\n");
+    return 0;
+}
+
 static WorldModel possession_pass_scene() {
     WorldModel wm;
     wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
@@ -3361,9 +3488,10 @@ static int test_coop_lifecycle() {
 static int test_ordinary_pass_task() {
     WorldModel wm = coop_task_scene();
     wm.role[1] = ROLE_ACTIVE; wm.role[2] = ROLE_ASSIST;
+    wm.home[0].x = 200.0; wm.home[0].y = 10.0; // 门将留在现有传球距离外，避免干扰接球生命周期夹具
     wm.assist_x = 55; wm.assist_y = 90;
     PassPlan pp = plan_pass(wm, 1);
-    if (!pp.viable || pp.receiver_id < 2) { printf("FAIL: ordinary PassPlan fixture\n"); return 1; }
+    if (!pp.viable || pp.receiver_id < 2) { printf("FAIL: ordinary PassPlan fixture viable=%d recv=%d target=(%.2f,%.2f)\n", (int)pp.viable, pp.receiver_id, pp.target_x, pp.target_y); return 1; }
     wm.assist_x = 130; wm.assist_y = 150;
     auto &task = wm.coop_pass_task;
     task = {};
@@ -5126,6 +5254,12 @@ int main(int argc, char **argv) {
         rc |= test_coop_pass();
         rc |= test_coop_pass_task();
         rc |= test_coop_lifecycle();
+        rc |= ordinary_pass_local_search_keeps_center_candidate();
+        rc |= ordinary_pass_local_search_finds_safer_nearby_point();
+        rc |= ordinary_pass_local_search_stays_near_anchor();
+        rc |= ordinary_pass_local_search_respects_hard_safety();
+        rc |= ordinary_pass_local_target_is_locked_after_task_creation();
+        rc |= ordinary_pass_local_search_does_not_change_coop_pass();
         rc |= ordinary_pass_prefers_lower_receiver_travel();
         rc |= ordinary_pass_prefers_receiver_owned_target();
         rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
@@ -5165,6 +5299,12 @@ int main(int argc, char **argv) {
     rc |= restart_interrupts_temporary_control();
     rc |= old_pass_task_does_not_resume_after_restart();
     rc |= possession_cancel_still_works();
+    rc |= ordinary_pass_local_search_keeps_center_candidate();
+    rc |= ordinary_pass_local_search_finds_safer_nearby_point();
+    rc |= ordinary_pass_local_search_stays_near_anchor();
+    rc |= ordinary_pass_local_search_respects_hard_safety();
+    rc |= ordinary_pass_local_target_is_locked_after_task_creation();
+    rc |= ordinary_pass_local_search_does_not_change_coop_pass();
     rc |= ordinary_pass_prefers_lower_receiver_travel();
     rc |= ordinary_pass_prefers_receiver_owned_target();
     rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
