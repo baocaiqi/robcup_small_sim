@@ -294,4 +294,77 @@ CoopPass plan_coop_pass(const WorldModel &wm, int passer_id) {
     return best;
 }
 
+// ═══ 门前横传 + 门柱包抄（docs/17 的 P4）═══
+// 目的：持球人在对方门前**一侧**时，把球横着送到**远门柱**，另一人包抄直接处理。
+// 与 plan_coop_pass 的关键差别：
+//   · 接球点由本函数**直接算出来**（远门柱），不是读角色锚点 —— 角色锚点被
+//     situation.cpp 明确压在对方禁区外沿，永远到不了门柱。
+//   · 打分只比"射门质量"，不用 plan_pass 的 goal_dist 权重（那个会把横传判成坏选择）。
+// ⚠️ 红线（平台规则）：进攻方在对方**门区**（门线前 50cm、y∈[62.5,117.5]）纯停留 >8 帧
+//   或累计 >18 帧 ⇒ **判点球**。所以包抄点压在门区**外** 6cm，不进那个矩形。
+TUNABLE(kCrossEnabled, 1.0);    // 0 = 整条套路关闭（一键回滚）
+TUNABLE(kCrossZone, 90.0);      // cm：球进对方门前这个距离内才算"门前一侧"
+TUNABLE(kCrossWide, 12.0);      // cm：球离中线至少这么偏才算"一侧"（否则是中路不需要横传）
+TUNABLE(kCrossPostY, 74.0);     // 门柱 y：夹在门框内、又留出余量（门框 70~110）
+TUNABLE(kCrossOutPad, 6.0);     // cm：包抄点压在对方门区**外**这么多（点球红线安全余量）
+TUNABLE(kCrossScore, 0.62);     // 横传质量：当作"≈0.47 质量射门 + 0.15 门槛"刚好够用
+
+CoopPass plan_cross(const WorldModel &wm, int passer_id) {
+    CoopPass c;
+    if (kCrossEnabled < 0.5 || !wm.ball.valid) return c;
+    if (!pass_context_safe(wm)) return c;
+    const TeamContext &ctx = wm.ctx;
+    const double ad = ctx.attack_dir();
+    const double bx = wm.ball.x, by = wm.ball.y;
+
+    // ① 球得在对方门前的一侧（边路横传位）
+    if (ctx.dist_opp_goal(bx) > kCrossZone) return c;
+    if (std::fabs(by - 90.0) < kCrossWide) return c;
+
+    // ② 远门柱：球在下路就去上柱，反之去下柱
+    const double post_y = (by < 90.0) ? (90.0 + kCrossPostY) : (90.0 - kCrossPostY);
+    // 包抄点在门区外沿之外（见本函数顶部红线）
+    const double post_x = ctx.opp_goal_x() - ad * (50.0 + kCrossOutPad);
+
+    // ③ 选包抄人：优先 ASSIST(2)，被占则 MIDFIELD(3)（固定角色表见 role_assignment.cpp）
+    //    ⚠️ 绝不能选到 active 自己：pass_target_safe 只硬校验 passer==1，
+    //       active 轮换到 2/3 时"自己传给自己"会绕过那道校验。
+    int rid = -1;
+    for (int cand : {2, 3}) {
+        if (cand == passer_id || cand == wm.active_id) continue;
+        if (wm.role[cand] == ROLE_ACTIVE || wm.role[cand] == ROLE_GOALIE) continue;
+        rid = cand;
+        break;
+    }
+    if (rid < 0) return c;
+
+    // ④ 横传几何：方向必须**跨门横向**为主，不能是直塞
+    {
+        double ddx = post_x - bx, ddy = post_y - by;
+        const double L = std::hypot(ddx, ddy);
+        if (L < PASS_MIN_DIST || L > 120.0) return c;
+        ddx /= L; ddy /= L;
+        // 朝对方门的纵向分量要小（横传不是直塞），带点向前是允许的
+        if (ddx * ad > 0.55) return c;
+        c.viable = true; c.receiver_id = rid; c.rx = post_x; c.ry = post_y;
+        c.dir_x = ddx; c.dir_y = ddy; c.aim_rot = angle_to(0.0, 0.0, ddx, ddy);
+    }
+
+    // ⑤ 复用现成的安全闸（和普通传球同一套护栏，不新开口子）
+    if (!pass_target_safe(wm, passer_id, c.receiver_id, c.rx, c.ry, true)) { c.viable = false; return c; }
+
+    // ⑥ 质量：门柱位有射门开口就用射门质量，否则给个接近门框的保底分
+    double q = 0.0;
+    {
+        WorldModel tmp = wm;
+        tmp.ball.x = c.rx; tmp.ball.y = c.ry; tmp.ball.vx = 0.0; tmp.ball.vy = 0.0;
+        tmp.in_penalty_exec = false;
+        ShootPlan ps = plan_shoot(tmp, c.receiver_id);
+        if (ps.viable) q = ps.quality;
+        else q = 0.5 * clamp((90.0 - std::fabs(c.ry - 90.0)) / 90.0, 0.0, 1.0);
+    }
+    c.score = std::max(q, kCrossScore);
+    return c;
+}
+
 } // namespace simuro5

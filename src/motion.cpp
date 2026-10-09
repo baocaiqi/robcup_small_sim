@@ -18,9 +18,16 @@ int g_legacy_drive = 0;
 LegacyDriveScope::LegacyDriveScope() { ++g_legacy_drive; }
 LegacyDriveScope::~LegacyDriveScope() { --g_legacy_drive; }
 
+#ifdef SIMURO5_GK_PROBE
+GkTargetProbe g_gk_probe;
+#endif
+
 void position(RobotState &r, double tx, double ty, TargetMode mode) {
     double dx = tx - r.x, dy = ty - r.y;
     double de = std::hypot(dx, dy);
+#ifdef SIMURO5_GK_PROBE
+    g_gk_probe.note(tx, ty);     // 先记：目标点本身就算是 NaN 也要看得见（否则探针显示 0 是假象）
+#endif
     // 目标点含 NaN/Inf（上游算崩）→ 直接停车，绝不把 NaN 写进平台速度
     if (!std::isfinite(de)) { stop(r); return; }
     if (mode == TM_STOP) {

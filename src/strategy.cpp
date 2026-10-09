@@ -21,6 +21,41 @@ TUNABLE(kPenaltySpotDist, 39.4);
 TUNABLE(kPenaltySpotTol, 1.5);
 TUNABLE(kPenaltySpotStill, 1.0);
 
+// ═══ 门前禁止把球朝自家门推（防乌龙，2026-10-08）═══
+//   失球归因（离线 bench 3 局 72000 帧，16 个失球）：
+//     · 12 个是我们自己最后触球（乌龙），其中门将 4 个、主攻 3 个、中场 3 个
+//     · 10/12 个乌龙是 >100cm/s 的高速球
+//   根因：门前触球时把球朝自家门加速 —— "越解越往门里送"。
+//   做法与门将已有的「闸一」同源：从轮速里**只扣掉朝自家门的平动分量**，
+//   转动分量与横向分量全部保留 ⇒ 照样能转身、能横传、能把球捅到边路，
+//   只是不许再朝自家门那一侧产生位移。
+//   触发条件刻意收窄（球在己方罚球区 + 离球 ≤ 触球半径），避免影响正常跑位。
+TUNABLE(kOwnGoalGuard, 1.0);         // 0 = 整条关闭（回滚）
+TUNABLE(kOwnGoalGuardR, 8.0);        // cm：离球这么近才可能触球，才需要戴闸
+
+// 作用域：只对 1~4 号（门将有它自己的闸一，别重复扣）
+void enforce_no_own_goal_touch(WorldModel &wm) {
+    if (kOwnGoalGuard < 0.5 || !wm.ball.valid) return;
+    const TeamContext &ctx = wm.ctx;
+    if (!in_penalty_area(ctx, wm.ball.x, wm.ball.y)) return;   // 球不在己方罚球区 → 不关这事
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+        RobotState &r = wm.home[i];
+        if (!std::isfinite(r.x) || !std::isfinite(r.y)) continue;
+        if (dist(r.x, r.y, wm.ball.x, wm.ball.y) > kOwnGoalGuardR) continue;
+
+        const double vf = 0.5 * (r.vl + r.vr);        // 沿机头的平动分量
+        const double spin = 0.5 * (r.vr - r.vl);      // 转动分量（原样保留）
+        if (std::fabs(vf) <= 1e-9) continue;
+        const double dir = (vf >= 0.0) ? r.rot : r.rot + 180.0;   // 平动实际朝向
+        const double goalward = (ctx.attack_dir() > 0.0) ? 180.0 : 0.0;  // 朝自家门的方向
+        const double c = std::cos((dir - goalward) * 3.14159265358979323846 / 180.0);
+        if (c <= 0.0) continue;                       // 没有朝门分量 → 不动
+        const double vf2 = vf * (1.0 - c);            // 按投影扣掉朝门那一份
+        r.vl = vf2 - spin;
+        r.vr = vf2 + spin;
+    }
+}
+
 bool we_take_penalty_spot(const WorldModel &wm) {
     bool state_says_ours = (wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Blue) ||
                            (!wm.ctx.is_blue && wm.game_state == PM_PenaltyKick_Yellow);
@@ -125,6 +160,7 @@ void Strategy::run(WorldModel &wm) {
     // 门区纪律：门区只能有门将；大禁区非门将最多 3 人（规则7.10.4 红线=4），超限顶离球最远
     enforce_own_goal_area(wm);
     enforce_own_penalty_count(wm);
+    enforce_no_own_goal_touch(wm);
 }
 
 // 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm

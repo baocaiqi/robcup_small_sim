@@ -30,5 +30,16 @@ struct CoopPass {
 };
 CoopPass plan_coop_pass(const WorldModel &wm, int passer_id);
 
+// 门前横传 + 门柱包抄（docs/17 的 P4）：球在对方门前一侧时，把球横送到远门柱、
+//   另一人包抄。接球点由本函数直接算出（角色锚点够不到门柱）。
+CoopPass plan_cross(const WorldModel &wm, int passer_id);
+
+// ── 传球安全闸（实现与内部状态在 roles.cpp）──
+//   pass.cpp 的 plan_cross 要复用同一套护栏，所以提到头文件、脱离 roles.cpp 的匿名 namespace。
+//   加这两条**没有放宽任何门槛**：判据一字未改，只是让 pass.cpp 也能调用。
+bool pass_context_safe(const WorldModel &wm);
+bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
+                      double tx, double ty, bool check_lane);
+
 }  // namespace simuro5
 #endif

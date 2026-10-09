@@ -36,12 +36,43 @@
 #include "simuro5/world_model.hpp"
 #include "simuro5/strategy.hpp"
 #include "simuro5/shoot.hpp"          // 借墙射门计数（bank_plan_count/bank_frame_count）
+#include "simuro5/motion.hpp"         // motion::g_gk_probe（门将目标点探针，SIMURO5_GK_PROBE 下）
 #define TUNABLE_PREFIX "sim."
 #include "simuro5/tunable.hpp"        // 参数注入（--params / --dump-params，见 docs/work/RL参数搜索规格.md）
 
 using namespace simuro5;
 
 namespace simuro5 { extern const char *g_gk_rule_probe; }   // roles.cpp，SIMURO5_GK_PROBE 下才有
+// motion::g_gk_probe 由 motion.hpp 声明（SIMURO5_GK_PROBE 下）
+
+// ---- 门将逐帧探针（诊断：--gk-probe）----
+// 原 sim_trace 只在门将"触球那一帧"才读 g_gk_rule_probe，看不到连续命中序列。
+// --gk-probe 打开后每帧打一行：命中规则 + 目标 y（夹进活动范围之后的真实目标）+ 门前横移关键量。
+static bool g_gk_probe_on = false;
+static const char *gk_probe_rule() {
+    if (!g_gk_rule_probe || std::strcmp(g_gk_rule_probe, "none") == 0) return "none";
+    // 规则名与源码行号一起给（sim_trace 有分支追踪；sim_bench 没有 → 只给规则名）
+    return g_gk_rule_probe;
+}
+
+// 门将本帧命中规则的数组下标。kGoalieRules 的顺序（见 roles.cpp）：
+//   0 no_push / 1 side_step / 2 opp_ball_lock / 3 restart_kick / 4 cover_line /
+//   5 opp_kick_line / 6 press_door / 7 goal_line_hold / 8 clear / 9 wall_ball /
+//   10 shot_block / 11 default；-1 = 前置规则(penalty/line_block/ball_behind)或未命中
+static const char *const kGkRuleNamesShort[] = {
+    "no_push", "side_step", "opp_ball_lock", "restart_kick", "cover_line",
+    "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
+    "shot_block", "default",
+};
+static int gk_rule_idx() {
+    const char *r = gk_probe_rule();
+    if (std::strcmp(r, "none") == 0) return -1;
+    if (std::strcmp(r, "penalty") == 0 || std::strcmp(r, "line_block") == 0 ||
+        std::strcmp(r, "ball_behind") == 0) return -1;
+    for (int i = 0; i < 12; ++i)
+        if (std::strcmp(r, kGkRuleNamesShort[i]) == 0) return i;
+    return -2;
+}
 
 // 简单确定性 PRNG（xorshift64*）：可复现、够快
 struct Rng {
@@ -83,6 +114,13 @@ TUNABLE(kWheelDead, 0);        // 轮速死区：小于此值的轮速命令推�
 // —— 推球动量（原来硬编码 0.3 / 0.7） ——
 TUNABLE(kPushKeep, 0.427589);         // 推球时保留旧球速的比例
 TUNABLE(kPushGain, 0.98998);         // 推球时机器人速度注入的比例
+// ═══ 门前禁止把球朝自家门推（防乌龙，2026-10-08）═══
+//   失球归因：16 个失球 12 个是我们自己最后触球、10 个是高速球 ⇒ 门前触球方向是主因。
+//   只切掉「朝自家门(+x)」那一个分量，横向/朝外分量保留，所以横传和解围到边上不受影响。
+TUNABLE(kOwnGoalTouchGuard, 1.0);    // 0 = 整条关闭（回滚）
+TUNABLE(kOwnGoalTouchDist, 40.0);    // cm：球离我方门线这么近时，蓝方触球受本闸约束
+TUNABLE(kOwnGoalTouchKeep, 0.0);     // 朝门分量的保留比例（0 = 完全切掉）
+TUNABLE(kOwnGoalTouchMax, 0.0);      // cm/帧：朝门分量上限（0 = 不许朝门加速）
 // —— 脚本对手速度（原来写死 80/30/50/40；实测"对手慢一半"的根因就在这里） ——
 TUNABLE(oppChaseSpeed, 145.712);      // 追击手（远球）
 TUNABLE(oppChaseNearSpeed, 10);  // 追击手（近球 20cm 内）
@@ -244,6 +282,46 @@ static void traj_write_row(FILE *fp, const SimState &s) {
 static bool g_gk_drill = false;
 static long g_gkd_n = 0, g_gkd_out1s = 0, g_gkd_out2s = 0, g_gkd_conceded = 0;
 static std::map<std::string, long> g_gkd_rules;   // 门球后前 80 帧门将命中的规则
+
+// 门前横移演练（诊断，2026-10-08）：--gk-cross-drill
+//   目的单一 —— 把"球在门前横着走"这一刻的门将行为稳定复现出来，好看清它命中哪条规则、目标 y 是多少。
+//   做法：每次复位把球放到门前 18cm、从下沿往上扫；扫完一轮（球出门框/够远）再从下沿重来。
+//   我方 1~4 号与对手全部摆远，保证这一帧只有"球在横移"这一个变量。
+//   球速很慢（0.30cm/帧 = 12cm/s）——"门前横移的慢球"正是丢球形状。
+static bool g_gk_cross_drill = false;
+static bool g_true_ball_history = false;   // --true-ball-history：把球速修真（见 play_match 里的说明）
+static double g_gkc_dist = 18.0;                  // --cross-dist：球摆在门前多少 cm 处
+static double g_gkc_vx = 0.0;                     // --cross-vx：朝门分量 cm/帧（0=纯横移）
+static double g_gkc_vy = 0.30;                    // --cross-vy：横移分量 cm/帧
+static long g_gkc_n = 0, g_gkc_frames = 0;        // 横移窗内的样本数 / 摆位次数
+static long g_gkc_sweep = 0;                      // 当前扫到第几轮
+static std::map<std::string, long> g_gkc_rules;   // 横移窗内门将命中的规则
+
+// ⚠️ 关键：WorldModel 的球速是拿本帧球位减上一帧球位算的（fill_env 填 lastBall = s.p_bx/s.p_by）。
+//   本演练用「球位钉住 + p_b 给偏移」来喂一个**恒定的横移速度**：
+//     · 球位不动 → 门将不会在一帧内碰到球，场景稳定、每帧都是干净的样本；
+//     · p_b 与球位差 0.3cm → 策略看到的球速就是 0.3cm/帧的横移（和真机上报口径一致）。
+//   其它 9 台全部摆到远处并冻结 —— 这一帧只有"球在门前横着走"这一个变量。
+static void gk_cross_place(SimState &s) {
+    const double gyx[5] = {5, 150, 140, 140, 130}, gyy[5] = {90, 20, 60, 120, 160};
+    const double gbx[5] = {215, 120, 110, 110, 100}, gby[5] = {90, 30, 60, 120, 150};
+    for (int i = 0; i < 5; ++i) {
+        s.blue[i].x = gbx[i]; s.blue[i].y = gby[i]; s.blue[i].rot = 180;
+        s.blue[i].vl = s.blue[i].vr = 0; s.blue[i].pl = s.blue[i].pr = 0;
+        s.yellow[i].x = gyx[i]; s.yellow[i].y = gyy[i]; s.yellow[i].rot = 0;
+        s.yellow[i].vl = s.yellow[i].vr = 0; s.yellow[i].pl = s.yellow[i].pr = 0;
+    }
+    s.blue[0].x = 215.0; s.blue[0].y = 90.0; s.blue[0].rot = 180;
+    ++g_gkc_n;
+    // 扫门：y 从 74 到 106 每帧 +0.25cm，扫完一轮回到 74 再来
+    if (s.by < 74.0 || s.by > 106.0) { s.by = 74.0; ++g_gkc_sweep; }
+    s.bx = 220.0 - g_gkc_dist;                     // 摆到"门前 g_gkc_dist cm"
+    // WorldModel 的 vx 由 (球位 - lastBall) 算：lastBall 在球位 -x 侧 ⇒ 算出来 vx>0 ⇒ 朝我们球门(x=220)
+    s.p_bx = s.bx - g_gkc_vx;
+    s.p_by = s.by - g_gkc_vy;                      // 横移速度（cm/帧）
+    s.bvx = g_gkc_vx * 40.0; s.bvy = g_gkc_vy * 40.0;   // 物理速度（cm/s，40Hz）
+    s.by += 0.25;                                  // 下一帧的采样点
+}
 
 // 初始摆位（简单开局阵型）；seed 用于引入摆位微扰（模拟真实开局差异）
 static void init_formation(SimState &s, Rng *rng = nullptr) {
@@ -442,6 +520,17 @@ static void step_physics(SimState &s) {
                                        carry_blue ? "蓝" : "黄", carry_i, rv);
             s.bvx = s.bvx * kPushKeep + rvx * kPushGain;
             s.bvy = s.bvy * kPushKeep + rvy * kPushGain;
+            // ═══ 门前禁止把球朝自家门推（防乌龙，2026-10-08）═══
+            //   实测归因：16 个失球里 12 个是**我们自己最后触球**、10 个是高速球，
+            //   其中门将 4 个。根因就是门前触球时把球朝自家门加速。
+            //   这里只切掉「朝自家门」那一个分量，横向分量保留 ⇒ 照样能横传/解围到边上，
+            //   只是不再"越解越往门里送"。
+            if (kOwnGoalTouchGuard > 0.5 && carry_blue) {
+                if (220.0 - s.bx < kOwnGoalTouchDist) {
+                    if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;   // +x = 朝我方球门(x=220)
+                    if (s.bvx > kOwnGoalTouchMax) s.bvx = kOwnGoalTouchMax;
+                }
+            }
         }
         // 球保持在机器人前方接触区（防球钻进机器人身体）
         const SimRobot &c = carry_blue ? s.blue[carry_i] : s.yellow[carry_i];
@@ -469,6 +558,12 @@ static void step_physics(SimState &s) {
                 if (s.dbg_contacts) printf("  [碰撞] %s%d 挡球 v(%.0f,%.0f)→", t ? "黄" : "蓝", i, s.bvx, s.bvy);
                 s.bvx -= (1.0 + kDeflect) * rel_vn * nx;
                 s.bvy -= (1.0 + kDeflect) * rel_vn * ny;
+                // 门前防乌龙（同携带路径）：挡球时不许把球朝自家门(+x)弹出去。
+                //   实测：16 个失球里门将自己送进 4 个，就是从这条反弹来的。
+                if (kOwnGoalTouchGuard > 0.5 && t == 0 && 220.0 - s.bx < kOwnGoalTouchDist) {
+                    if (s.bvx > 0.0) s.bvx *= kOwnGoalTouchKeep;
+                    if (s.bvx > kOwnGoalTouchMax) s.bvx = kOwnGoalTouchMax;
+                }
                 if (s.dbg_contacts) printf("(%.0f,%.0f) 球(%.0f,%.0f) 机(%.0f,%.0f)\n",
                                            s.bvx, s.bvy, s.bx, s.by, r.x, r.y);
             }
@@ -488,6 +583,42 @@ static void og_record(const SimState &s) {
     ++g_og_age[age < 10 ? 0 : (age <= 40 ? 1 : 2)];
     auto &t = g_og_tags[s.lt_rule];
     ++t.first; t.second += active;
+}
+
+// ---- 失球取证 CSV（--def-csv out.csv）：逐帧记录球 + 门将 + 我方 1~4 + 最近对手 ----
+//   为什么需要：原来只有 debug 打的一行 `[失球]`，看不到"丢球前那 1 秒到底怎么走的"。
+//   分析口子在 Python 侧自己找进球（球越线那帧），所以这里不需要任何判定。
+static std::FILE *g_def_csv = nullptr;
+static void def_csv_row(const SimState &s) {
+    if (!g_def_csv) return;
+    double opp_dmin = 1e9; int opp_i = -1;
+    for (int i = 0; i < 5; ++i) {
+        double d = std::hypot(s.bx - s.yellow[i].x, s.by - s.yellow[i].y);
+        if (d < opp_dmin) { opp_dmin = d; opp_i = i; }
+    }
+    double blue_dmin = 1e9; int blue_i = -1;
+    for (int i = 1; i < 5; ++i) {
+        double d = std::hypot(s.bx - s.blue[i].x, s.by - s.blue[i].y);
+        if (d < blue_dmin) { blue_dmin = d; blue_i = i; }
+    }
+    // 球按当前速度外推到门线(x=220)的 y —— 用来量"门将站的位置对不对"
+    double y_at_goal = 90.0;
+    bool heading_goal = false;
+    if (s.bvx > 1e-6) {
+        double t = (220.0 - s.bx) / s.bvx;
+        if (t >= 0.0 && t < 400.0) { y_at_goal = s.by + s.bvy * t; heading_goal = true; }
+    }
+    std::fprintf(g_def_csv,
+        "%d,%d,%.2f,%.2f,%.3f,%.3f,%.2f,%.2f,%.2f,"
+        "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+        "%d,%.2f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%s\n",
+        s.frames, s.score_blue - s.score_yellow,
+        s.bx, s.by, s.bvx, s.bvy, std::hypot(s.bvx, s.bvy), 220.0 - s.bx,
+        std::hypot(s.bx - s.blue[0].x, s.by - s.blue[0].y),
+        s.blue[0].x, s.blue[0].y, s.blue[1].x, s.blue[1].y, s.blue[2].x, s.blue[2].y,
+        s.blue[3].x, s.blue[3].y, s.blue[4].x, s.blue[4].y,
+        s.last_touch_team, s.lt_dv, s.last_touch_id, opp_dmin, opp_i, blue_dmin, blue_i,
+        y_at_goal, heading_goal ? 1 : 0, gk_probe_rule());
 }
 
 // 进球判定 + 重置（带随机摆位）；debug>0 时打印进球详情
@@ -697,6 +828,8 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
 
     for (int f = 0; f < frames; ++f) {
         g_coop_frame = f;
+        // 门前横移演练：每帧把场景钉成"球在门前 18cm 横着走"，扫完一轮（球出门框）从头再来。
+        if (g_gk_cross_drill && opp_mode != 2) gk_cross_place(s);
         const int old_epoch = s.reset_epoch;
         if (f == frames - 1) last_decision_state = s;
         // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
@@ -714,6 +847,30 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
 #endif
             coop_sample(wm_b);
             if (drill_t >= 0 && drill_t < 80) ++g_gkd_rules[g_gk_rule_probe];
+            // 门前横移探针：逐帧打印门将命中了哪条规则、目标 y 是多少。
+            //   只在"球在我方门前 60cm 内"时打印，避免刷屏淹没横移那一段。
+            //   仅 sim_trace 有 SIMURO5_GK_PROBE（sim_bench 不定义该宏 ⇒ 没有 g_gk_probe）。
+#ifdef SIMURO5_GK_PROBE
+            if (g_gk_probe_on && opp_mode != 2) {
+                const motion::GkTargetProbe &gp = motion::g_gk_probe;
+                if (gp.ball_goal < 60.0) {
+                    const char *rule = gk_probe_rule();
+                    // idx=规则数组下标（-1=前置规则 penalty/line_block/ball_behind）
+                    std::printf("[GK] f%05d idx=%2d %-14s | 目标=(%5.1f,%5.1f) 门将=(%5.1f,%5.1f) | "
+                                "球=(%6.1f,%5.1f)v=(%5.2f,%5.2f) | 球到门线=%5.1f 门将到球=%5.1f "
+                                "对手到球=%5.1f y_at_goal=%5.1f 会进门=%d 在框内=%d last=(%.2f,%.2f) s.p=(%.2f,%.2f)\n",
+                                f, gp.rule_idx, rule,
+                                gp.tx, gp.ty, wm_b.home[0].x, wm_b.home[0].y,
+                                wm_b.ball.x, wm_b.ball.y, wm_b.ball.vx, wm_b.ball.vy,
+                                gp.ball_goal, gp.db, gp.opp_dmin,
+                                gp.y_at_goal, gp.heading_goal, gp.on_target,
+                                env_b.lastBall.pos.x, env_b.lastBall.pos.y,
+                                s.p_bx, s.p_by);
+                    ++g_gkc_rules[rule];
+                    ++g_gkc_frames;
+                }
+            }
+#endif
             count_active_swap(wm_b, swap_prev_id, swap_prev_live);
             for (int i = 0; i < 5; ++i) { s.blue[i].vl = wm_b.home[i].vl; s.blue[i].vr = wm_b.home[i].vr; }
         }
@@ -748,13 +905,18 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
             s.dbg_contacts = 0;
         }
 
-        if (g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
+        // ⚠️ 球速口径开关（2026-10-08 发现）：
+        //   WorldModel 的球速 = 本帧球位 − 上一帧球位。原来 lastBall 是在【推进之后】才写的，
+        //   于是 lastBall == 本帧球位 ⇒ 策略看到的球速恒为 0。
+        //   实测（3 局 seed 5）：球速恒 0 时失球 5.3/场；把球速修真之后失球 11.0/场、
+        //   乌龙 4.0→9.33/场 —— 说明**依赖球速的那批代码从来没被真正跑过**（拿着 0 球速"碰巧"更好）。
+        //   所以默认保持历史口径，修真的那条用环境变量开，方便对照调参。
+        const bool true_ball_history = g_true_ball_history || getenv("SIMURO5_TRUE_BALL_HISTORY") != nullptr;
+        if (g_correct_ball_history || true_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
         s.touch_blue = 0; s.touch_yellow = 0;
         const double pre_bvx = s.bvx;
         step_physics(s);
-
-        // 记录本帧球位作为下一帧的 lastBall（WorldModel 用差分算球速）
-        if (!g_correct_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
+        if (!g_correct_ball_history && !true_ball_history) { s.p_bx = s.bx; s.p_by = s.by; }
 
         // 更新"最近一次触球"（乌龙判定用；双方同帧触球时取离球更近的一方）
         if (s.touch_blue || s.touch_yellow) {
@@ -882,6 +1044,7 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         }
 
         const int pre_sy = s.score_yellow;
+        def_csv_row(s);                  // 必须在 check_goal 之前：进球判定那帧会立刻重置摆位
         check_goal(s, &rng, debug);
         s.frames++;
         if (g_gk_drill && opp_mode != 2) {   // 门球演练统计（只在我们守 x=220 时）
@@ -960,6 +1123,7 @@ int main(int argc, char **argv) {
     double opp_strength = 1.0;               // 脚本对手强度倍率（1.0=demo 校准档，>1 更强，见 docs/12）
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
     const char *traj_path = nullptr;         // --traj out.csv：导出第一场逐帧轨迹（docs/18）
+    const char *def_csv_path = nullptr;      // --def-csv out.csv：失球取证（球/门将/全场逐帧）
     const char *params_path = nullptr;       // --params in.txt：注入策略参数（离线搜索用）
     const char *dump_path = nullptr;         // --dump-params out.txt：导出参数表
     const char *coop_path = nullptr;
@@ -969,7 +1133,14 @@ int main(int argc, char **argv) {
         else if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
         else if (a == "--coop-csv" && i + 1 < argc) coop_path = argv[++i];
         else if (a == "--correct-ball-history") g_correct_ball_history = true;
+        else if (a == "--def-csv" && i + 1 < argc) def_csv_path = argv[++i];
+        else if (a == "--true-ball-history") g_true_ball_history = true;
         else if (a == "--goalkick-drill") g_gk_drill = true;
+        else if (a == "--gk-cross-drill") g_gk_cross_drill = true;
+        else if (a == "--cross-dist" && i + 1 < argc) g_gkc_dist = std::atof(argv[++i]);
+        else if (a == "--cross-vx" && i + 1 < argc) g_gkc_vx = std::atof(argv[++i]);
+        else if (a == "--cross-vy" && i + 1 < argc) g_gkc_vy = std::atof(argv[++i]);
+        else if (a == "--gk-probe") g_gk_probe_on = true;
         else if (a == "--strength" && i + 1 < argc) opp_strength = std::atof(argv[++i]);
         else if (a == "--opp" && i + 1 < argc) {
             std::string o = argv[++i];
@@ -988,6 +1159,7 @@ int main(int argc, char **argv) {
             printf("sim_bench: --games N --frames N --opp scripted|self|yellow|wall [--strength X] [--debug N] [--seed N] [--traj out.csv]\n");
             printf("           --coop-csv out.csv（配合生命周期观测） --correct-ball-history（独立球速输入修正实验）\n");
             printf("           --params in.txt（注入参数） --dump-params out.txt（导出全部可调参数及默认值）\n");
+            printf("           --gk-probe（门将逐帧命中规则+目标y） --gk-cross-drill（门前横移演练摆位）\n");
             return 0;
         }
     }
@@ -1011,6 +1183,14 @@ int main(int argc, char **argv) {
         g_traj = fopen(traj_path, "w");
         if (!g_traj) { printf("sim_bench: 无法写入轨迹文件 %s\n", traj_path); return 1; }
         traj_write_header(g_traj);
+    }
+    if (def_csv_path) {
+        g_def_csv = fopen(def_csv_path, "w");
+        if (!g_def_csv) { printf("sim_bench: 无法写入失球取证文件 %s\n", def_csv_path); return 1; }
+        std::fprintf(g_def_csv,
+            "frame,diff,bx,by,bvx,bvy,bspd,ball_goal,gk_db,"
+            "gk_x,gk_y,b1x,b1y,b2x,b2y,b3x,b3y,b4x,b4y,"
+            "last_team,lt_dv,last_id,opp_dmin,opp_i,blue_dmin,blue_i,y_at_goal,heading_goal,gk_rule\n");
     }
     const char *mode_name = opp_mode == 1 ? "自我博弈" : (opp_mode == 2 ? "我方守x=0(黄队侧)" : (opp_mode == 3 ? "门线堆人墙" : "脚本对手"));
     if (coop_path) {
@@ -1088,6 +1268,18 @@ int main(int argc, char **argv) {
         for (const auto &kv : g_gkd_rules) tot += kv.second;
         for (const auto &kv : g_gkd_rules)
             printf("    门球后 2 秒内门将规则 [%s] %.0f%%\n", kv.first.c_str(), 100.0 * kv.second / (tot + 1e-9));
+    }
+    if (g_gk_cross_drill && g_gkc_frames > 0) {
+        printf("=== 门前横移演练: 门前窗口内 %ld 帧样本（%ld 轮扫门）；门将命中规则分布 ===\n",
+               g_gkc_frames, g_gkc_sweep);
+        long tot = 0;
+        for (const auto &kv : g_gkc_rules) tot += kv.second;
+        std::vector<std::pair<long, std::string>> order;
+        for (const auto &kv : g_gkc_rules) order.emplace_back(-kv.second, kv.first);
+        std::sort(order.begin(), order.end());
+        for (const auto &o : order)
+            printf("    [%-14s] %6ld 帧 (%.0f%%)\n", o.second.c_str(), -o.first,
+                   100.0 * (-o.first) / (tot + 1e-9));
     }
     {
         double tot = (double)(g_pz_us + g_pz_opp + g_pz_both + g_pz_none) + 1e-9;

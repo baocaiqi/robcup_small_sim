@@ -109,6 +109,16 @@ TUNABLE(kGkNoPushDist, 64.8878);  // cm：球进我方门口这个距离内才�
 TUNABLE(kGkSideClear, 38.0544);  // cm：侧向让开距离
 TUNABLE(kGkBackOff, 9.358);  // cm：场侧回撤（目标是球后，绝不越球）
 TUNABLE(kGkBehindMargin, 6.75991);  // cm：球须明显越过门将这么多才让开
+// 门前横移（2026-10-08）：门将已站在球与门之间时，y 是"对到球的横移线"还是"往球外侧让"。
+//   1 = 对到球（新，默认）；0 = 回滚成旧口径（by + side*lat，会被 clamp 到门框两端）。
+//   实测：门前 17~18cm 的慢横移 93% 命中 gk_rule_clear，旧口径目标 y 只有 72.5/107.5 两个值。
+TUNABLE(kGkTkCross, 1.0);
+
+// ── 门前横传 + 门柱包抄（docs/17 的 P4）──
+//   横传的几何/选择常量都在 pass.cpp（plan_cross）；这里只管包抄者到位后的迎球口径。
+TUNABLE(kCrossFaceOn, 1.0);       // 0 = 包抄者只走位、不做"到位转正"（回滚观察用）
+TUNABLE(kCrossArriveDist, 8.0);   // cm：离包抄点这么近就算到位
+TUNABLE(kCrossArriveAng, 40.0);   // 度：到位转正的容差
 
 bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty) {
     const TeamContext &ctx = wm.ctx;
@@ -298,6 +308,7 @@ struct GkView {
 };
 
 TUNABLE(kGkCreepStill, 1.0);     // 0 = 回滚（只认 <0.2cm/帧）
+TUNABLE(kGkCreepBand, 1.0);      // 1 = 只认"真门球角"（新，默认）；0 = 回滚成旧的"离中线 12.3cm 即算"
 constexpr double kGkCreepSpeed  = 0.5;    // cm/帧：慢爬上限
 constexpr double kGkKickSpotDx  = 14.8;   // cm：门球点离门线
 constexpr double kGkKickSpotDy  = 12.3;   // cm：门球点离中线
@@ -307,7 +318,14 @@ bool gk_goal_kick_creep(const GkView &v) {
     if (kGkCreepStill < 0.5) return false;
     if (std::hypot(v.vx, v.vy) >= kGkCreepSpeed) return false;
     if (v.vx * v.gside > 0.0) return false;                       // 朝门滚 → 活球
-    return std::hypot(v.ball_goal - kGkKickSpotDx, std::fabs(v.by - 90.0) - kGkKickSpotDy) <
+    // ⚠️ 旧判据是 hypot(ball_goal − 14.8, ||by−90| − 12.3|) < 12 —— 第二项在 |by−90|=12.3 处取
+    //   **最小值**，也就是"球离中线 12.3cm 就算门球角"，把门前中路慢球全误判成死门球。
+    //   实测：门前 <25cm 时 restart_kick 占 46%，而它 gk_set_play=true ⇒ **整段跳过守门两闸**，
+    //   门将就地站成桩子（失球前 30 帧位移 0.0~0.8cm）。
+    //   真门球点在门区两侧角上（|by−90| ≈ 12.3），所以新判据要求 |by−90| 落在这个带里。
+    const double dy_off = std::fabs(v.by - 90.0);
+    if (kGkCreepBand > 0.5 && std::fabs(dy_off - kGkKickSpotDy) > kGkCreepRange) return false;
+    return std::hypot(v.ball_goal - kGkKickSpotDx, dy_off - kGkKickSpotDy) <
            kGkCreepRange;
 }
 
@@ -673,13 +691,32 @@ bool gk_rule_clear(WorldModel &wm, int id, const GkView &v) {
     double tx, ty;
     motion::TargetMode mode;
     if (v.ball_goal < ctx.dist_our_goal(r.x)) {
-        double side = gk_detour_side(v.by);               // 只看球的位置选边，避免左右翻
-        double lat  = v.ball_still ? kGkLateral : 12.0;   // 球在动：小侧移贴近截下
+        // ① 球在门将的**场侧**（门将已经在球与门之间）——只该做一件事：
+        //    把 y 对准球，站到球的横移线上去挡；x 保持在球后朝场外（推球方向）。
+        // 旧写法 ty = clamp(by + side*30, 74, 106) 是"往球外侧让 30cm"：
+        //   球 y=80 时 side=+1 ⇒ 目标 110 ⇒ clamp 成 106 —— 球在 80、门将却被叫去 106，
+        //   **门将朝远离球的方向走**；球跨过 y=90 时目标还在 74/106 之间横跳 32cm。
+        //   实测 sim_trace --gk-probe：门前慢横移的 |目标y−球y| 均值 11.36cm ——
+        //   这不是"追得慢"，是"追的目标错了"。
+        // 防乌龙不靠这个 y 偏移：推球方向由 tx（球后 kGkPushDist、朝场外）保证。
         tx = v.bx + v.gside * kGkPushDist;
-        ty = clamp(v.by + side * lat, kGkYLo, kGkYHi);
+        ty = (kGkTkCross > 0.5) ? clamp(v.by, kGkYLo, kGkYHi)     // 新：直接对到球的横移线
+                                : clamp(v.by + gk_detour_side(v.by) * (v.ball_still ? kGkLateral : 12.0),
+                                        kGkYLo, kGkYHi);           // 旧：往球外侧让（回滚口径）
+        mode = motion::TM_STOP;
+    } else if (kGkTkCross > 0.5) {
+        // ② 球在门将的**门侧**（球比门将更靠自家门）——最危险的一种：
+        //    门将此时在球的场侧，**任何朝场外的平移都会先穿过球**，把球铲进自家门。
+        // 旧写法 tx = bx + dx*45（dx 是"解围方向"）实测就是**朝自家门线**：
+        //   球(203,80)、门将(209,88) ⇒ dir=(-0.09,+1.00) ⇒ 目标 (199.1,125) → y 夹到 107.5，
+        //   也就是"门前横移时目标 y 为什么是 107.5"的答案，x 还朝门口压了 19cm。
+        // 现在把两件事拆开：x 只做防乌龙（留在门线前 kGkGuardDist，不朝门口压）；
+        //   y 去对球的横移线（门框内）—— 本帧只横移不前进 ⇒ 不穿球铲进自家门，也不背对球。
+        tx = gk_line_x(ctx, kGkGuardDist);
+        ty = clamp(v.by, kGkYLo, kGkYHi);
         mode = motion::TM_STOP;
     } else {
-        tx = v.bx + dx * kGkKickThrough;                  // 这里 y 只夹罚球区，不夹门框
+        tx = v.bx + dx * kGkKickThrough;                  // 回滚口径：球前 kGkKickThrough
         ty = v.by + dy * kGkKickThrough;
         mode = motion::TM_PASS;
     }
@@ -799,7 +836,18 @@ void run_goalie(WorldModel &wm, int id) {
     motion::LegacyDriveScope legacy_drive;   // 门将保持旧驱动口径
     GkView v = gk_view(wm, id);
 #ifdef SIMURO5_GK_PROBE
+    // 把本帧 GkView 的关键量交给探针（sim_trace --gk-probe 打印用）
+    motion::g_gk_probe.y_at_goal    = v.y_at_goal;
+    motion::g_gk_probe.ball_goal    = v.ball_goal;
+    motion::g_gk_probe.db           = v.db;
+    motion::g_gk_probe.opp_dmin     = v.opp_dmin;
+    motion::g_gk_probe.heading_goal = v.heading_goal ? 1 : 0;
+    motion::g_gk_probe.on_target    = v.on_target ? 1 : 0;
+#endif
+#ifdef SIMURO5_GK_PROBE
     g_gk_rule_probe = "none";
+    motion::g_gk_probe.rule_idx = -1;        // -1 = 前置规则(penalty/line_block/ball_behind)或未命中
+    motion::g_gk_probe.begin();              // 整段（规则 + 两闸）记下最后一个目标点
 #endif
 #ifdef SIMURO5_HNNU_TRACE
     const char *hit = "none";
@@ -816,6 +864,9 @@ void run_goalie(WorldModel &wm, int id) {
         for (int i = 0; i < (int)(sizeof(kGoalieRules) / sizeof(kGoalieRules[0])); ++i) {
             if (kGoalieRules[i](wm, id, v)) {
                 GK_HIT(kGoalieRuleNames[i]);
+#ifdef SIMURO5_GK_PROBE
+                motion::g_gk_probe.rule_idx = i;
+#endif
                 gk_set_play = (i == 0) || (i == 3);   // 0=no_push(死球)  3=restart_kick(门球)
                 break;
             }
@@ -903,6 +954,9 @@ void run_goalie(WorldModel &wm, int id) {
                              clamp(gr.y, kGkYLo, kGkYHi), motion::TM_PASS);
         }
     }
+#ifdef SIMURO5_GK_PROBE
+    motion::g_gk_probe.finish();
+#endif
 }
 #undef GK_HIT
 
@@ -968,7 +1022,7 @@ TUNABLE(kRecvMeetMaxOff, 60.0); // cm：会合点相对锁点的最大偏移（�
 TUNABLE(kRecvArriveDist, 8.0);  // cm：进入即停车转正迎球
 TUNABLE(kRecvNoReverse, 1.0);   // 1=接球路径禁止倒车
 
-bool pass_context_safe(const WorldModel &wm) {
+bool pass_context_safe_impl(const WorldModel &wm) {
     if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
         wm.threat_level >= 0.6 || in_no_push_zone(wm.ball.x, wm.ball.y)) return false;
     double ours = 1e9, theirs = 1e9;
@@ -984,9 +1038,9 @@ bool pass_context_safe(const WorldModel &wm) {
     return true;
 }
 
-bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
-                      double tx, double ty, bool check_lane) {
-    if (!pass_context_safe(wm) || passer != 1 || receiver < 2 || receiver > 4 ||
+bool pass_target_safe_impl(const WorldModel &wm, int passer, int receiver,
+                           double tx, double ty, bool check_lane) {
+    if (!pass_context_safe_impl(wm) || passer != 1 || receiver < 2 || receiver > 4 ||
         !std::isfinite(tx) || !std::isfinite(ty) || tx < 0 || tx > 220 || ty < 0 || ty > 180 ||
         in_opp_goal_area(wm.ctx, tx, ty) || in_goal_area(wm.ctx, tx, ty) || in_no_push_zone(tx, ty)) return false;
     for (int id : {passer, receiver}) {
@@ -1004,7 +1058,7 @@ bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
 
 bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
-    return pass_context_safe(wm) && id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
+    return pass_context_safe_impl(wm) && id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
         wm.coop_ball_control.game_state == wm.game_state && wm.ga_cooldown[id] <= 0 &&
         wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
@@ -1014,7 +1068,7 @@ void observe_pass_lifecycle(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     if (task.active && task.passer_id == wm.active_id && task.receiver_id >= 1 && task.receiver_id <= 4 &&
         task.receiver_id != task.passer_id &&
-        task.frames_left > 0 && task.game_state == wm.game_state && pass_context_safe(wm)) {
+        task.frames_left > 0 && task.game_state == wm.game_state && pass_context_safe_impl(wm)) {
         if (task.phase == CoopPassPhase::Preparing && task.observing_push) {
             const RobotState &passer = wm.home[task.passer_id];
             double progress = (wm.ball.x - task.push_ball_x) * task.push_dir_x +
@@ -1040,7 +1094,7 @@ void observe_pass_lifecycle(WorldModel &wm) {
                             std::hypot(wm.ball.vx, wm.ball.vy) <= kPassReceiveSpeed;
             task.receive_frames = received ? task.receive_frames + 1 : 0;
             if (task.receive_frames >= kPassReceiveFrames &&
-                pass_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
+                pass_target_safe_impl(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
                 task.phase = CoopPassPhase::Received;
                 wm.coop_ball_control = {true, task.receiver_id, wm.game_state, 0};
                 wm.coop_finish(CoopOutcome::Success);
@@ -1090,7 +1144,7 @@ void carry_pass_ball(WorldModel &wm, int id) {
 void cancel_unsafe_pass_task(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     if (task.active && (task.frames_left <= 0 || task.game_state != wm.game_state ||
-        !pass_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
+        !pass_target_safe_impl(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
                           task.phase == CoopPassPhase::Preparing))) {
         CoopOutcome reason = CoopOutcome::InvalidTarget;
         if (task.game_state != wm.game_state) reason = CoopOutcome::GameState;
@@ -1253,6 +1307,12 @@ bool run_pass_receiver(WorldModel &wm, int id) {
 
 void cancel_unsafe_coop_pass(WorldModel &wm) { cancel_unsafe_pass_task(wm); }
 
+bool pass_context_safe(const WorldModel &wm) { return pass_context_safe_impl(wm); }
+bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
+                      double tx, double ty, bool check_lane) {
+    return pass_target_safe_impl(wm, passer, receiver, tx, ty, check_lane);
+}
+
 void run_active(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
     const TeamContext &ctx = wm.ctx;
@@ -1404,15 +1464,23 @@ void run_active(WorldModel &wm, int id) {
         double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
         cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
-    } else if (!had_pass_task && pass_context_safe(wm)) {
+    } else if (!had_pass_task && pass_context_safe_impl(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
+        // 门前横传优先（docs/17 的 P4）：球在对方门前一侧时，把球横送远门柱比
+        //   「球前 40cm 的常规接应点」更值。复用同一套 pass_target_safe / prep 护栏，
+        //   所以没有新开出任何危险传球的口子；质量分低于直接射门时仍会被顶掉。
+        CoopPass cross = plan_cross(wm, id);
+        if (cross.viable && cross.score > sp.quality + 0.15 &&
+            (!cp.viable || cross.score >= cp.score)) {
+            cp = cross;
+        }
     }
     const bool existing_coop_task = wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
     const bool coop_preferred = existing_coop_task ||
         (cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15);
     const bool coop_pass = coop_preferred &&
-        (wm.coop_pass_task.active || pass_target_safe(wm, id, cp.receiver_id, cp.rx, cp.ry, true));
+        (wm.coop_pass_task.active || pass_target_safe_impl(wm, id, cp.receiver_id, cp.rx, cp.ry, true));
     if (coop_pass) {
         sp.dir_x = cp.dir_x; sp.dir_y = cp.dir_y; sp.aim_rot = cp.aim_rot;
         sp.target_x = wm.ball.x - cp.dir_x * 8.0; sp.target_y = wm.ball.y - cp.dir_y * 8.0;
@@ -1570,7 +1638,7 @@ void run_active(WorldModel &wm, int id) {
     const bool own_ball = db < 15.0 && db < opp_d;
     PassPlan pp = plan_pass(wm, id);
     if (pp.viable && !coop_preferred) {
-        if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
+        if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe_impl(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
             wm.coop_pass_task = {};
             wm.coop_pass_task.active = true; wm.coop_pass_task.passer_id = id;
             wm.coop_pass_task.receiver_id = pp.receiver_id; wm.coop_pass_task.rx = pp.target_x; wm.coop_pass_task.ry = pp.target_y;
@@ -1910,8 +1978,37 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
 }
 }  // anonymous namespace
 
+// 门前横传的**包抄者**走位（docs/17 的 P4）。
+//   条件与 run_active 里注入 plan_cross 的条件同源（同一个 plan_cross），
+//   保证"有人横传"和"有人去门柱"同时发生，不会各走各的。
+//   包抄点由 plan_cross 直接给出（远门柱、且压在对方门区**外**，那里有平台判点球的红线）。
+//   ⚠️ 这里**故意不加** clamp_out_opp_goal_area：那道 clamp 会把点拉回禁区外沿，
+//      它正是"门柱包抄"以前永远实现不了的原因。点球红线由 plan_cross 的 kCrossOutPad 保证。
+bool run_cross_finisher(WorldModel &wm, int id) {
+    if (!wm.we_have_ball) return false;          // 只在"我们持球、要组织横传"时才去包抄
+    if (!pass_context_safe(wm)) return false;
+    CoopPass c = plan_cross(wm, wm.active_id);   // 门前一侧 + 横传几何 + kCrossEnabled 都在这道闸里
+    if (!c.viable || c.receiver_id != id) return false;
+
+    RobotState &r = wm.home[id];
+    // 已就位 → 就地停住等球，别再往球门里蹭（省下点球计时的帧数）
+    if (dist(r.x, r.y, c.rx, c.ry) <= 6.0) { motion::position(r, c.rx, c.ry, motion::TM_STOP); return true; }
+    if (kCrossFaceOn < 0.5) { motion::position(r, c.rx, c.ry, motion::TM_PASS); return true; }
+
+    // 到位顺带转正：用现成的 plan_shoot 算"球在包抄点时"该朝哪（拿不到就面向球门）
+    double aim = angle_to(r.x, r.y, wm.ctx.opp_goal_x(), 90.0);
+    WorldModel tmp = wm;
+    tmp.ball.x = c.rx; tmp.ball.y = c.ry; tmp.ball.vx = 0.0; tmp.ball.vy = 0.0;
+    tmp.in_penalty_exec = false;
+    ShootPlan ps = plan_shoot(tmp, id);
+    if (ps.viable) aim = ps.aim_rot;
+    motion::arrive_facing(r, c.rx, c.ry, aim, kCrossArriveDist, kCrossArriveAng);
+    return true;
+}
+
 void run_assist(WorldModel &wm, int id) {
     if (run_pass_receiver(wm, id)) return;
+    if (run_cross_finisher(wm, id)) return;      // 门前横传包抄（优先于常规"边路尾随"）
     if (run_swarm(wm, id, +1.0)) return;
     if ((wm.threat_level > 0.3 || wm.no_possession_frames >= 2) && wm.counter_attack_frames <= 0) {
         double bbx = wm.ball.x;

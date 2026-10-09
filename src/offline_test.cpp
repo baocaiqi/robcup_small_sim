@@ -2117,6 +2117,42 @@ static int test_goalie_clear_push() {
     return 0;
 }
 
+// 门前横移：慢球在门口横着走时，门将必须朝球的 y 移动、最终站在球与自家门之间。
+//   实测（sim_trace --gk-probe）：门前慢横移命中 gk_rule_clear，目标 y 被夹到门框两端
+//   (72.5/107.5)，球 y=80 时门将目标 107.5 —— 背对球走，且 x 还朝门口压 19cm。
+static int test_goalie_cross_track() {
+    WorldModel wm;
+    // 返回：40 帧后门将到球的横向距离（越小=越贴住球的横移线）
+    auto gap = [&](double knob) {
+        set_param("roles.kGkTkCross", knob);
+        gk_test_field(wm);
+        const double y0 = 76.0;                // 留出余量，40 帧横移后仍在门框内
+        wm.ball.x = 194.0; wm.ball.y = y0;     // 门前 26cm（> kGkLastDitch=22，不被"闸零"接管）
+        wm.ball.vx = 0.05; wm.ball.vy = 0.40;  // 慢横移（>0.5cm/帧，躲开"门球点慢爬"判定）
+        wm.home[0].x = 209.0; wm.home[0].y = 88.0; wm.home[0].rot = -90.0;
+        for (int f = 0; f < 40; ++f) {
+            run_goalie(wm, 0);
+            RobotState &g = wm.home[0];
+            double rad = g.rot * SIMURO5_PI / 180.0;
+            double trust = 1.12856 * (1.0 / 40.0);          // kSpeed * dt（与 sim 口径一致）
+            double v = 0.5 * (g.vl + g.vr);
+            g.x += v * std::cos(rad) * trust;
+            g.y += v * std::sin(rad) * trust;
+            wm.ball.x += wm.ball.vx; wm.ball.y += wm.ball.vy;
+        }
+        return std::fabs(wm.home[0].y - wm.ball.y);
+    };
+    double on = gap(1.0), off = gap(0.0);
+    set_param("roles.kGkTkCross", 1.0);
+    if (!(on < off - 0.5)) {
+        printf("FAIL: 门前横移时门将没贴住球的横移线 新间距=%.1fcm 旧=%.1fcm（应更小）\n",
+               on, off);
+        return 1;
+    }
+    printf("goalie cross track: OK (门前横移贴住球线 新间距=%.1fcm 旧=%.1fcm)\n", on, off);
+    return 0;
+}
+
 // 贴门线静止球「直线推出」：门球往侧面空当推，被抢时直线远离己门
 static int test_goalie_straight_clear() {
     WorldModel wm;
@@ -4429,6 +4465,7 @@ int main(int argc, char **argv) {
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
+    rc |= test_goalie_cross_track();
     rc |= test_goalie_straight_clear();
     rc |= test_goalie_kick_far();
     rc |= test_passive_front_sweep();
