@@ -35,6 +35,8 @@ struct BallState {
 
 enum class CoopPassPhase { Preparing, Receiving, Received };
 enum class PassTaskKind { Coop, Ordinary };
+// 普通传球人自己的准备进度；不改变 CoopPass 的生命周期阶段。
+enum class OrdinaryPassPrepPhase { GoPrepSide, GoPrepPoint, Align, Prepared };
 
 // 结算原因，只用于记账
 enum class CoopOutcome {
@@ -64,6 +66,8 @@ struct CoopPassTask {
     double push_dir_x = 0.0, push_dir_y = 0.0;
     int receive_frames = 0;
     PassTaskKind kind = PassTaskKind::Coop;
+    OrdinaryPassPrepPhase ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepPoint;
+    int ordinary_prep_side = 0;
 };
 
 struct CoopBallControl {

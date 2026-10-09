@@ -3103,6 +3103,319 @@ static WorldModel ordinary_dynamic_scene(double receiver_x, double receiver_y,
     return wm;
 }
 
+static WorldModel ordinary_prep_scene(double receiver_offset = 0.0) {
+    WorldModel wm = ordinary_dynamic_scene(90.0 + receiver_offset, 90.0,
+                                           220.0, 10.0, 130.0, 90.0);
+    wm.home[2].x = 90.0 + receiver_offset; wm.home[2].y = 90.0;
+    wm.assist_x = 90.0; wm.assist_y = 90.0;
+    wm.coop_pass_task = {};
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.kind = PassTaskKind::Ordinary;
+    task.phase = CoopPassPhase::Preparing; task.passer_id = 1; task.receiver_id = 2;
+    task.rx = 90.0; task.ry = 90.0; task.frames_left = 80;
+    const double pass_len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    wm.home[1].x = wm.ball.x - (task.rx - wm.ball.x) / pass_len * 35.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = 180.0;
+    return wm;
+}
+
+static bool same_drive_command(const RobotState &a, const RobotState &b) {
+    return fabs(a.vl - b.vl) <= 1e-8 && fabs(a.vr - b.vr) <= 1e-8;
+}
+
+static int ordinary_passer_moves_behind_ball_before_push() {
+    WorldModel wm = ordinary_prep_scene();
+    const double rx = wm.coop_pass_task.rx, ry = wm.coop_pass_task.ry;
+    const double pass_len = dist(wm.ball.x, wm.ball.y, rx, ry);
+    wm.home[1].x = wm.ball.x + (rx - wm.ball.x) / pass_len * 18.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = 180.0;
+    const RobotState before = wm.home[1];
+    run_active(wm, 1);
+
+    const auto &task = wm.coop_pass_task;
+    const double len = dist(wm.ball.x, wm.ball.y, rx, ry);
+    const double dx = (rx - wm.ball.x) / len, dy = (ry - wm.ball.y) / len;
+    const double side_x = wm.ball.x - dy * task.ordinary_prep_side * 22.0;
+    const double side_y = wm.ball.y + dx * task.ordinary_prep_side * 22.0;
+    RobotState expected = before;
+    motion::position(expected, side_x, side_y, motion::TM_PASS);
+    if (!task.active || task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepSide ||
+        task.ordinary_prep_side == 0 || task.observing_push ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: front-side passer must take the safe side approach before Ordinary Push\n"); return 1;
+    }
+    wm.home[1].x = side_x; wm.home[1].y = side_y;
+    run_active(wm, 1);
+    if (wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: side waypoint must advance to the ball-behind point before Align/Push\n"); return 1;
+    }
+    RobotState at_side = wm.home[1];
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_x = wm.ball.x - dx * prep_dist;
+    const double prep_y = wm.ball.y - dy * prep_dist;
+    motion::position(at_side, prep_x, prep_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push || !same_drive_command(wm.home[1], at_side)) {
+        printf("FAIL: small side-position noise must not re-enter the side waypoint loop\n"); return 1;
+    }
+    printf("ordinary passer moves behind ball before push: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_reaches_area_before_align() {
+    WorldModel wm = ordinary_prep_scene();
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_tol = get_param("roles.kPrepPosTol", 4.01318);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    const double prep_y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * 10.0;
+    wm.home[1].y = wm.ball.y;
+    wm.home[1].rot = 90.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push || dist(wm.home[1].x, wm.home[1].y, prep_x, prep_y) <= prep_tol) {
+        printf("FAIL: being close to the ball must not skip the locked ball-behind prep point\n"); return 1;
+    }
+
+    wm.home[1].x = prep_x; wm.home[1].y = prep_y; wm.home[1].rot = 90.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Align ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: Align must begin only after reaching the prep area, with no early Push\n"); return 1;
+    }
+    printf("ordinary prep reaches area before align: OK\n");
+    return 0;
+}
+
+static int ordinary_passer_accepts_reasonable_alignment() {
+    WorldModel wm = ordinary_prep_scene();
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Align;
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    wm.home[1].y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    wm.home[1].rot = aim + 10.0;
+    const RobotState before = wm.home[1];
+    RobotState expected = before;
+    const double dx = (wm.coop_pass_task.rx - wm.ball.x) /
+                      dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double dy = (wm.coop_pass_task.ry - wm.ball.y) /
+                      dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    motion::position(expected, wm.ball.x + dx * 20.0, wm.ball.y + dy * 20.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!pass_receiver_ready(wm) || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: a passer within the existing alignment tolerance must proceed without exact-angle waiting\n"); return 1;
+    }
+    printf("ordinary passer accepts reasonable alignment: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_avoids_alignment_oscillation() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_tol = get_param("roles.kPrepPosTol", 4.01318);
+    const double ang_tol = get_param("roles.kPrepAngTol", 13.1809);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    const double prep_y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Align;
+    const double offsets[] = {prep_tol - 0.1, prep_tol + 0.1, prep_tol - 0.05,
+                              prep_tol + 0.05, prep_tol - 0.2};
+    for (int frame = 0; frame < 5; ++frame) {
+        wm.home[1].x = prep_x + offsets[frame]; wm.home[1].y = prep_y;
+        wm.home[1].rot = aim + ang_tol + 15.0;
+        run_active(wm, 1);
+        RobotState expected = wm.home[1];
+        motion::position_aligned(expected, expected.x, expected.y, aim, prep_tol, ang_tol);
+        if (!wm.coop_pass_task.active ||
+            wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Align ||
+            wm.coop_pass_task.observing_push || !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: small prep-position noise must not switch Align back to GoPrep or Push\n"); return 1;
+        }
+    }
+    printf("ordinary prep avoids alignment oscillation: OK\n");
+    return 0;
+}
+
+static int ordinary_passer_prepares_while_receiver_moves() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    WorldModel p23 = ordinary_prep_scene(55.0);
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    int preparing_frames = 0, align_frames = 0, prepared_wait_frames = 0;
+    int p23_wait_frames = 0, p23_first_push_frame = 0;
+    const double receiver_offsets[] = {55.0, 50.0, 45.0, 40.0};
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double pass_dx = (wm.coop_pass_task.rx - wm.ball.x) / len;
+    const double pass_dy = (wm.coop_pass_task.ry - wm.ball.y) / len;
+    wm.home[1].x = wm.ball.x + pass_dx * 18.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = aim;
+    p23.home[1] = wm.home[1];
+    for (int frame = 0; frame < 4; ++frame) {
+        wm.home[2].x = wm.coop_pass_task.rx + receiver_offsets[frame];
+        wm.home[2].y = wm.coop_pass_task.ry;
+        p23.home[2].x = wm.home[2].x; p23.home[2].y = wm.home[2].y;
+        if (frame == 1) {
+            const double nx = -pass_dy, ny = pass_dx;
+            wm.home[1].x = wm.ball.x + nx * wm.coop_pass_task.ordinary_prep_side * 22.0;
+            wm.home[1].y = wm.ball.y + ny * wm.coop_pass_task.ordinary_prep_side * 22.0;
+        }
+        if (frame == 2) {
+            wm.home[1].x = prep_x; wm.home[1].y = wm.ball.y; wm.home[1].rot = aim + 20.0;
+        }
+        if (frame == 3) wm.home[1].rot = aim + 10.0;
+        if (pass_receiver_ready(wm)) {
+            printf("FAIL: receiver movement fixture unexpectedly became ready at offset %.1f\n",
+                   receiver_offsets[frame]); return 1;
+        }
+        if (!pass_receiver_ready(p23)) {
+            motion::stop(p23.home[1]);
+            ++p23_wait_frames;
+        } else {
+            const double p23_len = dist(p23.ball.x, p23.ball.y,
+                                        p23.coop_pass_task.rx, p23.coop_pass_task.ry);
+            motion::position(p23.home[1], p23.ball.x +
+                             (p23.coop_pass_task.rx - p23.ball.x) / p23_len * 20.0,
+                             p23.ball.y + (p23.coop_pass_task.ry - p23.ball.y) / p23_len * 20.0,
+                             motion::TM_PASS);
+            p23_first_push_frame = frame + 1;
+        }
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.observing_push) {
+            printf("FAIL: Ordinary pushed before ReceiverReady while the receiver was travelling\n"); return 1;
+        }
+        if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepSide ||
+            wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepPoint) ++preparing_frames;
+        else if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::Align) ++align_frames;
+        else if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::Prepared) ++prepared_wait_frames;
+    }
+    if (preparing_frames == 0 || align_frames == 0 || prepared_wait_frames == 0) {
+        printf("FAIL: passer did not prepare and hold in parallel with receiver travel\n"); return 1;
+    }
+    const auto &task = wm.coop_pass_task;
+    const double push_len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    RobotState expected = wm.home[1];
+    motion::position(expected, wm.ball.x + (task.rx - wm.ball.x) / push_len * 20.0,
+                     wm.ball.y + (task.ry - wm.ball.y) / push_len * 20.0, motion::TM_PASS);
+    wm.home[2].x = task.rx; wm.home[2].y = task.ry;
+    p23.home[2].x = task.rx; p23.home[2].y = task.ry;
+    if (pass_receiver_ready(p23)) {
+        const double p23_behind = (p23.ball.x - p23.home[1].x) * pass_dx +
+                                  (p23.ball.y - p23.home[1].y) * pass_dy;
+        motion::position(p23.home[1], p23.ball.x +
+                         (p23.coop_pass_task.rx - p23.ball.x) / push_len * 20.0,
+                         p23.ball.y + (p23.coop_pass_task.ry - p23.ball.y) / push_len * 20.0,
+                         motion::TM_PASS);
+        if (p23_behind <= 0.0) p23_first_push_frame = 5;
+    }
+    run_active(wm, 1);
+    if (!pass_receiver_ready(wm) || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected) ||
+        p23_wait_frames != 4 || p23_first_push_frame != 5) {
+        printf("FAIL: prepared passer did not Push as soon as ReceiverReady also became true\n"); return 1;
+    }
+    printf("ordinary passer prepares while receiver moves: OK (P2.3 reference wait=%d/push=%d; P2.4 prep=%d/align=%d/hold=%d/push=5)\n",
+           p23_wait_frames, p23_first_push_frame,
+           preparing_frames, align_frames, prepared_wait_frames);
+    return 0;
+}
+
+static int ordinary_prep_keeps_locked_pass_target() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const int receiver = wm.coop_pass_task.receiver_id;
+    const double locked_x = wm.coop_pass_task.rx, locked_y = wm.coop_pass_task.ry;
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len *
+                   get_param("roles.kPrepDist", 23.5578);
+    wm.home[1].y = wm.ball.y;
+    run_active(wm, 1);
+    wm.assist_x = 105.0; wm.assist_y = 40.0;
+    wm.mid_x = 55.0; wm.mid_y = 160.0;
+    wm.home[2].x = locked_x + 55.0; wm.home[2].y = locked_y + 5.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != receiver ||
+        wm.coop_pass_task.rx != locked_x || wm.coop_pass_task.ry != locked_y) {
+        printf("FAIL: Ordinary preparation changed the locked receiver or task target\n"); return 1;
+    }
+    printf("ordinary prep keeps locked pass target: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_respects_existing_safety_cancel() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len *
+                   get_param("roles.kPrepDist", 23.5578);
+    wm.home[1].y = wm.ball.y;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active) {
+        printf("FAIL: safe Ordinary task was not active before interruption; outcomes:");
+        for (int i = 0; i < (int)CoopOutcome::Count; ++i)
+            if (wm.coop_stats.outcomes[i] != 0) printf(" %s=%lu", coop_outcome_name((CoopOutcome)i), wm.coop_stats.outcomes[i]);
+        printf("\n"); return 1;
+    }
+    wm.runtime_phase = RuntimePhase::RestartSetup;
+    run_active(wm, 1);
+    if (wm.coop_pass_task.active ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] == 0) {
+        printf("FAIL: P1 phase interruption must still cancel an Ordinary task during preparation\n"); return 1;
+    }
+    printf("ordinary prep respects existing safety cancel: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_does_not_change_coop_or_shooting() {
+    {
+        WorldModel wm = ordinary_prep_scene(55.0);
+        wm.coop_pass_task.kind = PassTaskKind::Coop;
+        wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepSide;
+        wm.coop_pass_task.ordinary_prep_side = 0;
+        const auto original_phase = wm.coop_pass_task.ordinary_prep_phase;
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Coop ||
+            wm.coop_pass_task.ordinary_prep_phase != original_phase ||
+            wm.coop_pass_task.ordinary_prep_side != 0) {
+            printf("FAIL: Ordinary prep state leaked into CoopPass\n"); return 1;
+        }
+    }
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true}; wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.runtime_phase = RuntimePhase::Running; wm.possession = Possession::Ours;
+        wm.we_have_ball = true; wm.ball.valid = true;
+        wm.ball.x = 60.0; wm.ball.y = 90.0; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
+        wm.home[1].x = 68.0; wm.home[1].y = 90.0; wm.home[1].rot = 180.0;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+        }
+        const ShootPlan shot = plan_shoot(wm, 1);
+        if (!shot.viable) { printf("FAIL: unaffected-shot fixture is not viable\n"); return 1; }
+        RobotState expected = wm.home[1];
+        motion::position(expected, wm.ball.x + shot.dir_x * 20.0,
+                         wm.ball.y + shot.dir_y * 20.0, motion::TM_PASS);
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: Ordinary prep changed the existing shooting action\n"); return 1;
+        }
+    }
+    printf("ordinary prep leaves CoopPass and shooting unchanged: OK\n");
+    return 0;
+}
+
 static bool ordinary_target_is_opponent_first(const WorldModel &source, int receiver_id,
                                               double target_x, double target_y) {
     WorldModel probe = source;
@@ -3758,7 +4071,7 @@ static int test_ordinary_pass_task() {
     return 0;
 }
 
-// 普通 PassPlan 与 CoopPass 共用同一 readiness gate：未到位只等，不改锁点
+// ReceiverReady 只门控出球：Ordinary 可并行准备，CoopPass 保持原先等待行为。
 static int test_pass_readiness_gate() {
     auto stopped = [](const RobotState &r) { return r.vl == 0.0 && r.vr == 0.0; };
 
@@ -3797,11 +4110,23 @@ static int test_pass_readiness_gate() {
         set_param("roles.kRecvNoReverse", 0.0);
         RobotState expected_receiver = wm.home[receiver];
         motion::position(expected_receiver, locked_x, locked_y);
+        RobotState expected_passer = wm.home[1];
+        if (kind == PassTaskKind::Ordinary) {
+            const double len = dist(wm.ball.x, wm.ball.y, locked_x, locked_y);
+            const double prep_x = wm.ball.x - (locked_x - wm.ball.x) / len *
+                                  get_param("roles.kPrepDist", 23.5578);
+            const double prep_y = wm.ball.y - (locked_y - wm.ball.y) / len *
+                                  get_param("roles.kPrepDist", 23.5578);
+            motion::position(expected_passer, prep_x, prep_y, motion::TM_PASS);
+        }
         run_active(wm, 1);
         run_assist(wm, receiver);
         const bool wait_ok = task.active && task.receiver_id == receiver &&
                              task.rx == locked_x && task.ry == locked_y &&
-                             !task.observing_push && stopped(wm.home[1]) &&
+                             !task.observing_push &&
+                             (kind == PassTaskKind::Ordinary
+                                  ? same_drive_command(wm.home[1], expected_passer)
+                                  : stopped(wm.home[1])) &&
                              fabs(wm.home[receiver].vl - expected_receiver.vl) <= 1e-8 &&
                              fabs(wm.home[receiver].vr - expected_receiver.vr) <= 1e-8;
         reset_params();
@@ -3814,9 +4139,26 @@ static int test_pass_readiness_gate() {
         if (!pass_receiver_ready(wm)) {
             printf("FAIL: pass readiness arrived receiver rejected kind=%d\n", (int)kind); return 1;
         }
+        RobotState expected_push = wm.home[1];
+        if (kind == PassTaskKind::Ordinary) {
+            const double len = dist(wm.ball.x, wm.ball.y, locked_x, locked_y);
+            const double dx = (locked_x - wm.ball.x) / len;
+            const double dy = (locked_y - wm.ball.y) / len;
+            wm.home[1].x = wm.ball.x - dx * get_param("roles.kPrepDist", 23.5578);
+            wm.home[1].y = wm.ball.y - dy * get_param("roles.kPrepDist", 23.5578);
+            wm.home[1].rot = angle_to(0.0, 0.0, dx, dy);
+            expected_push = wm.home[1];
+            motion::position(expected_push, wm.ball.x + dx * 20.0,
+                             wm.ball.y + dy * 20.0, motion::TM_PASS);
+        }
         run_active(wm, 1);
-        if (!task.active || !task.observing_push) {
-            printf("FAIL: pass readiness READY did not release kind=%d\n", (int)kind); return 1;
+        const bool ready_ok = task.active &&
+            (kind == PassTaskKind::Ordinary
+                 ? task.ordinary_prep_phase == OrdinaryPassPrepPhase::Prepared &&
+                   same_drive_command(wm.home[1], expected_push)
+                 : task.observing_push);
+        if (!ready_ok) {
+            printf("FAIL: pass readiness READY did not release/prep kind=%d\n", (int)kind); return 1;
         }
     }
 
@@ -5498,6 +5840,14 @@ int main(int argc, char **argv) {
         rc |= ordinary_pass_scoring_keeps_anchor_target();
         rc |= test_ordinary_pass_admission();
         rc |= test_ordinary_pass_task();
+        rc |= ordinary_passer_moves_behind_ball_before_push();
+        rc |= ordinary_prep_reaches_area_before_align();
+        rc |= ordinary_passer_accepts_reasonable_alignment();
+        rc |= ordinary_prep_avoids_alignment_oscillation();
+        rc |= ordinary_passer_prepares_while_receiver_moves();
+        rc |= ordinary_prep_keeps_locked_pass_target();
+        rc |= ordinary_prep_respects_existing_safety_cancel();
+        rc |= ordinary_prep_does_not_change_coop_or_shooting();
         rc |= test_pass_readiness_gate();
         rc |= test_receiver_meet_ball();
         rc |= test_pass_opponent_first_cancel();
@@ -5549,6 +5899,14 @@ int main(int argc, char **argv) {
     rc |= ordinary_pass_scoring_keeps_anchor_target();
     rc |= test_ordinary_pass_admission();
     rc |= test_ordinary_pass_task();
+    rc |= ordinary_passer_moves_behind_ball_before_push();
+    rc |= ordinary_prep_reaches_area_before_align();
+    rc |= ordinary_passer_accepts_reasonable_alignment();
+    rc |= ordinary_prep_avoids_alignment_oscillation();
+    rc |= ordinary_passer_prepares_while_receiver_moves();
+    rc |= ordinary_prep_keeps_locked_pass_target();
+    rc |= ordinary_prep_respects_existing_safety_cancel();
+    rc |= ordinary_prep_does_not_change_coop_or_shooting();
     rc |= test_pass_readiness_gate();
     rc |= test_receiver_meet_ball();
     rc |= test_pass_opponent_first_cancel();

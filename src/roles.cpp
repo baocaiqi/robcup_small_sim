@@ -1327,6 +1327,121 @@ bool run_pass_receiver(WorldModel &wm, int id) {
 
 void cancel_unsafe_coop_pass(WorldModel &wm) { cancel_unsafe_pass_task(wm); }
 
+// Ordinary 的准备是“先到球后，再对准，再等接球人”；CoopPass 与射门继续走原分支。
+static void execute_ordinary_pass_prep(WorldModel &wm, int id) {
+    CoopPassTask &task = wm.coop_pass_task;
+    RobotState &r = wm.home[id];
+    const double dx = task.rx - wm.ball.x;
+    const double dy = task.ry - wm.ball.y;
+    const double length = std::hypot(dx, dy);
+    if (!std::isfinite(length) || length <= 1e-6 ||
+        !std::isfinite(wm.ball.x) || !std::isfinite(wm.ball.y) ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+        !std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.rot)) {
+        motion::stop(r);
+        return;
+    }
+
+    const double dir_x = dx / length;
+    const double dir_y = dy / length;
+    task.push_dir_x = dir_x;
+    task.push_dir_y = dir_y;
+    const double aim_rot = angle_to(0.0, 0.0, dir_x, dir_y);
+    const double prep_x = wm.ball.x - dir_x * kPrepDist;
+    const double prep_y = wm.ball.y - dir_y * kPrepDist;
+    const double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
+    const double behind = (wm.ball.x - r.x) * dir_x + (wm.ball.y - r.y) * dir_y;
+    const double heading_error = angle_diff(aim_rot, r.rot);
+    const bool distance_ok = std::isfinite(db) && db < kPrepDist + 6.0;
+    const bool behind_ok = std::isfinite(behind) && behind > 0.0;
+    const bool heading_ok = std::isfinite(heading_error) &&
+                            std::fabs(heading_error) <= kPrepAngTol;
+
+    if (!std::isfinite(prep_x) || !std::isfinite(prep_y) || !prep_point_ok(prep_x, prep_y)) {
+        motion::stop(r);
+        return;
+    }
+
+    const double nx = -dir_y, ny = dir_x;
+    double bypass_distance = 1e9;
+    if (task.ordinary_prep_side != 0) {
+        const double bypass_x = wm.ball.x + nx * task.ordinary_prep_side * 22.0;
+        const double bypass_y = wm.ball.y + ny * task.ordinary_prep_side * 22.0;
+        bypass_distance = dist(r.x, r.y, bypass_x, bypass_y);
+    }
+    if (task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepPoint && !behind_ok &&
+        bypass_distance > kPrepPosTol) {
+        task.ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepSide;
+        const double plus_x = wm.ball.x + nx * 22.0, plus_y = wm.ball.y + ny * 22.0;
+        const double minus_x = wm.ball.x - nx * 22.0, minus_y = wm.ball.y - ny * 22.0;
+        task.ordinary_prep_side = dist(r.x, r.y, plus_x, plus_y) <=
+                                  dist(r.x, r.y, minus_x, minus_y) ? 1 : -1;
+    }
+
+    if (task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepSide) {
+        double side_x = wm.ball.x + nx * task.ordinary_prep_side * 22.0;
+        double side_y = wm.ball.y + ny * task.ordinary_prep_side * 22.0;
+        if (!prep_point_ok(side_x, side_y)) {
+            task.ordinary_prep_side = -task.ordinary_prep_side;
+            side_x = wm.ball.x + nx * task.ordinary_prep_side * 22.0;
+            side_y = wm.ball.y + ny * task.ordinary_prep_side * 22.0;
+        }
+        if (!prep_point_ok(side_x, side_y)) {
+            motion::stop(r);
+            return;
+        }
+        if (dist(r.x, r.y, side_x, side_y) > kPrepPosTol) {
+            motion::position(r, side_x, side_y, motion::TM_PASS);
+            return;
+        }
+        task.ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepPoint;
+    }
+
+    if (task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepPoint) {
+        if (behind_ok && dist(r.x, r.y, prep_x, prep_y) <= kPrepPosTol) {
+            task.ordinary_prep_phase = OrdinaryPassPrepPhase::Align;
+        } else {
+            motion::position(r, prep_x, prep_y, motion::TM_PASS);
+            return;
+        }
+    }
+
+    if (task.ordinary_prep_phase == OrdinaryPassPrepPhase::Align) {
+        if (distance_ok && behind_ok && heading_ok) {
+            task.ordinary_prep_phase = OrdinaryPassPrepPhase::Prepared;
+        } else if (!distance_ok || !behind_ok) {
+            // 状态保持在 Align，轻微几何扰动不会退回 GoPrep；只有出界才回到准备区。
+            motion::position_aligned(r, prep_x, prep_y, aim_rot, kPrepPosTol, kPrepAngTol);
+            return;
+        } else {
+            motion::position_aligned(r, r.x, r.y, aim_rot, kPrepPosTol, kPrepAngTol);
+            return;
+        }
+    }
+
+    if (task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared) {
+        motion::stop(r);
+        return;
+    }
+    if (!distance_ok || !behind_ok || !heading_ok) {
+        // Prepared 是单向锁存阶段；姿态被扰动时安全回到准备姿态，不来回切阶段。
+        motion::position_aligned(r, prep_x, prep_y, aim_rot, kPrepPosTol, kPrepAngTol);
+        return;
+    }
+    if (!pass_receiver_ready(wm)) {
+        motion::position_aligned(r, r.x, r.y, aim_rot, kPrepPosTol, kPrepAngTol);
+        return;
+    }
+
+    if (!task.observing_push && db < kPassReceiveDistance) {
+        task.observing_push = true;
+        task.push_ball_x = wm.ball.x;
+        task.push_ball_y = wm.ball.y;
+    }
+    motion::position(r, wm.ball.x + dir_x * 20.0,
+                     wm.ball.y + dir_y * 20.0, motion::TM_PASS);
+}
+
 void run_active(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
     const TeamContext &ctx = wm.ctx;
@@ -1439,17 +1554,7 @@ void run_active(WorldModel &wm, int id) {
     if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
         auto &task = wm.coop_pass_task;
         if (task.phase == CoopPassPhase::Receiving) { motion::stop(r); return; }
-        if (!pass_receiver_ready(wm)) { motion::stop(r); return; }
-        double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
-        if (length > 1e-6) {
-            task.push_dir_x = (task.rx - wm.ball.x) / length;
-            task.push_dir_y = (task.ry - wm.ball.y) / length;
-            if (!task.observing_push && dist(r.x, r.y, wm.ball.x, wm.ball.y) < kPassReceiveDistance) {
-                task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
-            }
-            motion::position(r, wm.ball.x + task.push_dir_x * 20.0,
-                             wm.ball.y + task.push_dir_y * 20.0, motion::TM_PASS);
-        }
+        execute_ordinary_pass_prep(wm, id);
         return;
     }
 
@@ -1652,19 +1757,7 @@ void run_active(WorldModel &wm, int id) {
             wm.coop_pass_task.kind = PassTaskKind::Ordinary; wm.coop_created();
         }
         if (wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Ordinary) {
-            auto &task = wm.coop_pass_task;
-            if (!pass_receiver_ready(wm)) {
-                if (!contested || kContestNoWait < 0.5) { motion::stop(r); return; }
-                wm.coop_finish(CoopOutcome::OpponentFirst);   // 争抢态：不停车等人
-            }
-            double length = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
-            if (length > 1e-6) {
-                task.push_dir_x = (task.rx - wm.ball.x) / length; task.push_dir_y = (task.ry - wm.ball.y) / length;
-                if (!task.observing_push && dist(r.x, r.y, wm.ball.x, wm.ball.y) < kPassReceiveDistance) {
-                    task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
-                }
-            }
-            motion::position(r, task.rx, task.ry);
+            execute_ordinary_pass_prep(wm, id);
         } else motion::position(r, pp.target_x, pp.target_y);
         return;
     }
