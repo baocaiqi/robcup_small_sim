@@ -14,6 +14,11 @@ TUNABLE(kTrailLateral, 22.0);
 TUNABLE(kTrailDist, 26.0);
 TUNABLE(kTrailPull, 0.45);
 
+// 门前捡漏（tap-in）：球进对方门前 kTapInZone cm 内时，assist 不撤、改蹲门前正面当捡漏点
+//   kTapInDepth=离门多远；y 死站门中心（接横传/回做，不跟着球上下偏，避免半吊子站位）
+TUNABLE(kTapInZone, 55.0);
+TUNABLE(kTapInDepth, 25.0);
+
 Situation SituationModule::analyze(const WorldModel &wm) {
     Situation sit;
     const TeamContext &ctx = wm.ctx;
@@ -88,10 +93,14 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
         my = clamp(by - 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, mx, my)) mx = opp_box_edge;
-        // 门前半撤：球进对方罚球区或门线 55cm 内时，assist 留禁区外沿、mid 回中线
+        // 门前捡漏：球进对方罚球区或门线 kTapInZone cm 内时，assist 不再撤到禁区外沿，
+        //   改蹲门前正面（离门 kTapInDepth）当捡漏点，y 死站门中心接横传/回做
+        //   （不跟着球上下偏——球在底角时偏三成会把 assist 卡在球和门之间半吊子，够不着球也接不到横传）
         //   尾随位不撤：它正是回做要用的那个接应点
-        if (!trail && (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < 55.0)) {
-            ax = opp_box_edge; mx = 110.0;
+        if (!trail && (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < kTapInZone)) {
+            ax = ctx.opp_goal_x() - ad * kTapInDepth;
+            ay = 90.0;
+            mx = 110.0;
         }
     } else {
         // 防守态：威胁 <0.6 时 assist/mid 站中线偏前 30cm 当反击支点，否则回收中线

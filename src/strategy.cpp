@@ -6,6 +6,7 @@
 #define TUNABLE_PREFIX "strategy."
 #include "simuro5/tunable.hpp"
 #include <cmath>
+#include <cstdio>
 #include "simuro5/branch_trace.hpp"   // 须在所有 include 之后
 
 namespace simuro5 {
@@ -51,6 +52,29 @@ void Strategy::run(WorldModel &wm) {
     }
 
     update_team_state(wm);
+
+#ifdef SIMURO5_HNNU_TRACE
+    // 门前终结诊断：球离对方门 <40cm 时每帧记一行 G（球权分布/队友站位），
+    //   用于回答「球到门口却进不了」到底是抢不到球还是贴到球不射（C:\Strategy\gate_trace.csv）
+    if (wm.ctx.dist_opp_goal(wm.ball.x) < 40.0) {
+        static FILE *fp = nullptr;
+        static long n = 0;
+        if (!fp) fp = std::fopen("C:\\Strategy\\gate_trace.csv", "a");
+        if (fp) {
+            double our_min = 1e9, opp_min = 1e9, gk_y = 90.0, gk_d = 1e9;
+            for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+                our_min = std::min(our_min, std::hypot(wm.ball.x - wm.home[i].x, wm.ball.y - wm.home[i].y));
+                opp_min = std::min(opp_min, std::hypot(wm.ball.x - wm.opp[i].x, wm.ball.y - wm.opp[i].y));
+                double dgk = wm.ctx.dist_opp_goal(wm.opp[i].x);
+                if (dgk < gk_d) { gk_d = dgk; gk_y = wm.opp[i].y; }
+            }
+            std::fprintf(fp, "G,%ld,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%.2f,%d\n",
+                         n++, wm.ball.x, wm.ball.y, wm.ctx.dist_opp_goal(wm.ball.x),
+                         our_min, opp_min, gk_y, (int)wm.team_state, wm.threat_level, wm.active_id);
+            if ((n % 40) == 0) std::fflush(fp);
+        }
+    }
+#endif
 
     sit_.update_stand_points(wm);
 
@@ -172,8 +196,30 @@ void Strategy::update_team_state(WorldModel &wm) {
     if (wm.we_have_ball) { ++wm.possession_frames; wm.no_possession_frames = 0; }
     else                 { ++wm.no_possession_frames; wm.possession_frames = 0; }
 
-    if (wm.we_have_ball && !wm.prev_we_have_ball && wm.game_state == PM_PlayOn) {
-        wm.counter_attack_frames = kCounterWindowFrames;
+    // 反击窗口：球权从无到有（断球/拿球）即触发。原来这里多了 `game_state == PM_PlayOn` 的卡死，
+    //   但平台活球期给的是 FreeBall(1~4)/PlaceKick(5)，几乎从不给 PM_PlayOn(0)，导致窗口从未触发（黑匣子实证）。
+    if (wm.we_have_ball && !wm.prev_we_have_ball) {
+        // 反击窗口按断球点离对方门多远自适应：断得越靠前越就地反击、窗口越短；
+        //   断在自家半场需长途推进、队友要从防守位压上，窗口拉长（15/30/50 真机可再调）。
+        double d = wm.ctx.dist_opp_goal(wm.ball.x);
+        if (d < 60.0)       wm.counter_attack_frames = 15;                    // 对方半场深处
+        else if (d < 130.0) wm.counter_attack_frames = kCounterWindowFrames; // 中场：默认 30
+        else                wm.counter_attack_frames = 50;                    // 自己半场
+
+#ifdef SIMURO5_HNNU_TRACE
+        // 诊断写盘：每次「断球瞬间」记一行 —— 帧序号、球位、离对方门距离、选定的反击窗口
+        //   用于验证 15/30/50 分档是否按断球点正确触发（C:\Strategy\counter_trace.csv）
+        {
+            static FILE *fp = nullptr;
+            static long n = 0;
+            if (!fp) fp = std::fopen("C:\\Strategy\\counter_trace.csv", "a");
+            if (fp) {
+                std::fprintf(fp, "%ld,%.1f,%.1f,%.1f,%d\n",
+                             n++, wm.ball.x, wm.ball.y, d, wm.counter_attack_frames);
+                std::fflush(fp);
+            }
+        }
+#endif
     }
     if (wm.counter_attack_frames > 0) --wm.counter_attack_frames;
     wm.prev_we_have_ball = wm.we_have_ball;
