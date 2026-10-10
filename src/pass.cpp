@@ -233,6 +233,7 @@ bool pass_opponent_arrives_first(const WorldModel &wm) {
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     PassPlan plan{};
+    if (passer_id < 1 || passer_id >= PLAYERS_PER_SIDE) return plan;
     const TeamContext &ctx = wm.ctx;
 
     double px = wm.home[passer_id].x;
@@ -248,7 +249,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
         {0.0, ORDINARY_LOCAL_STEP}, {0.0, -ORDINARY_LOCAL_STEP}
     };
 
-    for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
+    for (int id = 1; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
 
         // 基准点：优先角色站位锚点，否则本体坐标
@@ -326,19 +327,21 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
 
 CoopPass plan_coop_pass(const WorldModel &wm, int passer_id) {
     CoopPass best;
+    if (passer_id < 1 || passer_id >= PLAYERS_PER_SIDE) return best;
     const TeamContext &ctx = wm.ctx;
     const double bx = wm.ball.x, by = wm.ball.y;
     const double ogx = ctx.opp_goal_x();
     const double d_goal = dist(bx, by, ogx, 90.0);
 
-    const int cand[3] = {2, 3, 4};
-    const double ax[3] = {wm.assist_x, wm.mid_x, wm.passive_x};
-    const double ay[3] = {wm.assist_y, wm.mid_y, wm.passive_y};
-
-    for (int k = 0; k < 3; ++k) {
-        const int i = cand[k];
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
         if (i == passer_id) continue;
-        const double rx = ax[k], ry = ay[k];
+        double rx = 0.0, ry = 0.0;
+        switch (wm.role[i]) {
+            case ROLE_ASSIST: rx = wm.assist_x; ry = wm.assist_y; break;
+            case ROLE_MIDFIELD: rx = wm.mid_x; ry = wm.mid_y; break;
+            case ROLE_PASSIVE: rx = wm.passive_x; ry = wm.passive_y; break;
+            default: continue;
+        }
         if (in_opp_goal_area(ctx, rx, ry)) continue;
         if (dist(rx, ry, ogx, 90.0) > d_goal - 5.0) continue;
         if (dist(bx, by, rx, ry) > 120.0) continue;

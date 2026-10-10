@@ -444,6 +444,13 @@ static int test_fixed_roles() {
     return 0;
 }
 
+// 老选点夹具的几何位置保持不变，编号整体后移一位，改用合法非门将传球人。
+static WorldModel outfield_pass_scene(const WorldModel &old_scene) {
+    WorldModel wm = old_scene;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) wm.home[i] = old_scene.home[i - 1];
+    return wm;
+}
+
 // 传球选点单测：威胁惩罚 / 边界夹取 / 局部候选遵守接球安全区
 static int test_pass() {
     TeamContext ctx{true};               // 蓝队：门在 x=220，攻向左(对方门 x=0)
@@ -458,8 +465,8 @@ static int test_pass() {
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     wm.opp[0].x = 64; wm.opp[0].y = 53;      // 距 A 接应点 20cm，且不挡传球线
     {
-        PassPlan p = plan_pass(wm, 0);
-        if (!p.viable || p.receiver_id != 2) {
+        PassPlan p = plan_pass(outfield_pass_scene(wm), 1);
+        if (!p.viable || p.receiver_id != 3) {
             printf("FAIL: 场景①威胁应惩罚A、选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
             return 1;
         }
@@ -472,8 +479,8 @@ static int test_pass() {
     wm.home[4].x = 150; wm.home[4].y = 120;
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 20 + i * 25; }
     {
-        PassPlan p = plan_pass(wm, 0);
-        if (!p.viable || p.receiver_id != 1) {
+        PassPlan p = plan_pass(outfield_pass_scene(wm), 1);
+        if (!p.viable || p.receiver_id != 2) {
             printf("FAIL: 场景②应选 home[1] got viable=%d recv=%d\n", p.viable, p.receiver_id);
             return 1;
         }
@@ -494,9 +501,9 @@ static int test_pass() {
     wm.home[4].x = 80; wm.home[4].y = 170;
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     {
-        PassPlan p = plan_pass(wm, 0);
+        PassPlan p = plan_pass(outfield_pass_scene(wm), 1);
         const double expected_center_x = 60.0 - get_param("pass.OFFSET_BASE", 10.1);
-        if (!p.viable || p.receiver_id != 2 || fabs(p.target_x - expected_center_x) > 1e-6 ||
+        if (!p.viable || p.receiver_id != 3 || fabs(p.target_x - expected_center_x) > 1e-6 ||
             fabs(p.target_y - 50.0) > 1e-6) {
             printf("FAIL: A中心点在对方门区，应沿用目标安全规则选择B中心 (viable=%d recv=%d target=(%.1f,%.1f))\n",
                    p.viable, p.receiver_id, p.target_x, p.target_y);
@@ -679,8 +686,8 @@ static int test_pass_threat_weight() {
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     wm.opp[0].x = 37.4; wm.opp[0].y = 59.5;  // A 后方 18cm：距(52,70)=18、距传球线=18(>15 不挡)
     wm.opp[1].x = 30.8; wm.opp[1].y = 125.1; // B 后方 26cm：距(52,110)=26、距传球线=26(>15 不挡)
-    PassPlan p = plan_pass(wm, 0);
-    if (!p.viable || p.receiver_id != 2) {
+    PassPlan p = plan_pass(outfield_pass_scene(wm), 1);
+    if (!p.viable || p.receiver_id != 3) {
         printf("FAIL: 距离加权应选B(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
         return 1;
     }
@@ -2765,6 +2772,8 @@ static int test_penalty_spot_detect() {
 // 配合进攻：按「接球后射门机会质量」选传球目标（+0.15 门槛、只向前传）
 static int test_coop_pass() {
     WorldModel wm;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
     wm.ctx = TeamContext{true};                 // 蓝队攻 x=0
     wm.ball.valid = true;
     wm.ball.x = 90; wm.ball.y = 90; wm.ball.vx = 0; wm.ball.vy = 0;
@@ -2816,6 +2825,8 @@ static int test_coop_pass() {
 // 配合任务必须决定实际轮速，而不只是保存一份无人执行的坐标
 static WorldModel coop_task_scene() {
         WorldModel wm;
+        wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+        wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
         wm.ctx = TeamContext{true};
         wm.game_state = wm.game_state_last = PM_PlayOn;
         wm.ball.valid = true;
@@ -3054,6 +3065,8 @@ static int ordinary_pass_local_target_is_locked_after_task_creation() {
 
 static int ordinary_pass_local_search_does_not_change_coop_pass() {
     WorldModel wm;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
     wm.ctx = TeamContext{true}; wm.ball.valid = true;
     wm.ball.x = 90.0; wm.ball.y = 90.0;
     wm.assist_x = 60.0; wm.assist_y = 65.0;
@@ -5801,7 +5814,7 @@ static int possession_cancel_still_works() {
     return confirmed_opponent_control_can_cancel_pass();
 }
 
-// 赛前合并护栏：非 1 号主攻沿用射门/带球/追球，不进入固定编号传球链。
+// 动态主攻护栏：非 1 号也能传球，陈旧任务和重复主攻仍要清理。
 static int test_p0_active_pass_compatibility() {
     WorldModel base;
     base.ctx = TeamContext{true};
@@ -5837,16 +5850,14 @@ static int test_p0_active_pass_compatibility() {
     dynamic.home[3] = dynamic.home[1]; dynamic.home[1].x = 180.0;
     PassPlan tempting = plan_pass(dynamic, 3);
     if (!tempting.viable) { printf("FAIL: P0 active=3 fixture lacks tempting pass\n"); return 1; }
-    RobotState wrong_command = dynamic.home[3];
-    motion::position(wrong_command, tempting.target_x, tempting.target_y);
     run_active(dynamic, 3);
     int active_count = 0;
     for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
         active_count += dynamic.role[i] == ROLE_ACTIVE ? 1 : 0;
-    if (dynamic.coop_pass_task.active || dynamic.coop_stats.created != 0 || active_count != 1 ||
-        same_drive_command(dynamic.home[3], wrong_command) ||
-        (fabs(dynamic.home[3].vl) < 1e-9 && fabs(dynamic.home[3].vr) < 1e-9)) {
-        printf("FAIL: P0 active=3 followed an uncreatable pass or stalled\n"); return 1;
+    if (!dynamic.coop_pass_task.active || dynamic.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        dynamic.coop_pass_task.passer_id != 3 || dynamic.coop_pass_task.receiver_id == 3 ||
+        dynamic.coop_pass_task.receiver_id == 0 || active_count != 1) {
+        printf("FAIL: P0 active=3 ordinary pass was not created safely\n"); return 1;
     }
 
     WorldModel coop = coop_task_scene();
@@ -5858,9 +5869,10 @@ static int test_p0_active_pass_compatibility() {
         printf("FAIL: P0 active=3 fixture lacks tempting CoopPass\n"); return 1;
     }
     run_active(coop, 3);
-    if (coop.coop_pass_task.active || coop.coop_stats.created != 0 ||
-        (fabs(coop.home[3].vl) < 1e-9 && fabs(coop.home[3].vr) < 1e-9)) {
-        printf("FAIL: P0 active=3 created CoopPass or waited for receiver\n"); return 1;
+    if (!coop.coop_pass_task.active || coop.coop_pass_task.kind != PassTaskKind::Coop ||
+        coop.coop_pass_task.passer_id != 3 || coop.coop_pass_task.receiver_id == 3 ||
+        coop.coop_pass_task.receiver_id == 0) {
+        printf("FAIL: P0 active=3 CoopPass was not created safely\n"); return 1;
     }
 
     WorldModel duplicate = base;
@@ -5888,7 +5900,190 @@ static int test_p0_active_pass_compatibility() {
     if (control.coop_ball_control.active) {
         printf("FAIL: P0 active change retained receiver control\n"); return 1;
     }
-    printf("P0 active compatibility: OK (1 passes; 3 falls back; one ACTIVE; old task/control clear)\n");
+    printf("P0 active compatibility: OK (1/3 pass; one ACTIVE; old task/control clear)\n");
+    return 0;
+}
+
+static WorldModel dynamic_ordinary_scene(int active) {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.valid = true; wm.ball.x = 70.0; wm.ball.y = 90.0;
+    wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180.0; wm.home[i].y = 30.0 + 25.0 * i;
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+    }
+    wm.home[0].x = 210.0; wm.home[0].y = 90.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 90.0;
+    wm.assist_x = 120.0; wm.assist_y = 90.0;
+    wm.mid_x = 180.0; wm.mid_y = 150.0;
+    wm.passive_x = 180.0; wm.passive_y = 40.0;
+    wm.opp[0].x = 50.0; wm.opp[0].y = 90.0;
+    wm.active_id = active;
+    std::swap(wm.role[1], wm.role[active]);
+    wm.home[active].x = 75.0; wm.home[active].y = 90.0;
+    if (active == 2) { wm.home[1].x = 120.0; wm.home[1].y = 90.0; }
+    return wm;
+}
+
+static int test_dynamic_pass_actors() {
+    for (int active = 1; active < PLAYERS_PER_SIDE; ++active) {
+        WorldModel ordinary = dynamic_ordinary_scene(active);
+        PassPlan pp = plan_pass(ordinary, active);
+        if (!pp.viable || pp.receiver_id < 1 || pp.receiver_id >= PLAYERS_PER_SIDE || pp.receiver_id == active) {
+            printf("FAIL: dynamic ordinary plan active=%d receiver=%d\n", active, pp.receiver_id); return 1;
+        }
+        run_active(ordinary, active);
+        if (!ordinary.coop_pass_task.active || ordinary.coop_pass_task.kind != PassTaskKind::Ordinary ||
+            ordinary.coop_pass_task.passer_id != active || ordinary.coop_pass_task.receiver_id != pp.receiver_id) {
+            printf("FAIL: dynamic ordinary task active=%d\n", active); return 1;
+        }
+        const int ordinary_left = ordinary.coop_pass_task.frames_left;
+        Strategy().run(ordinary);
+        if (!ordinary.coop_pass_task.active || ordinary.coop_pass_task.frames_left >= ordinary_left ||
+            ordinary.coop_pass_task.passer_id != active || ordinary.coop_pass_task.receiver_id != pp.receiver_id) {
+            printf("FAIL: dynamic ordinary task did not execute active=%d\n", active); return 1;
+        }
+        ordinary.coop_pass_task.frames_left = 0;
+        cancel_unsafe_coop_pass(ordinary);
+        if (ordinary.coop_pass_task.active) { printf("FAIL: dynamic ordinary exit active=%d\n", active); return 1; }
+
+        WorldModel coop = coop_task_scene();
+        coop.active_id = active;
+        std::swap(coop.role[1], coop.role[active]);
+        coop.home[active] = coop.home[1];
+        CoopPass cp = plan_coop_pass(coop, active);
+        if (!cp.viable || cp.receiver_id < 1 || cp.receiver_id >= PLAYERS_PER_SIDE || cp.receiver_id == active) {
+            printf("FAIL: dynamic CoopPass plan active=%d receiver=%d\n", active, cp.receiver_id); return 1;
+        }
+        run_active(coop, active);
+        if (!coop.coop_pass_task.active || coop.coop_pass_task.kind != PassTaskKind::Coop ||
+            coop.coop_pass_task.passer_id != active || coop.coop_pass_task.receiver_id != cp.receiver_id) {
+            printf("FAIL: dynamic CoopPass task active=%d\n", active); return 1;
+        }
+        coop.home[cp.receiver_id].x = cp.rx; coop.home[cp.receiver_id].y = cp.ry;
+        const int coop_left = coop.coop_pass_task.frames_left;
+        Strategy().run(coop);
+        if (!coop.coop_pass_task.active || coop.coop_pass_task.frames_left >= coop_left ||
+            coop.coop_pass_task.passer_id != active || coop.coop_pass_task.receiver_id != cp.receiver_id) {
+            printf("FAIL: dynamic CoopPass task did not execute active=%d\n", active); return 1;
+        }
+        coop.coop_pass_task.frames_left = 0;
+        cancel_unsafe_coop_pass(coop);
+        if (coop.coop_pass_task.active) { printf("FAIL: dynamic CoopPass exit active=%d\n", active); return 1; }
+    }
+    WorldModel goalie = dynamic_ordinary_scene(1);
+    if (plan_pass(goalie, 0).viable || plan_coop_pass(goalie, 0).viable ||
+        plan_pass(goalie, PLAYERS_PER_SIDE).viable || plan_coop_pass(goalie, PLAYERS_PER_SIDE).viable) {
+        printf("FAIL: goalie or invalid passer entered pass planning\n"); return 1;
+    }
+    printf("dynamic pass actors: OK (ACTIVE 1..4 Ordinary/Coop create and exit; goalie rejected)\n");
+    return 0;
+}
+
+static WorldModel handoff_scene(int passer, int receiver, PassTaskKind kind) {
+    WorldModel wm = possession_pass_scene();
+    wm.team_state = TS_ATTACK; wm.prev_we_have_ball = true;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    wm.active_id = passer;
+    std::swap(wm.role[1], wm.role[passer]);
+    wm.home[0].x = 210.0; wm.home[0].y = 10.0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180.0; wm.home[i].y = 20.0 + 25.0 * i;
+    }
+    wm.home[passer].x = 60.0; wm.home[passer].y = 150.0;
+    wm.home[receiver].x = 100.0; wm.home[receiver].y = 150.0;
+    wm.ball.x = 83.0; wm.ball.y = 150.0; wm.ball.vx = 6.0; wm.ball.vy = 0.0;
+    wm.coop_pass_task = {};
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.passer_id = passer; task.receiver_id = receiver;
+    task.rx = 90.0; task.ry = 150.0; task.frames_left = 40;
+    task.kind = kind; task.phase = CoopPassPhase::Preparing;
+    task.observing_push = true; task.push_ball_x = 75.0; task.push_ball_y = 150.0;
+    task.push_dir_x = 1.0; task.push_dir_y = 0.0;
+    return wm;
+}
+
+static int test_pass_handoff() {
+    for (PassTaskKind kind : {PassTaskKind::Ordinary, PassTaskKind::Coop}) {
+        for (int passer : {1, 3}) {
+            const int receiver = passer == 1 ? 2 : 4;
+            WorldModel wm = handoff_scene(passer, receiver, kind);
+            Strategy strategy;
+            strategy.run(wm);
+            if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving ||
+                wm.coop_stats.released != 1 || wm.active_id != passer || wm.coop_ball_control.active) {
+                for (int n = 0; n < (int)CoopOutcome::Count; ++n)
+                    if (wm.coop_stats.outcomes[n]) printf("  outcome %s=%lu\n", coop_outcome_name((CoopOutcome)n), wm.coop_stats.outcomes[n]);
+                printf("FAIL: handoff before release/receive passer=%d kind=%d task=%d phase=%d released=%lu active=%d control=%d outcome=%lu\n",
+                       passer, (int)kind, (int)wm.coop_pass_task.active, (int)wm.coop_pass_task.phase,
+                       wm.coop_stats.released, wm.active_id, (int)wm.coop_ball_control.active,
+                       wm.coop_stats.outcomes[(int)CoopOutcome::InvalidTarget]); return 1;
+            }
+            wm.ball.x = 90.0; wm.ball.vx = 0.0;
+            wm.home[receiver].x = 90.0;
+            strategy.run(wm);
+            if (wm.active_id != passer || wm.coop_ball_control.active) {
+                printf("FAIL: handoff before stable receive passer=%d kind=%d\n", passer, (int)kind); return 1;
+            }
+            strategy.run(wm);
+            int active_count = 0;
+            for (int i = 1; i < PLAYERS_PER_SIDE; ++i) active_count += wm.role[i] == ROLE_ACTIVE;
+            if (wm.active_id != receiver || wm.role[receiver] != ROLE_ACTIVE ||
+                wm.role[passer] == ROLE_ACTIVE || active_count != 1 ||
+                !wm.coop_ball_control.active || wm.coop_ball_control.handoff_pending ||
+                wm.coop_stats.received != 1 || !same_drive_command(wm.home[passer], RobotState{})) {
+                printf("FAIL: received pass did not hand off passer=%d kind=%d active=%d received=%lu\n",
+                       passer, (int)kind, wm.active_id, wm.coop_stats.received); return 1;
+            }
+            strategy.run(wm);
+            if (!wm.coop_ball_control.active || wm.active_id != receiver ||
+                !same_drive_command(wm.home[passer], RobotState{})) {
+                printf("FAIL: receiver control or former passer after handoff passer=%d kind=%d\n", passer, (int)kind); return 1;
+            }
+            if (passer == 3 && kind == PassTaskKind::Ordinary) {
+                set_param("roles.kActDynamic", 0.0);
+                strategy.run(wm);
+                reset_params();
+                if (!wm.coop_ball_control.active || wm.active_id != receiver) {
+                    printf("FAIL: role freeze cancelled valid receiver control\n"); return 1;
+                }
+            }
+        }
+    }
+    for (int failure = 0; failure < 4; ++failure) {
+        WorldModel wm = handoff_scene(3, 4, PassTaskKind::Ordinary);
+        if (failure == 0) wm.coop_pass_task.observing_push = false;
+        if (failure == 1) wm.coop_pass_task.frames_left = 0;
+        if (failure == 2) { wm.opp[0].x = wm.ball.x; wm.opp[0].y = wm.ball.y; }
+        if (failure == 3) wm.runtime_phase = RuntimePhase::RestartSetup;
+        Strategy().run(wm);
+        if (wm.active_id == 4 || wm.coop_ball_control.active || wm.coop_stats.received != 0) {
+            printf("FAIL: failed/interrupted pass handed off case=%d\n", failure); return 1;
+        }
+    }
+    for (int failure = 0; failure < 3; ++failure) {
+        WorldModel wm = handoff_scene(3, 4, PassTaskKind::Coop);
+        Strategy strategy;
+        strategy.run(wm);
+        if (wm.coop_pass_task.phase != CoopPassPhase::Receiving) {
+            printf("FAIL: post-release failure fixture lacks real release\n"); return 1;
+        }
+        if (failure == 0) { wm.opp[0].x = wm.ball.x; wm.opp[0].y = wm.ball.y; }
+        if (failure == 1) wm.coop_pass_task.frames_left = 0;
+        if (failure == 2) wm.runtime_phase = RuntimePhase::RestartSetup;
+        strategy.run(wm);
+        if (wm.active_id == 4 || wm.coop_ball_control.active || wm.coop_stats.received != 0) {
+            printf("FAIL: interrupted Receiving handed off case=%d\n", failure); return 1;
+        }
+    }
+    printf("pass handoff: OK (1->2 and 3->4, Ordinary/Coop; no early/failed/timeout/opponent/restart switch)\n");
     return 0;
 }
 
@@ -6281,25 +6476,37 @@ int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
     bool p0_control_only = false;
+    bool dynamic_pass_only = false;
 // --params <文件>：注入参数后再跑全部测试（自动调参的行为护栏）
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
         if (strcmp(argv[i], "--p0-control-only") == 0) p0_control_only = true;
+        if (strcmp(argv[i], "--dynamic-pass-only") == 0) dynamic_pass_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
     }
+    if (dynamic_pass_only) {
+        rc |= test_dynamic_pass_actors();
+        rc |= test_pass_handoff();
+        printf(rc ? "=== DYNAMIC PASS TEST FAILED ===\n" : "=== DYNAMIC PASS TEST PASSED ===\n");
+        return rc;
+    }
     if (p0_control_only) {
         rc |= test_ordinary_pass_admission();
         rc |= test_coop_pass_task();
         rc |= test_p0_active_pass_compatibility();
         rc |= test_p0_pass_press_ownership();
+        rc |= test_dynamic_pass_actors();
+        rc |= test_pass_handoff();
         if (rc == 0) printf("=== P0 CONTROL TEST PASSED ===\n");
         return rc;
     }
     if (coop_pass_only) {
+        rc |= test_dynamic_pass_actors();
+        rc |= test_pass_handoff();
         rc |= test_p0_active_pass_compatibility();
         rc |= test_p0_pass_press_ownership();
         rc |= pass_is_not_cancelled_by_stale_whos_ball();
@@ -6361,6 +6568,8 @@ int main(int argc, char **argv) {
         return rc;
     }
     rc |= test_strategy_run(300);
+    rc |= test_dynamic_pass_actors();
+    rc |= test_pass_handoff();
     rc |= test_formation();
     rc |= test_placement_semantics();
     rc |= test_placement_rule_boxes();     // 摆位规则纪律：门区(7.10/7.17) + 争球 1/4 场(7.15)

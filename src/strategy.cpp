@@ -95,6 +95,11 @@ void Strategy::run(WorldModel &wm) {
                 continue;
             }
         }
+        if (wm.coop_ball_control.active && wm.coop_pass_task.phase == CoopPassPhase::Received &&
+            i == wm.coop_pass_task.passer_id && i != wm.coop_ball_control.receiver_id) {
+            motion::stop(wm.home[i]);
+            continue;
+        }
         if (kZoneMode > 0.5 && wm.runtime_phase == RuntimePhase::Running &&
             !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
@@ -139,6 +144,8 @@ void Strategy::run(WorldModel &wm) {
     // 门区纪律：门区只能有门将；大禁区非门将最多 3 人（规则7.10.4 红线=4），超限顶离球最远
     enforce_own_goal_area(wm);
     enforce_own_penalty_count(wm);
+    cancel_unsafe_coop_pass(wm);
+    ra_.complete_pass_handoff(wm);
 }
 
 // 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm

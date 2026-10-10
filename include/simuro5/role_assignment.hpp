@@ -19,6 +19,8 @@ class RoleAssignment {
 public:
     // 固定角色分工，结果写回 wm.role[]
     void assign(WorldModel &wm);
+    // 已接稳的传球在本帧指令和门区纪律完成后，交接唯一主攻身份。
+    void complete_pass_handoff(WorldModel &wm);
 };
 
 }  // namespace simuro5

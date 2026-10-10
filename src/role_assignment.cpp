@@ -32,7 +32,8 @@ static double ball_cost(const WorldModel &wm, int i) {
 }
 
 void RoleAssignment::assign(WorldModel &wm) {
-    const bool frozen = kActDynamic < 0.5 || wm.runtime_phase != RuntimePhase::Running || wm.in_penalty_exec ||
+    const bool frozen = (kActDynamic < 0.5 && !wm.coop_ball_control.active) ||
+                        wm.runtime_phase != RuntimePhase::Running || wm.in_penalty_exec ||
                         !wm.ball.valid;
     int active_count = 0;
     for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
@@ -61,6 +62,27 @@ void RoleAssignment::assign(WorldModel &wm) {
     if (wm.active_cand_frames < kActSwapFrames) return;
     std::swap(wm.role[cur], wm.role[best]);
     wm.active_id = best; wm.active_cand = -1; wm.active_cand_frames = 0;
+    const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();
+    const double zone_hold = depth < kActDangerDepth ? kActSwapHoldDanger : kActSwapHoldAttack;
+    wm.active_hold = static_cast<int>(zone_hold < 0.0 ? kActSwapHold : zone_hold);
+    wm.shoot_align_frames = 0; wm.shoot_push_count = 0;
+    wm.active_ga_frames = 0; wm.active_ga_total = 0;
+}
+
+void RoleAssignment::complete_pass_handoff(WorldModel &wm) {
+    CoopBallControl &control = wm.coop_ball_control;
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!control.active || !control.handoff_pending || task.active ||
+        task.phase != CoopPassPhase::Received || wm.runtime_phase != RuntimePhase::Running) return;
+    const int old_id = task.passer_id, new_id = control.receiver_id;
+    if (old_id < 1 || old_id >= PLAYERS_PER_SIDE || new_id < 1 || new_id >= PLAYERS_PER_SIDE ||
+        old_id == new_id || new_id != task.receiver_id || wm.active_id != old_id ||
+        wm.role[old_id] != ROLE_ACTIVE || wm.role[new_id] == ROLE_ACTIVE ||
+        wm.role[new_id] == ROLE_GOALIE) return;
+    std::swap(wm.role[old_id], wm.role[new_id]);
+    wm.active_id = new_id;
+    control.handoff_pending = false;
+    wm.active_cand = -1; wm.active_cand_frames = 0;
     const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();
     const double zone_hold = depth < kActDangerDepth ? kActSwapHoldDanger : kActSwapHoldAttack;
     wm.active_hold = static_cast<int>(zone_hold < 0.0 ? kActSwapHold : zone_hold);
