@@ -32,6 +32,14 @@ bool we_take_penalty_spot(const WorldModel &wm) {
            std::fabs(wm.ball.y - 90.0) < kPenaltySpotTol;
 }
 
+// 传球参与者先执行任务；普通逼抢只接管没有任务的球员。
+static bool pass_task_controls_robot(const WorldModel &wm, int id) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (task.active && (id == task.passer_id || id == task.receiver_id)) return true;
+    const CoopBallControl &control = wm.coop_ball_control;
+    return control.active && (id == wm.active_id || id == control.receiver_id);
+}
+
 void Strategy::run(WorldModel &wm) {
     Situation sit = sit_.analyze(wm);
     wm.possession = sit.possession;
@@ -55,6 +63,8 @@ void Strategy::run(WorldModel &wm) {
 
     sit_.update_stand_points(wm);
 
+    // 先清失效任务，再按角色/逼抢派发；取消当帧即可恢复普通决策。
+    cancel_unsafe_coop_pass(wm);
     ra_.assign(wm);
 
     update_sweeper(wm);
@@ -89,7 +99,9 @@ void Strategy::run(WorldModel &wm) {
             !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
         }
-        if (i == wm.presser_id) { run_press(wm, i); continue; }
+        if (i == wm.presser_id && !pass_task_controls_robot(wm, i)) {
+            run_press(wm, i); continue;
+        }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
             case ROLE_PASSIVE:  run_passive(wm, i); break;
@@ -282,6 +294,7 @@ void Strategy::update_presser(WorldModel &wm) {
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         int rl = wm.role[i];
         if (rl != ROLE_ACTIVE && rl != ROLE_ASSIST && rl != ROLE_MIDFIELD) continue;
+        if (pass_task_controls_robot(wm, i)) continue;
         double d = dist(bx, by, wm.home[i].x, wm.home[i].y);
         if (d > kPressMaxDist) continue;
         double forward = clamp(ad * (bx - wm.home[i].x), 0.0, kForwardMax);
