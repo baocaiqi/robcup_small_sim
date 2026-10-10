@@ -1583,9 +1583,14 @@ bool pass_context_safe_impl(const WorldModel &wm) {
     return true;
 }
 
+// ⚠️ 2026-10-13 合并 P3（adfa46b）：passer 不再硬编码为 1 号，而是「当前主攻」。
+//   这是"接球后交接主攻 / 第三人提前接应"的前提 —— 原来 2~4 号当主攻时根本不建传球任务，
+//   正是 10-12 合并时挂起待团队拍板的那条取舍，这里按队员口径解掉。
 bool pass_target_safe_impl(const WorldModel &wm, int passer, int receiver,
                            double tx, double ty, bool check_lane) {
-    if (!pass_context_safe_impl(wm) || passer != 1 || receiver < 2 || receiver > 4 ||
+    if (!pass_context_safe_impl(wm) || passer < 1 || passer >= PLAYERS_PER_SIDE ||
+        passer != wm.active_id ||
+        receiver < 1 || receiver >= PLAYERS_PER_SIDE || receiver == passer ||
         !std::isfinite(tx) || !std::isfinite(ty) || tx < 0 || tx > 220 || ty < 0 || ty > 180 ||
         in_opp_goal_area(wm.ctx, tx, ty) || in_goal_area(wm.ctx, tx, ty) || in_no_push_zone(tx, ty)) return false;
     for (int id : {passer, receiver}) {
@@ -1603,11 +1608,18 @@ bool pass_target_safe_impl(const WorldModel &wm, int passer, int receiver,
 
 bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
-    // 合并（2026-10-12）：队员 ff2e542 的 active_id == 1 保守门槛（非 1 号主攻不建传球任务）；
-    //   并去掉我们的 coop_ball_control.game_state 锁 —— 该字段被球权统一删掉，
-    //   语义（"临时控球不能跨比赛阶段存活"）由 runtime_phase + 任务生命周期取消覆盖
-    return wm.active_id == 1 && pass_context_safe_impl(wm) &&
-        id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
+    // 2026-10-13 合并 P3（adfa46b）：把 10-12 那条"active_id == 1 保守门槛"换成
+    //   「交接前：主攻==传球者 / 交接后：主攻==接球者」—— 原来 2~4 号当主攻时不建传球任务，
+    //   正是当时挂起待团队拍板的那条取舍，这里按队员口径解掉。
+    //   另：10-12 去掉的 `coop_ball_control.game_state` 锁仍不恢复 —— 语义由 runtime_phase
+    //   + 任务生命周期取消覆盖（该字段已被球权统一删除）。
+    const int passer = wm.coop_pass_task.passer_id;
+    const bool before_handoff = passer >= 1 && passer < PLAYERS_PER_SIDE && wm.active_id == passer;
+    const bool after_handoff = id >= 1 && id < PLAYERS_PER_SIDE &&
+        wm.active_id == id && wm.role[id] == ROLE_ACTIVE &&
+        !wm.coop_ball_control.handoff_pending;
+    return passer >= 1 && passer < PLAYERS_PER_SIDE && id >= 1 && id < PLAYERS_PER_SIDE &&
+        id != passer && (before_handoff || after_handoff) && pass_context_safe_impl(wm) &&
         wm.ga_cooldown[id] <= 0 &&
         wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
@@ -1646,7 +1658,7 @@ void observe_pass_lifecycle(WorldModel &wm) {
             if (task.receive_frames >= kPassReceiveFrames &&
                 pass_target_safe_impl(wm, task.passer_id, task.receiver_id, task.rx, task.ry, false)) {
                 task.phase = CoopPassPhase::Received;
-                wm.coop_ball_control = {true, task.receiver_id, 0};
+                wm.coop_ball_control = {true, task.receiver_id, 0, true};
                 wm.coop_finish(CoopOutcome::Success);
                 wm.coop_control_entered();
             }
@@ -1694,8 +1706,10 @@ void carry_pass_ball(WorldModel &wm, int id) {
 void cancel_unsafe_pass_task(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
     const bool invalid_actors = task.active &&
-        (task.passer_id != 1 || task.passer_id != wm.active_id ||
-         task.receiver_id < 2 || task.receiver_id > 4);
+        (task.passer_id < 1 || task.passer_id >= PLAYERS_PER_SIDE ||
+         task.passer_id != wm.active_id ||
+         task.receiver_id < 1 || task.receiver_id >= PLAYERS_PER_SIDE ||
+         task.receiver_id == task.passer_id);
     if (task.active && (wm.runtime_phase != RuntimePhase::Running || task.frames_left <= 0 ||
         // 合并（2026-10-12）：保留队员的 invalid_actors 参与者身份校验
         invalid_actors ||
@@ -2012,7 +2026,11 @@ void run_active(WorldModel &wm, int id) {
     if (wm.coop_pass_task.active) --wm.coop_pass_task.frames_left;
     observe_pass_lifecycle(wm);
     cancel_unsafe_pass_task(wm);
-    const bool fixed_pass_actor = id == 1 && wm.active_id == 1;
+    if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) {
+        carry_pass_ball(wm, id);
+        return;
+    }
+    const bool pass_actor = id >= 1 && id < PLAYERS_PER_SIDE && id == wm.active_id;
 
     if (!wm.in_penalty_exec) wm.pen_aim_locked = false;
 
@@ -2067,7 +2085,7 @@ void run_active(WorldModel &wm, int id) {
         if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::GoalDiscipline);
         if (wm.coop_ball_control.active) wm.coop_control_end(CoopOutcome::GoalDiscipline);
         ++wm.ga_retreat_fires;   // 诊断用
-        PassPlan pp_ga = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
+        PassPlan pp_ga = pass_actor ? plan_pass(wm, id) : PassPlan{};
         if (pp_ga.viable) { motion::position(r, pp_ga.target_x, pp_ga.target_y); return; }
         double ogx = ctx.opp_goal_x(), ad = ctx.attack_dir();
         motion::position(r, ogx - ad * 60.0, clamp(wm.ball.y, 72.5, 107.5));
@@ -2167,7 +2185,7 @@ void run_active(WorldModel &wm, int id) {
         double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
         cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
-    } else if (fixed_pass_actor && !had_pass_task && pass_context_safe_impl(wm)) {
+    } else if (pass_actor && !had_pass_task && pass_context_safe_impl(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
         // 门前横传优先（docs/17 的 P4）：球在对方门前一侧时，把球横送远门柱比
@@ -2352,7 +2370,7 @@ void run_active(WorldModel &wm, int id) {
         if (d < opp_d) { opp_d = d; opp_y = wm.opp[i].y; }
     }
     const bool own_ball = db < 15.0 && db < opp_d;
-    PassPlan pp = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
+    PassPlan pp = pass_actor ? plan_pass(wm, id) : PassPlan{};
     if (pp.viable && !coop_preferred) {
         if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe_impl(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
             wm.coop_pass_task = {};
@@ -2377,7 +2395,7 @@ void run_active(WorldModel &wm, int id) {
             if (d < opp_near) { opp_near = d; near_i = i; }
         }
         if (swarm >= 2 || opp_near < 12.0) {
-            PassPlan pp2 = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
+            PassPlan pp2 = pass_actor ? plan_pass(wm, id) : PassPlan{};
             if (pp2.viable) { motion::position(r, pp2.target_x, pp2.target_y); return; }
             if (near_i >= 0 && opp_near > 1e-6) {
                 double dx = wm.ball.x - wm.opp[near_i].x;

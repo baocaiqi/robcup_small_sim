@@ -89,6 +89,7 @@ struct CoopBallControl {
     bool active = false;
     int receiver_id = -1;
     int loose_frames = 0;
+    bool handoff_pending = false;  // 接稳后帧末只交接一次
 };
 
 struct WorldModel {

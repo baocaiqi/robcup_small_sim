@@ -158,6 +158,11 @@ void Strategy::run(WorldModel &wm) {
                 continue;
             }
         }
+        if (wm.coop_ball_control.active && wm.coop_pass_task.phase == CoopPassPhase::Received &&
+            i == wm.coop_pass_task.passer_id && i != wm.coop_ball_control.receiver_id) {
+            motion::stop(wm.home[i]);
+            continue;
+        }
         if (kZoneMode > 0.5 && wm.runtime_phase == RuntimePhase::Running &&
             !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
@@ -213,6 +218,10 @@ void Strategy::run(WorldModel &wm) {
     enforce_own_penalty_count(wm);
     enforce_teammate_spacing(wm);      // 须在防乌龙闸之前（可能把队友推开的方向正朝自家门）
     enforce_no_own_goal_touch(wm);
+    // 队员 adfa46b（2026-10-13 合并 P3）：交接前在他们设计的位置再清一次不安全的配合传球
+    //   （本函数开头也调过一次），然后动态接球到位才把主攻正式交接给接球人。
+    cancel_unsafe_coop_pass(wm);
+    ra_.complete_pass_handoff(wm);
 }
 
 // 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm

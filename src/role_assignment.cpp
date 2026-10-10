@@ -46,18 +46,17 @@ TUNABLE(kActKeepRoleDead, 1.0);
 TUNABLE(kActDeadConfirm, 0.0);
 
 void RoleAssignment::assign(WorldModel &wm) {
-    const bool table_ok = wm.active_id >= 1 && wm.active_id < PLAYERS_PER_SIDE &&
-                          wm.role[0] == ROLE_GOALIE && wm.role[wm.active_id] == ROLE_ACTIVE;
-    // ⚠️ 合并取舍（2026-10-12）：队员 d9b1225 在 frozen 里加了 `runtime_phase != Running`，
-    //   效果等于"重启期每帧重置成固定档" —— 这正是我们第 72 轮用 kActKeepRoleDead 修掉的行为
-    //   （240 局 A/B：净胜 3.383→3.975，自家门区"2+ 人"犯规风险 −41%）。
-    //   故这里保留我们的旋钮口径；想退回那个行为把 kActKeepRoleDead 设成 0 即可。
     const bool old_freeze = wm.runtime_phase != RuntimePhase::Running && kActKeepRoleDead < 0.5;
+    // 队员 adfa46b（2026-10-13 合并 P3）：动态接球进行中（coop_ball_control 活跃）时不许把角色表
+    //   锁成固定档，否则"接球后交接主攻"拿不到 —— 即把 `kActDynamic < 0.5` 放宽成
+    //   `kActDynamic < 0.5 && !wm.coop_ball_control.active`。我们出厂 kActDynamic=1，此条恒不成立
+    //   （语义保留，便于将来把动态主攻关掉时仍然走得通）。
     // 队员 ff2e542：重复 ACTIVE / 未初始化 / 被外部改写时恢复唯一固定初始角色
     int active_count = 0;
     for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
         if (wm.role[i] == ROLE_ACTIVE) ++active_count;
-    if (kActDynamic < 0.5 || wm.in_penalty_exec || !wm.ball.valid || old_freeze || !table_ok ||
+    if ((kActDynamic < 0.5 && !wm.coop_ball_control.active) || wm.in_penalty_exec ||
+        !wm.ball.valid || old_freeze || !table_ok ||
         active_count != 1) {   // 未初始化、重复主攻或被外部改写
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.role[i] = kFixedRole[i];
         wm.active_id = 1; wm.active_cand = -1; wm.active_cand_frames = 0; wm.active_hold = 0;
@@ -106,6 +105,27 @@ void RoleAssignment::assign(WorldModel &wm) {
     if (wm.active_cand_frames < ((dead && kActDeadConfirm > 0.0) ? kActDeadConfirm : kActSwapFrames)) return;
     std::swap(wm.role[cur], wm.role[best]);
     wm.active_id = best; wm.active_cand = -1; wm.active_cand_frames = 0;
+    const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();
+    const double zone_hold = depth < kActDangerDepth ? kActSwapHoldDanger : kActSwapHoldAttack;
+    wm.active_hold = static_cast<int>(zone_hold < 0.0 ? kActSwapHold : zone_hold);
+    wm.shoot_align_frames = 0; wm.shoot_push_count = 0;
+    wm.active_ga_frames = 0; wm.active_ga_total = 0;
+}
+
+void RoleAssignment::complete_pass_handoff(WorldModel &wm) {
+    CoopBallControl &control = wm.coop_ball_control;
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!control.active || !control.handoff_pending || task.active ||
+        task.phase != CoopPassPhase::Received || wm.runtime_phase != RuntimePhase::Running) return;
+    const int old_id = task.passer_id, new_id = control.receiver_id;
+    if (old_id < 1 || old_id >= PLAYERS_PER_SIDE || new_id < 1 || new_id >= PLAYERS_PER_SIDE ||
+        old_id == new_id || new_id != task.receiver_id || wm.active_id != old_id ||
+        wm.role[old_id] != ROLE_ACTIVE || wm.role[new_id] == ROLE_ACTIVE ||
+        wm.role[new_id] == ROLE_GOALIE) return;
+    std::swap(wm.role[old_id], wm.role[new_id]);
+    wm.active_id = new_id;
+    control.handoff_pending = false;
+    wm.active_cand = -1; wm.active_cand_frames = 0;
     const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();
     const double zone_hold = depth < kActDangerDepth ? kActSwapHoldDanger : kActSwapHoldAttack;
     wm.active_hold = static_cast<int>(zone_hold < 0.0 ? kActSwapHold : zone_hold);
