@@ -969,7 +969,10 @@ TUNABLE(kRecvArriveDist, 8.0);  // cm：进入即停车转正迎球
 TUNABLE(kRecvNoReverse, 1.0);   // 1=接球路径禁止倒车
 
 bool pass_context_safe(const WorldModel &wm) {
-    if (!wm.ball.valid || wm.game_state != PM_PlayOn || wm.in_penalty_exec ||
+    // 活球判定用 wm.live_play（球离开重启点即算开球），不用 game_state==PM_PlayOn：
+    //   平台活球期 gameState 恒为 FreeBall(1~4)/PlaceKick(5)，从无 PM_PlayOn(0)，
+    //   旧写法让传球在真机活球期恒被拦死（与反击窗口同一坑，见 gamestate-playon-never-live）
+    if (!wm.ball.valid || !wm.live_play || wm.in_penalty_exec ||
         wm.threat_level >= 0.6 || in_no_push_zone(wm.ball.x, wm.ball.y)) return false;
     double ours = 1e9, theirs = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
@@ -1381,6 +1384,26 @@ void run_active(WorldModel &wm, int id) {
 
     // 射门：贴身直线推穿——目标 = 球前 20cm，推球方向 = 瞄准线（不被接近轨迹带偏）
     ShootPlan sp = plan_shoot(wm, id);
+#ifdef SIMURO5_HNNU_TRACE
+    // 门前终结诊断：球离对方门 <40cm 且 active 贴球时，记射门决策内部状态 S 行，
+    //   回答「拿到球为什么不射」——viable/开口角/质量/争抢态（C:\Strategy\gate_trace.csv）
+    if (wm.ctx.dist_opp_goal(wm.ball.x) < 40.0) {
+        static FILE *fp = nullptr;
+        static long n = 0;
+        if (!fp) fp = std::fopen("C:\\Strategy\\gate_trace.csv", "a");
+        if (fp) {
+            double gk_y = 90.0, gk_d = 1e9;
+            for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+                double dgk = wm.ctx.dist_opp_goal(wm.opp[i].x);
+                if (dgk < gk_d) { gk_d = dgk; gk_y = wm.opp[i].y; }
+            }
+            std::fprintf(fp, "S,%ld,%.1f,%.1f,%.1f,%d,%.2f,%.3f,%.1f,%d,%.1f\n",
+                         n++, wm.ball.x, wm.ball.y, wm.ctx.dist_opp_goal(wm.ball.x),
+                         sp.viable, sp.open_angle, sp.quality, sp.shot_dist, (int)contested, gk_y);
+            std::fflush(fp);
+        }
+    }
+#endif
     if (contested && kContestCharge > 0.5 && !wm.coop_pass_task.active &&
         !in_no_push_zone(wm.ball.x, wm.ball.y)) {
         const double bx = wm.ball.x, by = wm.ball.y;
@@ -1408,6 +1431,19 @@ void run_active(WorldModel &wm, int id) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
     }
+#ifdef SIMURO5_HNNU_TRACE
+    // 角区回做验证：记录 plan_coop_pass 是否找到门前接应点（viable/队友射门质量 score/自己射门质量 quality）
+    {
+        static FILE *fp = nullptr; static long n = 0;
+        if (!fp) fp = std::fopen("C:\\Strategy\\pass_trace.csv", "a");
+        if (fp) {
+            std::fprintf(fp, "%ld,%.1f,%.1f,%.1f,%d,%.3f,%.3f,%d,%.1f\n",
+                         n++, wm.ball.x, wm.ball.y, wm.ctx.dist_opp_goal(wm.ball.x),
+                         cp.viable, cp.score, sp.quality, id, wm.threat_level);
+            std::fflush(fp);
+        }
+    }
+#endif
     const bool existing_coop_task = wm.coop_pass_task.active && wm.coop_pass_task.kind == PassTaskKind::Coop;
     const bool coop_preferred = existing_coop_task ||
         (cp.viable && !wm.in_penalty_exec && cp.score > sp.quality + 0.15);
