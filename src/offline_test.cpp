@@ -5801,6 +5801,172 @@ static int possession_cancel_still_works() {
     return confirmed_opponent_control_can_cancel_pass();
 }
 
+// 赛前合并护栏：非 1 号主攻沿用射门/带球/追球，不进入固定编号传球链。
+static int test_p0_active_pass_compatibility() {
+    WorldModel base;
+    base.ctx = TeamContext{true};
+    base.game_state = base.game_state_last = PM_PlayOn;
+    base.runtime_phase = RuntimePhase::Running;
+    base.possession = Possession::Ours; base.we_have_ball = true;
+    base.ball.valid = true; base.ball.x = 70.0; base.ball.y = 90.0;
+    base.threat_level = 0.1; base.shoot_push_count = 10;
+    base.role[0] = ROLE_GOALIE; base.role[1] = ROLE_ACTIVE;
+    base.role[2] = ROLE_ASSIST; base.role[3] = ROLE_MIDFIELD; base.role[4] = ROLE_PASSIVE;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        base.home[i].x = 180.0; base.home[i].y = 30.0 + 25.0 * i;
+        base.opp[i].x = 200.0; base.opp[i].y = 20.0 + 30.0 * i;
+    }
+    base.home[0].x = 210.0; base.home[0].y = 90.0;
+    base.home[1].x = 75.0; base.home[1].y = 90.0;
+    base.home[2].x = 120.0; base.home[2].y = 90.0;
+    base.assist_x = 120.0; base.assist_y = 90.0;
+    base.mid_x = 180.0; base.mid_y = 150.0;
+    base.passive_x = 180.0; base.passive_y = 40.0;
+    base.opp[0].x = 50.0; base.opp[0].y = 90.0;
+
+    WorldModel fixed = base;
+    run_active(fixed, 1);
+    if (!fixed.coop_pass_task.active || fixed.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        fixed.coop_pass_task.passer_id != 1) {
+        printf("FAIL: P0 active=1 lost ordinary pass\n"); return 1;
+    }
+
+    WorldModel dynamic = base;
+    dynamic.active_id = 3;
+    dynamic.role[1] = ROLE_MIDFIELD; dynamic.role[3] = ROLE_ACTIVE;
+    dynamic.home[3] = dynamic.home[1]; dynamic.home[1].x = 180.0;
+    PassPlan tempting = plan_pass(dynamic, 3);
+    if (!tempting.viable) { printf("FAIL: P0 active=3 fixture lacks tempting pass\n"); return 1; }
+    RobotState wrong_command = dynamic.home[3];
+    motion::position(wrong_command, tempting.target_x, tempting.target_y);
+    run_active(dynamic, 3);
+    int active_count = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
+        active_count += dynamic.role[i] == ROLE_ACTIVE ? 1 : 0;
+    if (dynamic.coop_pass_task.active || dynamic.coop_stats.created != 0 || active_count != 1 ||
+        same_drive_command(dynamic.home[3], wrong_command) ||
+        (fabs(dynamic.home[3].vl) < 1e-9 && fabs(dynamic.home[3].vr) < 1e-9)) {
+        printf("FAIL: P0 active=3 followed an uncreatable pass or stalled\n"); return 1;
+    }
+
+    WorldModel coop = coop_task_scene();
+    coop.active_id = 3;
+    coop.role[0] = ROLE_GOALIE; coop.role[1] = ROLE_MIDFIELD;
+    coop.role[2] = ROLE_ASSIST; coop.role[3] = ROLE_ACTIVE; coop.role[4] = ROLE_PASSIVE;
+    coop.home[3] = coop.home[1];
+    if (!plan_coop_pass(coop, 3).viable) {
+        printf("FAIL: P0 active=3 fixture lacks tempting CoopPass\n"); return 1;
+    }
+    run_active(coop, 3);
+    if (coop.coop_pass_task.active || coop.coop_stats.created != 0 ||
+        (fabs(coop.home[3].vl) < 1e-9 && fabs(coop.home[3].vr) < 1e-9)) {
+        printf("FAIL: P0 active=3 created CoopPass or waited for receiver\n"); return 1;
+    }
+
+    WorldModel duplicate = base;
+    duplicate.active_id = 3; duplicate.role[3] = ROLE_ACTIVE;
+    RoleAssignment().assign(duplicate);
+    int unique_count = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
+        unique_count += duplicate.role[i] == ROLE_ACTIVE ? 1 : 0;
+    if (unique_count != 1 || duplicate.role[duplicate.active_id] != ROLE_ACTIVE) {
+        printf("FAIL: P0 role assignment left two ACTIVE robots\n"); return 1;
+    }
+
+    WorldModel stale = possession_pass_scene();
+    stale.active_id = 3; stale.role[1] = ROLE_MIDFIELD; stale.role[3] = ROLE_ACTIVE;
+    cancel_unsafe_coop_pass(stale);
+    if (stale.coop_pass_task.active ||
+        stale.coop_stats.outcomes[(int)CoopOutcome::InvalidTarget] != 1) {
+        printf("FAIL: P0 active change retained an old pass task\n"); return 1;
+    }
+    WorldModel control = possession_pass_scene();
+    control.coop_pass_task.active = false;
+    control.coop_ball_control = {true, 2, 0};
+    control.active_id = 3; control.role[1] = ROLE_MIDFIELD; control.role[3] = ROLE_ACTIVE;
+    cancel_unsafe_coop_pass(control);
+    if (control.coop_ball_control.active) {
+        printf("FAIL: P0 active change retained receiver control\n"); return 1;
+    }
+    printf("P0 active compatibility: OK (1 passes; 3 falls back; one ACTIVE; old task/control clear)\n");
+    return 0;
+}
+
+static WorldModel p0_press_task_scene() {
+    WorldModel wm = possession_pass_scene();
+    wm.coop_pass_task.kind = PassTaskKind::Ordinary;
+    wm.coop_pass_task.phase = CoopPassPhase::Receiving;
+    wm.coop_pass_task.frames_left = 40;
+    wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    wm.home[1].x = 150.0; wm.home[1].y = 150.0;
+    wm.home[2].x = 100.0; wm.home[2].y = 150.0;
+    wm.home[3].x = 130.0; wm.home[3].y = 150.0;
+    wm.home[4].x = 180.0; wm.home[4].y = 150.0;
+    return wm;
+}
+
+// 活动传球优先于普通逼抢；取消后同一套逼抢选择可重新接管。
+static int test_p0_pass_press_ownership() {
+    Strategy strategy;
+    WorldModel receiver = p0_press_task_scene();
+    strategy.run(receiver);
+    if (!receiver.coop_pass_task.active || receiver.coop_pass_task.frames_left != 39 ||
+        receiver.presser_id != 3) {
+        printf("FAIL: P0 receiver/passer task lost to press (presser=%d left=%d active=%d)\n",
+               receiver.presser_id, receiver.coop_pass_task.frames_left,
+               (int)receiver.coop_pass_task.active); return 1;
+    }
+    WorldModel receive_expected = receiver, press_expected = receiver;
+    run_assist(receive_expected, 2);
+    run_press(press_expected, 3);
+    if (!same_drive_command(receiver.home[2], receive_expected.home[2]) ||
+        !same_drive_command(receiver.home[3], press_expected.home[3])) {
+        printf("FAIL: P0 receiver command or non-task presser command was overwritten\n"); return 1;
+    }
+
+    WorldModel passer = p0_press_task_scene();
+    passer.home[1].x = 100.0; passer.home[2].x = 140.0;
+    strategy.run(passer);
+    if (!passer.coop_pass_task.active || passer.coop_pass_task.frames_left != 39 ||
+        passer.presser_id != 3) {
+        printf("FAIL: P0 passer task did not advance under press conditions\n"); return 1;
+    }
+
+    WorldModel intercepted = p0_press_task_scene();
+    intercepted.opp[0].x = intercepted.ball.x;
+    intercepted.opp[0].y = intercepted.ball.y;
+    strategy.run(intercepted);
+    if (intercepted.coop_pass_task.active || intercepted.presser_id != 2 ||
+        intercepted.coop_stats.outcomes[(int)CoopOutcome::Intercepted] != 1) {
+        printf("FAIL: P0 intercepted task did not release pressing\n"); return 1;
+    }
+
+    WorldModel timeout = p0_press_task_scene();
+    timeout.coop_pass_task.frames_left = 0;
+    strategy.run(timeout);
+    if (timeout.coop_pass_task.active || timeout.presser_id != 2 ||
+        timeout.coop_stats.outcomes[(int)CoopOutcome::ReceiveTimeout] != 1) {
+        printf("FAIL: P0 expired task retained press ownership\n"); return 1;
+    }
+
+    WorldModel restart = p0_press_task_scene();
+    restart.runtime_phase = RuntimePhase::RestartSetup;
+    restart.game_state = PM_PlaceKick_Blue;
+    strategy.run(restart);
+    if (restart.coop_pass_task.active || restart.presser_id != -1 ||
+        restart.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] != 1) {
+        printf("FAIL: P0 restart retained pass or press lock\n"); return 1;
+    }
+    restart.runtime_phase = RuntimePhase::Running;
+    restart.game_state = PM_PlayOn;
+    strategy.run(restart);
+    if (restart.presser_id != 2) {
+        printf("FAIL: P0 press did not resume after restart\n"); return 1;
+    }
+    printf("P0 pass/press ownership: OK (participants protected; others press; cancel/timeout/restart release)\n");
+    return 0;
+}
+
 static int restart_first_touch_chain_unchanged() {
     int rc = our_restart_executor_can_first_touch();
     rc |= our_restart_non_executor_cannot_touch();
@@ -6114,16 +6280,28 @@ static int test_mark_assignment() {
 int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
+    bool p0_control_only = false;
 // --params <文件>：注入参数后再跑全部测试（自动调参的行为护栏）
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
+        if (strcmp(argv[i], "--p0-control-only") == 0) p0_control_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
     }
+    if (p0_control_only) {
+        rc |= test_ordinary_pass_admission();
+        rc |= test_coop_pass_task();
+        rc |= test_p0_active_pass_compatibility();
+        rc |= test_p0_pass_press_ownership();
+        if (rc == 0) printf("=== P0 CONTROL TEST PASSED ===\n");
+        return rc;
+    }
     if (coop_pass_only) {
+        rc |= test_p0_active_pass_compatibility();
+        rc |= test_p0_pass_press_ownership();
         rc |= pass_is_not_cancelled_by_stale_whos_ball();
         rc |= confirmed_opponent_control_can_cancel_pass();
         rc |= receive_confirmation_uses_live_possession_evidence();
@@ -6197,6 +6375,8 @@ int main(int argc, char **argv) {
     rc |= test_opp_kick_predict();
     rc |= test_coop_pass();
     rc |= test_coop_pass_task();
+    rc |= test_p0_active_pass_compatibility();
+    rc |= test_p0_pass_press_ownership();
     rc |= test_coop_lifecycle();
     rc |= pass_is_not_cancelled_by_stale_whos_ball();
     rc |= confirmed_opponent_control_can_cancel_pass();
