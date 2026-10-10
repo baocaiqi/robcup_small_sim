@@ -53,7 +53,12 @@ void RoleAssignment::assign(WorldModel &wm) {
     //   （240 局 A/B：净胜 3.383→3.975，自家门区"2+ 人"犯规风险 −41%）。
     //   故这里保留我们的旋钮口径；想退回那个行为把 kActKeepRoleDead 设成 0 即可。
     const bool old_freeze = wm.runtime_phase != RuntimePhase::Running && kActKeepRoleDead < 0.5;
-    if (kActDynamic < 0.5 || wm.in_penalty_exec || !wm.ball.valid || old_freeze || !table_ok) {
+    // 队员 ff2e542：重复 ACTIVE / 未初始化 / 被外部改写时恢复唯一固定初始角色
+    int active_count = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
+        if (wm.role[i] == ROLE_ACTIVE) ++active_count;
+    if (kActDynamic < 0.5 || wm.in_penalty_exec || !wm.ball.valid || old_freeze || !table_ok ||
+        active_count != 1) {   // 未初始化、重复主攻或被外部改写
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.role[i] = kFixedRole[i];
         wm.active_id = 1; wm.active_cand = -1; wm.active_cand_frames = 0; wm.active_hold = 0;
         return;
