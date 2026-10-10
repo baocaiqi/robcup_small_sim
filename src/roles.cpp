@@ -1076,7 +1076,8 @@ bool pass_target_safe(const WorldModel &wm, int passer, int receiver,
 
 bool pass_control_safe(const WorldModel &wm) {
     int id = wm.coop_ball_control.receiver_id;
-    return pass_context_safe(wm) && id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
+    return wm.active_id == 1 && pass_context_safe(wm) &&
+        id >= 1 && id <= 4 && wm.role[id] != ROLE_ACTIVE &&
         wm.ga_cooldown[id] <= 0 &&
         wm.ga_overstay[id] < 15 && !in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) &&
         !in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y);
@@ -1161,13 +1162,18 @@ void carry_pass_ball(WorldModel &wm, int id) {
 
 void cancel_unsafe_pass_task(WorldModel &wm) {
     auto &task = wm.coop_pass_task;
+    const bool invalid_actors = task.active &&
+        (task.passer_id != 1 || task.passer_id != wm.active_id ||
+         task.receiver_id < 2 || task.receiver_id > 4);
     if (task.active && (wm.runtime_phase != RuntimePhase::Running || task.frames_left <= 0 ||
+        invalid_actors ||
         !pass_target_safe(wm, task.passer_id, task.receiver_id, task.rx, task.ry,
                           task.phase == CoopPassPhase::Preparing))) {
         CoopOutcome reason = CoopOutcome::InvalidTarget;
         if (wm.runtime_phase != RuntimePhase::Running) reason = CoopOutcome::PhaseInterrupted;
         else if (task.frames_left <= 0)
             reason = task.phase == CoopPassPhase::Preparing ? CoopOutcome::PrepareTimeout : CoopOutcome::ReceiveTimeout;
+        else if (invalid_actors) reason = CoopOutcome::InvalidTarget;
         else if (wm.in_penalty_exec) reason = CoopOutcome::Penalty;
         else if (in_no_push_zone(wm.ball.x, wm.ball.y)) reason = CoopOutcome::Corner;
         else if (wm.threat_level >= 0.6) reason = CoopOutcome::HighThreat;
@@ -1467,6 +1473,7 @@ void run_active(WorldModel &wm, int id) {
     if (wm.coop_pass_task.active) --wm.coop_pass_task.frames_left;
     observe_pass_lifecycle(wm);
     cancel_unsafe_pass_task(wm);
+    const bool fixed_pass_actor = id == 1 && wm.active_id == 1;
 
     if (!wm.in_penalty_exec) wm.pen_aim_locked = false;
 
@@ -1521,7 +1528,7 @@ void run_active(WorldModel &wm, int id) {
         if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::GoalDiscipline);
         if (wm.coop_ball_control.active) wm.coop_control_end(CoopOutcome::GoalDiscipline);
         ++wm.ga_retreat_fires;   // 诊断用
-        PassPlan pp_ga = plan_pass(wm, id);
+        PassPlan pp_ga = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
         if (pp_ga.viable) { motion::position(r, pp_ga.target_x, pp_ga.target_y); return; }
         double ogx = ctx.opp_goal_x(), ad = ctx.attack_dir();
         motion::position(r, ogx - ad * 60.0, clamp(wm.ball.y, 72.5, 107.5));
@@ -1601,7 +1608,7 @@ void run_active(WorldModel &wm, int id) {
         double length = dist(wm.ball.x, wm.ball.y, cp.rx, cp.ry);
         if (length > 1e-6) { cp.dir_x = (cp.rx - wm.ball.x) / length; cp.dir_y = (cp.ry - wm.ball.y) / length; }
         cp.aim_rot = angle_to(0.0, 0.0, cp.dir_x, cp.dir_y);
-    } else if (!had_pass_task && pass_context_safe(wm)) {
+    } else if (fixed_pass_actor && !had_pass_task && pass_context_safe(wm)) {
         cp = plan_coop_pass(wm, id);
         cp.viable = cp.viable && cp.score > sp.quality + 0.15;
     }
@@ -1765,7 +1772,7 @@ void run_active(WorldModel &wm, int id) {
         if (d < opp_d) { opp_d = d; opp_y = wm.opp[i].y; }
     }
     const bool own_ball = db < 15.0 && db < opp_d;
-    PassPlan pp = plan_pass(wm, id);
+    PassPlan pp = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
     if (pp.viable && !coop_preferred) {
         if (!wm.coop_pass_task.active && !had_pass_task && pass_target_safe(wm, id, pp.receiver_id, pp.target_x, pp.target_y, true)) {
             wm.coop_pass_task = {};
@@ -1790,7 +1797,7 @@ void run_active(WorldModel &wm, int id) {
             if (d < opp_near) { opp_near = d; near_i = i; }
         }
         if (swarm >= 2 || opp_near < 12.0) {
-            PassPlan pp2 = plan_pass(wm, id);
+            PassPlan pp2 = fixed_pass_actor ? plan_pass(wm, id) : PassPlan{};
             if (pp2.viable) { motion::position(r, pp2.target_x, pp2.target_y); return; }
             if (near_i >= 0 && opp_near > 1e-6) {
                 double dx = wm.ball.x - wm.opp[near_i].x;
