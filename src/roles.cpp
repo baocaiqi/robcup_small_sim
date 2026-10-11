@@ -1483,7 +1483,15 @@ void run_active(WorldModel &wm, int id) {
     observe_pass_lifecycle(wm);
     cancel_unsafe_pass_task(wm);
     if (wm.coop_ball_control.active && wm.coop_ball_control.receiver_id == id) {
-        carry_pass_ball(wm, id);
+        auto &control = wm.coop_ball_control;
+        if (control.owner_carried_once && wm.possession == Possession::Ours &&
+            dist(r.x, r.y, wm.ball.x, wm.ball.y) <= kPassControlDistance) {
+            wm.coop_control_end(CoopOutcome::Success);
+            motion::stop(r);  // 结算帧不重建任务；下帧重新比较射门与传球
+        } else {
+            carry_pass_ball(wm, id);
+            if (control.active) control.owner_carried_once = true;
+        }
         return;
     }
     const bool pass_actor = id >= 1 && id < PLAYERS_PER_SIDE && id == wm.active_id;
