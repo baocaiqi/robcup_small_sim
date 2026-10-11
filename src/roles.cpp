@@ -909,6 +909,12 @@ void run_goalie(WorldModel &wm, int id) {
 // 对方门区停留红线：门区除门将外纯停留 >8 帧即计（平台 20 周期判点球，须留撤出时间）
 TUNABLE(kReboundRushSpeed, 7.34364);  // cm/帧：反弹球可抢速度阈值
 TUNABLE(kReboundRushDist, 51.3294);  // cm：距球超过此值不冲（就近补）
+// 门前补射触发区（run_swarm）：只补贴门线的漏球
+TUNABLE(kReboundZoneLo, 30.0);   // cm：离对方门线 >= 此值才冲（低于此值球太深门区，门外等二点）
+TUNABLE(kReboundZoneHi, 40.0);   // cm：离对方门线 < 此值才冲（更远的慢球交给别人）
+TUNABLE(kReboundMinSpeed, 0.5);  // cm/帧：球速低于此值视为停球，不冲（保留门外等二点，防门区停球误冲）
+TUNABLE(kReboundRushDepth, 30.0);  // cm：冲的目标点越过球多深（推球板在机身前 ~7.5cm，20cm 会把球推到
+                                   //   离门线还差 ~7cm 处停住进不去；加深到 30 才够把球推过门线）
 TUNABLE(kMaxShootPushes, 1);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
 // 净开口小于此角(度)就宁可先拐进中路：边路看门只有 12° 上下，中路有 67°
 TUNABLE(kCorridorShotOpen, 12.0);
@@ -1903,6 +1909,26 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
     if (ctx.dist_our_goal(bx) < kSwarmOwnGuard) return false;
 
     if (near_opp_box(ctx, bx, by)) {
+        // 门前补射：球贴对方门线 kReboundZoneLo~kReboundZoneHi cm 且还在滚（门将刚扑出的反弹球）
+        //   → 负责这半边的队员朝门穿球补一脚；离门更远的慢球 / 门区内停球 → 走下方「门外等二点」
+        //   （交给别人 + 防 2+ 人门区判点球）
+        const double bspeed = std::hypot(wm.ball.vx, wm.ball.vy);
+        const double dg = ctx.dist_opp_goal(bx);
+        if (bspeed > kReboundMinSpeed && bspeed < kReboundRushSpeed &&
+            (by - 90.0) * lane >= 0.0 && dg >= kReboundZoneLo && dg < kReboundZoneHi) {
+            double dx = ctx.opp_goal_x() - bx, dy = 90.0 - by;
+            double len = std::hypot(dx, dy);
+            if (len > 1e-6) { dx /= len; dy /= len; }
+            motion::position(wm.home[id], bx + dx * kReboundRushDepth, by + dy * kReboundRushDepth, motion::TM_PASS);
+#ifdef SIMURO5_HNNU_TRACE
+            { static FILE *fp = nullptr; static long n = 0;
+              if (!fp) fp = std::fopen("C:\\Strategy\\rebound_trace.csv", "a");
+              if (fp) { std::fprintf(fp, "%ld,%.1f,%.1f,%.1f,%d,%.1f\n",
+                  n++, bx, by, bspeed, id, lane); std::fflush(fp); } }
+#endif
+            TRACE_MARK(wm.home[id]);
+            return true;
+        }
         swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);  TRACE_MARK(wm.home[id]);
         return true;
     }

@@ -93,10 +93,9 @@ void SituationModule::update_stand_points(WorldModel &wm) {
         mx = clamp(110.0 + (bx - 110.0) * 0.5, 15.0, 205.0);
         my = clamp(by - 40.0, 20.0, 160.0);
         if (in_opp_penalty_area(ctx, mx, my)) mx = opp_box_edge;
-        // 门前捡漏：球进对方罚球区或门线 kTapInZone cm 内时，assist 不再撤到禁区外沿，
-        //   改蹲门前正面（离门 kTapInDepth）当捡漏点，y 死站门中心接横传/回做
-        //   （不跟着球上下偏——球在底角时偏三成会把 assist 卡在球和门之间半吊子，够不着球也接不到横传）
-        //   尾随位不撤：它正是回做要用的那个接应点
+        // 门前捡漏（补射点）：球进对方罚球区或门线 kTapInZone cm 内时，assist 不再撤到禁区外沿，
+        //   改蹲门前正面（离门 kTapInDepth）当补射点，y 死站门中心接横传/回做
+        //   （"跟门将反着站"已被真机否定：球反弹落点与门将站位无强相关，门前贴球 31.8%→0%，故回滚）
         if (!trail && (in_opp_penalty_area(ctx, bx, by) || ctx.dist_opp_goal(bx) < kTapInZone)) {
             ax = ctx.opp_goal_x() - ad * kTapInDepth;
             ay = 90.0;
