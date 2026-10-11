@@ -231,7 +231,8 @@ bool pass_opponent_arrives_first(const WorldModel &wm) {
     return opponent_arrives_first_for_target(wm, task.receiver_id, task.rx, task.ry);
 }
 
-PassPlan plan_pass(const WorldModel &wm, int passer_id) {
+static PassPlan plan_pass_impl(const WorldModel &wm, int passer_id, int receiver_filter,
+                               double max_receiver_move = -1.0) {
     PassPlan plan{};
     if (passer_id < 1 || passer_id >= PLAYERS_PER_SIDE) return plan;
     const TeamContext &ctx = wm.ctx;
@@ -242,6 +243,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
 
     int best = -1;
     double best_score = 1e9;
+    double best_move = 1e9;
     double best_tx = 0, best_ty = 0;
 
     const double local_offsets[5][2] = {
@@ -251,6 +253,7 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
 
     for (int id = 1; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
+        if (receiver_filter >= 1 && id != receiver_filter) continue;
 
         // 基准点：优先角色站位锚点，否则本体坐标
         double base_x = wm.home[id].x, base_y = wm.home[id].y;
@@ -288,6 +291,10 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
             if (route_blocked(wm, px, py, tx, ty)) continue;
             if (!ordinary_pass_target_safe(wm, tx, ty)) continue;
             if (opponent_arrives_first_for_target(wm, id, tx, ty)) continue;
+            const double receiver_move = dist(wm.home[id].x, wm.home[id].y, tx, ty);
+            if (max_receiver_move >= 0.0 &&
+                (receiver_move > max_receiver_move ||
+                 route_blocked(wm, wm.home[id].x, wm.home[id].y, tx, ty))) continue;
 
             double threat = count_near_opponent(wm, tx, ty);
             int front_threat = count_front_opponent(wm, tx, ty, ad);
@@ -305,8 +312,12 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
             score += spd_threat * SPEED_THREAT_W;
             score += ordinary_receiver_score_delta(wm, id, tx, ty);
             score += ORDINARY_ANCHOR_DEVIATION_W * dist(center_x, center_y, tx, ty);
-            if (score < best_score) {
+            if ((max_receiver_move < 0.0 && score < best_score) ||
+                (max_receiver_move >= 0.0 &&
+                 (receiver_move < best_move - 1e-6 ||
+                  (std::fabs(receiver_move - best_move) <= 1e-6 && score < best_score)))) {
                 best_score = score;
+                best_move = receiver_move;
                 best = id;
                 best_tx = tx;
                 best_ty = ty;
@@ -323,6 +334,132 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     plan.target_x = best_tx;
     plan.target_y = best_ty;
     return plan;
+}
+
+PassPlan plan_pass(const WorldModel &wm, int passer_id) {
+    return plan_pass_impl(wm, passer_id, -1);
+}
+
+// 临时职责必须与当前首段任务绑定；第二段重新创建后不能沿用旧目标。
+static bool third_man_task_matches(const WorldModel &wm, const ThirdManSupport &support) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    return support.active && task.active && task.phase != CoopPassPhase::Received &&
+           wm.runtime_phase == RuntimePhase::Running && wm.possession != Possession::Opponent &&
+           task.passer_id >= 1 && task.passer_id < PLAYERS_PER_SIDE &&
+           task.receiver_id >= 1 && task.receiver_id < PLAYERS_PER_SIDE &&
+           task.passer_id != task.receiver_id && wm.active_id == task.passer_id &&
+           wm.role[task.passer_id] == ROLE_ACTIVE &&
+           support.first_passer_id == task.passer_id &&
+           support.first_receiver_id == task.receiver_id &&
+           support.first_rx == task.rx && support.first_ry == task.ry &&
+           support.task_created == wm.coop_stats.created;
+}
+
+static bool third_man_runner_eligible(const WorldModel &wm, int id) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (id < 1 || id >= PLAYERS_PER_SIDE || id == task.passer_id ||
+        id == task.receiver_id || id == wm.active_id ||
+        id == wm.presser_id || id == wm.sweeper_id || id == wm.stealer_id ||
+        wm.ga_cooldown[id] > 0 || wm.ga_overstay[id] >= 15 ||
+        in_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) ||
+        in_opp_goal_area(wm.ctx, wm.home[id].x, wm.home[id].y) ||
+        (wm.mark_assign_valid && wm.mark_assign[id] >= 0)) return false;
+    const int role = wm.role[id];
+    if (role == ROLE_ASSIST || role == ROLE_MIDFIELD) return true;
+    return role == ROLE_PASSIVE && wm.team_state == TS_ATTACK &&
+           wm.possession == Possession::Ours;
+}
+
+// 球飞行短暂成为 Loose 时保留计划；如正常角色已需回防，本帧交还控制权。
+static bool third_man_defense_priority(const WorldModel &wm) {
+    return (wm.threat_level > 0.3 || wm.no_possession_frames >= 2) &&
+           wm.counter_attack_frames <= 0;
+}
+
+static bool third_man_target_safe(const WorldModel &projected, int passer_id, int runner_id,
+                                  double tx, double ty) {
+    const double d = dist(projected.home[passer_id].x, projected.home[passer_id].y, tx, ty);
+    return std::isfinite(d) && d > PASS_MIN_DIST && d < PASS_MAX_DIST &&
+           !route_blocked(projected, projected.ball.x, projected.ball.y, tx, ty) &&
+           !route_blocked(projected, projected.home[runner_id].x,
+                          projected.home[runner_id].y, tx, ty) &&
+           ordinary_pass_target_safe(projected, tx, ty) &&
+           !opponent_arrives_first_for_target(projected, runner_id, tx, ty);
+}
+
+bool third_man_support_ready(const WorldModel &wm, int runner_id) {
+    const ThirdManSupport &support = wm.third_man_support;
+    return third_man_task_matches(wm, support) && support.runner_id == runner_id &&
+           third_man_runner_eligible(wm, runner_id) && !third_man_defense_priority(wm);
+}
+
+void update_third_man_support(WorldModel &wm) {
+    ThirdManSupport &support = wm.third_man_support;
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.phase == CoopPassPhase::Received ||
+        wm.runtime_phase != RuntimePhase::Running || wm.possession == Possession::Opponent ||
+        task.frames_left <= 0 || task.passer_id < 1 || task.passer_id >= PLAYERS_PER_SIDE ||
+        task.receiver_id < 1 || task.receiver_id >= PLAYERS_PER_SIDE ||
+        task.passer_id == task.receiver_id || wm.active_id != task.passer_id ||
+        wm.role[task.passer_id] != ROLE_ACTIVE) {
+        support = {};
+        return;
+    }
+    if (support.active && !third_man_task_matches(wm, support)) support = {};
+
+    // Preparing 还需等 B 就位；Receiving 只剩球到锁点的飞行时间。
+    const double ball_eta = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
+    const double receiver_eta = dist(wm.home[task.receiver_id].x, wm.home[task.receiver_id].y,
+                                     task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double estimated = ball_eta + RECEIVER_READY_TOLERANCE +
+                             (task.phase == CoopPassPhase::Preparing ? receiver_eta : 0.0);
+    const double available = std::min(static_cast<double>(task.frames_left), estimated);
+    if (!std::isfinite(available) || available <= 0.0 ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry)) {
+        support = {};
+        return;
+    }
+
+    WorldModel projected = wm;
+    projected.ball.x = task.rx; projected.ball.y = task.ry;
+    projected.ball.vx = projected.ball.vy = 0.0;
+    projected.home[task.receiver_id].x = task.rx;
+    projected.home[task.receiver_id].y = task.ry;
+    if (support.active && third_man_runner_eligible(wm, support.runner_id) &&
+        third_man_target_safe(projected, task.receiver_id, support.runner_id,
+                              support.target_x, support.target_y) &&
+        dist(wm.home[support.runner_id].x, wm.home[support.runner_id].y,
+             support.target_x, support.target_y) <= available * RECEIVER_READY_SPEED) {
+        support.available_frames = available;
+        return;
+    }
+    support = {};
+    if (third_man_defense_priority(wm)) return;
+
+    double best_move = 1e9, best_depth = -1e9;
+    for (int id = 1; id < PLAYERS_PER_SIDE; ++id) {
+        if (!third_man_runner_eligible(wm, id)) continue;
+        const PassPlan point = plan_pass_impl(projected, task.receiver_id, id,
+                                             available * RECEIVER_READY_SPEED);
+        if (!point.viable ||
+            !third_man_target_safe(projected, task.receiver_id, id,
+                                   point.target_x, point.target_y)) continue;
+        const double move = dist(wm.home[id].x, wm.home[id].y, point.target_x, point.target_y);
+        if (!std::isfinite(move) || move > available * RECEIVER_READY_SPEED) continue;
+        const double depth = wm.ctx.dist_our_goal(point.target_x);
+        if (move < best_move - 1e-6 ||
+            (std::fabs(move - best_move) <= 1e-6 && depth > best_depth)) {
+            best_move = move; best_depth = depth;
+            support.active = true;
+            support.runner_id = id;
+            support.first_passer_id = task.passer_id;
+            support.first_receiver_id = task.receiver_id;
+            support.first_rx = task.rx; support.first_ry = task.ry;
+            support.target_x = point.target_x; support.target_y = point.target_y;
+            support.available_frames = available;
+            support.task_created = wm.coop_stats.created;
+        }
+    }
 }
 
 CoopPass plan_coop_pass(const WorldModel &wm, int passer_id) {

@@ -1,5 +1,6 @@
 #include "simuro5/strategy.hpp"
 #include "simuro5/roles.hpp"
+#include "simuro5/pass.hpp"
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/defense.hpp"
@@ -75,6 +76,9 @@ void Strategy::run(WorldModel &wm) {
 
     steal_decide(wm);
 
+    // 只借用当前首段任务的锁点；第三人的运动职责不改变传球任务。
+    update_third_man_support(wm);
+
     // 5. 按角色执行；冷却期内仍在对方门区则撤出并跳过角色函数（防抖振卡区）
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
         if (wm.role[i] == ROLE_GOALIE) { run_goalie(wm, i); continue; }
@@ -106,6 +110,11 @@ void Strategy::run(WorldModel &wm) {
         }
         if (i == wm.presser_id && !pass_task_controls_robot(wm, i)) {
             run_press(wm, i); continue;
+        }
+        if (third_man_support_ready(wm, i)) {
+            motion::position(wm.home[i], wm.third_man_support.target_x,
+                             wm.third_man_support.target_y);
+            continue;
         }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
@@ -146,6 +155,7 @@ void Strategy::run(WorldModel &wm) {
     enforce_own_penalty_count(wm);
     cancel_unsafe_coop_pass(wm);
     ra_.complete_pass_handoff(wm);
+    if (!wm.coop_pass_task.active) wm.third_man_support = {};
 }
 
 // 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm

@@ -14,6 +14,10 @@ struct PassPlan {
 
 PassPlan plan_pass(const WorldModel &wm, int passer_id);
 
+// 首段任务有效时更新第三人临时跑位；派发前复查任务与防守优先级。
+void update_third_man_support(WorldModel &wm);
+bool third_man_support_ready(const WorldModel &wm, int runner_id);
+
 // 接球人能否在球到达后容差（帧）内赶到锁定点
 bool pass_receiver_ready(const WorldModel &wm);
 

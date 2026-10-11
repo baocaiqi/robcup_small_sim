@@ -6215,6 +6215,244 @@ static int test_second_pass_after_handoff() {
     return 0;
 }
 
+// 第三人只提前移动；两段任务均须经 Strategy 派发、真实出球和连续接稳。
+static int test_third_man_chain() {
+    auto make_scene = [](int chain) {
+        const int first_passer = chain == 0 ? 1 : 3;
+        const int first_receiver = chain == 0 ? 2 : 4;
+        const int third = chain == 0 ? 3 : 1;
+        WorldModel wm = handoff_scene(first_passer, first_receiver,
+                                      chain == 0 ? PassTaskKind::Ordinary : PassTaskKind::Coop);
+        if (chain == 0) std::swap(wm.role[2], wm.role[3]);
+        else std::swap(wm.role[1], wm.role[2]);
+        wm.ball.x = 131.0; wm.ball.y = 90.0; wm.ball.vx = 6.0; wm.ball.vy = 0.0;
+        wm.home[first_passer].x = 115.0; wm.home[first_passer].y = 90.0;
+        wm.home[first_receiver].x = 140.0; wm.home[first_receiver].y = 90.0;
+        wm.home[third].x = 70.0; wm.home[third].y = 130.0;
+        for (int id = 1; id < PLAYERS_PER_SIDE; ++id)
+            if (id != first_passer && id != first_receiver && id != third) {
+                wm.home[id].x = 190.0; wm.home[id].y = 30.0;
+            }
+        wm.opp[0].x = 100.0; wm.opp[0].y = 90.0;
+        wm.coop_pass_task.rx = 130.0; wm.coop_pass_task.ry = 90.0;
+        wm.coop_pass_task.push_ball_x = 123.0; wm.coop_pass_task.push_ball_y = 90.0;
+        wm.coop_stats.created = 1;
+        return wm;
+    };
+    for (int chain = 0; chain < 2; ++chain) {
+        const int first_passer = chain == 0 ? 1 : 3;
+        const int first_receiver = chain == 0 ? 2 : 4;
+        const int third = chain == 0 ? 3 : 1;
+        WorldModel wm = make_scene(chain);
+        const RobotState third_initial = wm.home[third];
+        Strategy strategy;
+        strategy.run(wm);
+        const ThirdManSupport support = wm.third_man_support;
+        const double move = dist(third_initial.x, third_initial.y, support.target_x, support.target_y);
+        const double original_move = dist(third_initial.x, third_initial.y, wm.assist_x, wm.assist_y);
+        RobotState expected = third_initial;
+        motion::position(expected, support.target_x, support.target_y);
+        int active_count = 0;
+        for (int id = 1; id < PLAYERS_PER_SIDE; ++id) active_count += wm.role[id] == ROLE_ACTIVE;
+        if (!support.active || support.runner_id != third || support.first_passer_id != first_passer ||
+            support.first_receiver_id != first_receiver ||
+            move > support.available_frames * 2.0 || move >= original_move ||
+            !same_drive_command(wm.home[third], expected) ||
+            wm.coop_pass_task.phase != CoopPassPhase::Receiving ||
+            wm.coop_pass_task.passer_id != first_passer ||
+            wm.coop_pass_task.receiver_id != first_receiver ||
+            wm.coop_pass_task.rx != 130.0 || wm.coop_pass_task.ry != 90.0 ||
+            wm.active_id != first_passer || active_count != 1) {
+            printf("FAIL: third-man first leg chain=%d runner=%d move=%.1f ordinary=%.1f available=%.1f phase=%d\n",
+                   chain, support.runner_id, move, original_move, support.available_frames,
+                   (int)wm.coop_pass_task.phase); return 1;
+        }
+        printf("third-man reach chain=%d start=(%.1f,%.1f) target=(%.1f,%.1f) move=%.1fcm available=%.1ff ordinary=%.1fcm\n",
+               chain, third_initial.x, third_initial.y, support.target_x, support.target_y,
+               move, support.available_frames, original_move);
+        wm.home[third].x = support.target_x; wm.home[third].y = support.target_y;
+        strategy.run(wm);
+        if (!wm.third_man_support.active || wm.third_man_support.runner_id != third ||
+            wm.third_man_support.target_x != support.target_x ||
+            wm.third_man_support.target_y != support.target_y ||
+            wm.coop_pass_task.phase != CoopPassPhase::Receiving) {
+            printf("FAIL: third-man target oscillated during first receiving chain=%d\n", chain); return 1;
+        }
+        wm.ball.x = 130.0; wm.ball.vx = 0.0; wm.home[first_receiver].x = 130.0;
+        strategy.run(wm); strategy.run(wm);
+        if (wm.active_id != first_receiver || wm.coop_pass_task.active ||
+            wm.third_man_support.active || wm.coop_stats.received != 1) {
+            printf("FAIL: third-man first reception chain=%d active=%d\n", chain, wm.active_id); return 1;
+        }
+        strategy.run(wm); strategy.run(wm);
+        if (wm.coop_pass_task.active || wm.coop_ball_control.active || wm.third_man_support.active) {
+            printf("FAIL: third-man created second task in control frame chain=%d\n", chain); return 1;
+        }
+        strategy.run(wm);
+        const CoopPassTask second = wm.coop_pass_task;
+        if (!second.active || second.passer_id != first_receiver || second.receiver_id != third ||
+            second.phase != CoopPassPhase::Preparing ||
+            (second.rx == 130.0 && second.ry == 90.0) || wm.third_man_support.active) {
+            printf("FAIL: third-man second task chain=%d passer=%d receiver=%d\n",
+                   chain, second.passer_id, second.receiver_id); return 1;
+        }
+        strategy.run(wm);
+        auto &task = wm.coop_pass_task;
+        const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+        const double dx = (task.rx - wm.ball.x) / len, dy = (task.ry - wm.ball.y) / len;
+        task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
+        task.push_dir_x = dx; task.push_dir_y = dy;
+        wm.home[first_receiver].x = wm.ball.x - dx * 8.0;
+        wm.home[first_receiver].y = wm.ball.y - dy * 8.0;
+        wm.ball.x += dx * 8.0; wm.ball.y += dy * 8.0;
+        wm.ball.vx = dx * 6.0; wm.ball.vy = dy * 6.0;
+        strategy.run(wm);
+        if (!task.active || task.phase != CoopPassPhase::Receiving || wm.coop_stats.released != 2) {
+            printf("FAIL: third-man second Release chain=%d\n", chain); return 1;
+        }
+        wm.ball.x = task.rx; wm.ball.y = task.ry; wm.ball.vx = wm.ball.vy = 0.0;
+        wm.home[third].x = task.rx; wm.home[third].y = task.ry;
+        strategy.run(wm); strategy.run(wm);
+        active_count = 0;
+        for (int id = 1; id < PLAYERS_PER_SIDE; ++id) active_count += wm.role[id] == ROLE_ACTIVE;
+        if (wm.active_id != third || task.active || wm.coop_stats.received != 2 ||
+            active_count != 1 || wm.third_man_support.active) {
+            printf("FAIL: third-man second reception chain=%d active=%d received=%lu\n",
+                   chain, wm.active_id, wm.coop_stats.received); return 1;
+        }
+    }
+    {
+        WorldModel near_point = make_scene(0);
+        near_point.home[3].x = 95.0;
+        near_point.coop_pass_task.frames_left = 4;
+        Strategy().run(near_point);
+        const ThirdManSupport &support = near_point.third_man_support;
+        if (!support.active || support.runner_id != 3 ||
+            dist(95.0, 130.0, support.target_x, support.target_y) >
+                support.available_frames * 2.0) {
+            printf("FAIL: nearby safe local point lost behind distant high-score point\n"); return 1;
+        }
+    }
+    {
+        WorldModel no_runner = make_scene(0);
+        no_runner.home[3].x = 205.0; no_runner.home[3].y = 160.0;
+        const RobotState initial = no_runner.home[3];
+        Strategy strategy;
+        strategy.run(no_runner);
+        WorldModel ordinary = no_runner;
+        ordinary.home[3] = initial;
+        run_assist(ordinary, 3);
+        if (no_runner.third_man_support.active || !no_runner.coop_pass_task.active ||
+            !same_drive_command(no_runner.home[3], ordinary.home[3])) {
+            printf("FAIL: no reachable third man did not use ordinary assist\n"); return 1;
+        }
+    }
+    {
+        WorldModel neutral = make_scene(0);
+        Strategy strategy;
+        strategy.run(neutral);
+        const ThirdManSupport first = neutral.third_man_support;
+        neutral.ball.x = 160.0; neutral.ball.vx = -4.0;
+        strategy.run(neutral);
+        if (neutral.possession != Possession::Loose || !neutral.coop_pass_task.active ||
+            !neutral.third_man_support.active || neutral.third_man_support.runner_id != first.runner_id) {
+            printf("FAIL: neutral flight cancelled valid third man possession=%d task=%d support=%d runner=%d first=%d threat=%.1f active=%d\n",
+                   (int)neutral.possession, (int)neutral.coop_pass_task.active,
+                   (int)neutral.third_man_support.active, neutral.third_man_support.runner_id,
+                   first.runner_id, neutral.threat_level, neutral.active_id); return 1;
+        }
+    }
+    {
+        WorldModel blocked = make_scene(0);
+        Strategy strategy;
+        strategy.run(blocked);
+        const double old_x = blocked.third_man_support.target_x;
+        const double old_y = blocked.third_man_support.target_y;
+        blocked.opp[0].x = old_x; blocked.opp[0].y = old_y;
+        strategy.run(blocked);
+        if (!blocked.coop_pass_task.active ||
+            (blocked.third_man_support.active &&
+             dist(blocked.third_man_support.target_x, blocked.third_man_support.target_y,
+                  old_x, old_y) < 20.0)) {
+            printf("FAIL: blocked third-man point was retained\n"); return 1;
+        }
+    }
+    for (int mode = 0; mode < 4; ++mode) {
+        WorldModel cancelled = make_scene(0);
+        Strategy strategy;
+        if (mode == 0) cancelled.coop_pass_task.observing_push = false;
+        strategy.run(cancelled);
+        if (mode == 0 && (cancelled.coop_pass_task.phase != CoopPassPhase::Preparing ||
+                          cancelled.coop_stats.released != 0 ||
+                          !cancelled.third_man_support.active)) {
+            printf("FAIL: unrelased first pass advanced\n"); return 1;
+        }
+        if (mode == 1) {
+            cancelled.opp[0].x = cancelled.ball.x;
+            cancelled.opp[0].y = cancelled.ball.y;
+        } else if (mode == 2) {
+            cancelled.coop_pass_task.frames_left = 0;
+        } else if (mode == 3) {
+            cancelled.runtime_phase = RuntimePhase::RestartSetup;
+        }
+        if (mode == 0) cancelled.runtime_phase = RuntimePhase::RestartSetup;
+        strategy.run(cancelled);
+        if (cancelled.third_man_support.active || cancelled.active_id == 2 ||
+            (cancelled.coop_pass_task.active &&
+             cancelled.coop_pass_task.passer_id != 1)) {
+            printf("FAIL: interrupted third-man plan survived mode=%d\n", mode); return 1;
+        }
+    }
+    {
+        WorldModel shot = make_scene(0);
+        Strategy strategy;
+        strategy.run(shot);
+        shot.home[3].x = shot.third_man_support.target_x;
+        shot.home[3].y = shot.third_man_support.target_y;
+        shot.ball.x = 130.0; shot.ball.vx = 0.0; shot.home[2].x = 130.0;
+        strategy.run(shot); strategy.run(shot);
+        shot.ball.x = 60.0; shot.home[2].x = 60.0;
+        strategy.run(shot); strategy.run(shot);
+        if (shot.coop_ball_control.active || !plan_shoot(shot, 2).viable) {
+            printf("FAIL: shot-after-handoff fixture lacks settled shot\n"); return 1;
+        }
+        strategy.run(shot);
+        if (shot.coop_pass_task.active || shot.third_man_support.active || shot.active_id != 2) {
+            printf("FAIL: shot after handoff was forced into second pass\n"); return 1;
+        }
+    }
+    {
+        WorldModel defense = make_scene(0);
+        Strategy strategy;
+        strategy.run(defense);
+        defense.ga_cooldown[3] = 3;
+        strategy.run(defense);
+        if (defense.third_man_support.active && defense.third_man_support.runner_id == 3) {
+            printf("FAIL: third man kept robot with goal-area discipline\n"); return 1;
+        }
+    }
+    {
+        WorldModel press = make_scene(0);
+        Strategy strategy;
+        strategy.run(press);
+        press.ball.x = 100.0; press.ball.vx = 0.0;
+        press.home[1].x = 150.0; press.home[2].x = 130.0;
+        press.opp[0].x = 205.0; press.opp[0].y = 90.0;
+        const RobotState initial = press.home[3];
+        strategy.run(press);
+        WorldModel expected = press;
+        expected.home[3] = initial;
+        run_press(expected, 3);
+        if (press.presser_id != 3 || !press.coop_pass_task.active ||
+            !same_drive_command(press.home[3], expected.home[3])) {
+            printf("FAIL: third man overrode required loose-ball presser id=%d task=%d\n",
+                   press.presser_id, (int)press.coop_pass_task.active); return 1;
+        }
+    }
+    printf("third-man chain: OK (1->2->3 and 3->4->1, both Release and settle)\n");
+    return 0;
+}
+
 static WorldModel p0_press_task_scene() {
     WorldModel wm = possession_pass_scene();
     wm.coop_pass_task.kind = PassTaskKind::Ordinary;
@@ -6606,17 +6844,24 @@ int main(int argc, char **argv) {
     bool p0_control_only = false;
     bool dynamic_pass_only = false;
     bool second_pass_only = false;
+    bool third_man_only = false;
 // --params <文件>：注入参数后再跑全部测试（自动调参的行为护栏）
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
         if (strcmp(argv[i], "--p0-control-only") == 0) p0_control_only = true;
         if (strcmp(argv[i], "--dynamic-pass-only") == 0) dynamic_pass_only = true;
         if (strcmp(argv[i], "--second-pass-only") == 0) second_pass_only = true;
+        if (strcmp(argv[i], "--third-man-only") == 0) third_man_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
+    }
+    if (third_man_only) {
+        rc |= test_third_man_chain();
+        printf(rc ? "=== THIRD MAN TEST FAILED ===\n" : "=== THIRD MAN TEST PASSED ===\n");
+        return rc;
     }
     if (second_pass_only) {
         rc |= test_second_pass_after_handoff();
@@ -6704,6 +6949,7 @@ int main(int argc, char **argv) {
     }
     rc |= test_strategy_run(300);
     rc |= test_second_pass_after_handoff();
+    rc |= test_third_man_chain();
     rc |= test_dynamic_pass_actors();
     rc |= test_pass_handoff();
     rc |= test_formation();
