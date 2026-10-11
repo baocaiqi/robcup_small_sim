@@ -93,9 +93,21 @@ struct CoopBallControl {
     bool owner_carried_once = false;  // 新主攻先执行一帧接球控球，再恢复普通决策
 };
 
+// 只服务当前一段传球的无球预跑位；不锁定下一次传球人或接球人。
+struct ThirdManSupport {
+    bool active = false;
+    int runner_id = -1;
+    int first_passer_id = -1, first_receiver_id = -1;
+    double first_rx = 0.0, first_ry = 0.0;
+    double target_x = 0.0, target_y = 0.0;
+    double available_frames = 0.0;
+    unsigned long task_created = 0;
+};
+
 struct WorldModel {
     CoopPassTask coop_pass_task;
     CoopBallControl coop_ball_control;
+    ThirdManSupport third_man_support;
     CoopPassStats coop_stats;
     // 可为空；仿真器可装只读记录器，比赛 DLL 不写文件
     void (*coop_observer)(const WorldModel &, const char *, CoopOutcome) = nullptr;
