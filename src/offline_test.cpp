@@ -6565,8 +6565,10 @@ static int test_pass_handoff() {
                 set_param("roles.kActDynamic", 0.0);
                 strategy.run(wm);
                 reset_params();
-                if (!wm.coop_ball_control.active || wm.active_id != receiver) {
-                    printf("FAIL: role freeze cancelled valid receiver control\n"); return 1;
+                if (wm.active_id != receiver || wm.coop_stats.control_exits[(int)CoopOutcome::InvalidTarget] != 0 ||
+                    (wm.coop_ball_control.active && !wm.coop_ball_control.owner_carried_once) ||
+                    (!wm.coop_ball_control.active && wm.coop_stats.control_exits[(int)CoopOutcome::Success] != 1)) {
+                    printf("FAIL: role freeze invalidated receiver control\n"); return 1;
                 }
             }
         }
@@ -6598,6 +6600,132 @@ static int test_pass_handoff() {
         }
     }
     printf("pass handoff: OK (1->2 and 3->4, Ordinary/Coop; no early/failed/timeout/opponent/restart switch)\n");
+    return 0;
+}
+
+// 首段真实出球/接稳经 Strategy 派发；次段必须由新 ACTIVE 重新创建并执行。
+static int test_second_pass_after_handoff() {
+    for (PassTaskKind first_kind : {PassTaskKind::Ordinary, PassTaskKind::Coop}) {
+        WorldModel wm = handoff_scene(1, 2, first_kind);
+        std::swap(wm.role[2], wm.role[3]);  // 让第三人持有前场接应角色
+        wm.ball.x = 131.0; wm.ball.y = 90.0; wm.ball.vx = 6.0; wm.ball.vy = 0.0;
+        wm.home[1].x = 115.0; wm.home[1].y = 90.0;
+        wm.home[2].x = 140.0; wm.home[2].y = 90.0;
+        wm.home[3].x = 95.0; wm.home[3].y = 130.0;
+        wm.home[4].x = 190.0; wm.home[4].y = 30.0;
+        wm.opp[0].x = 100.0; wm.opp[0].y = 90.0;
+        wm.coop_pass_task.rx = 130.0; wm.coop_pass_task.ry = 90.0;
+        wm.coop_pass_task.push_ball_x = 123.0; wm.coop_pass_task.push_ball_y = 90.0;
+        wm.coop_stats.created = 1;
+        Strategy strategy;
+        strategy.run(wm);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving ||
+            wm.coop_stats.released != 1 || wm.active_id != 1) {
+            printf("FAIL: second-pass first Release kind=%d phase=%d released=%lu\n",
+                   (int)first_kind, (int)wm.coop_pass_task.phase, wm.coop_stats.released); return 1;
+        }
+        wm.ball.x = 130.0; wm.ball.vx = 0.0; wm.home[2].x = 130.0;
+        strategy.run(wm); strategy.run(wm);
+        if (wm.active_id != 2 || wm.coop_pass_task.active || !wm.coop_ball_control.active ||
+            wm.coop_stats.received != 1) {
+            printf("FAIL: second-pass first reception kind=%d active=%d\n", (int)first_kind, wm.active_id); return 1;
+        }
+        const PassPlan fresh = plan_pass(wm, 2);
+        if (!fresh.viable || fresh.receiver_id != 3) {
+            printf("FAIL: second-pass fixture lacks fresh 2->3 plan kind=%d receiver=%d\n",
+                   (int)first_kind, fresh.receiver_id); return 1;
+        }
+        strategy.run(wm);
+        if (!wm.coop_ball_control.active || !wm.coop_ball_control.owner_carried_once ||
+            wm.coop_pass_task.active) {
+            printf("FAIL: second-pass task created in first owner-control frame\n"); return 1;
+        }
+        strategy.run(wm);
+        if (wm.coop_ball_control.active || wm.coop_pass_task.active ||
+            wm.coop_stats.control_exits[(int)CoopOutcome::Success] != 1) {
+            printf("FAIL: second-pass task created in control-settlement frame\n"); return 1;
+        }
+        strategy.run(wm);
+        const CoopPassTask second = wm.coop_pass_task;
+        if (!second.active || second.passer_id != 2 || second.receiver_id != 3 ||
+            second.phase != CoopPassPhase::Preparing || wm.active_id != 2 ||
+            (second.rx == 130.0 && second.ry == 90.0)) {
+            const ShootPlan shot = plan_shoot(wm, 2);
+            const CoopPass combo = plan_coop_pass(wm, 2);
+            printf("FAIL: second-pass task not recreated kind=%d active=%d passer=%d receiver=%d control=%d shot=%d quality=%.2f combo=%d score=%.2f push=%d ball=(%.1f,%.1f)\n",
+                   (int)first_kind, wm.active_id, second.passer_id, second.receiver_id,
+                   (int)wm.coop_ball_control.active, (int)shot.viable, shot.quality,
+                   (int)combo.viable, combo.score, wm.shoot_push_count, wm.ball.x, wm.ball.y); return 1;
+        }
+        const int left = second.frames_left;
+        strategy.run(wm);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.frames_left >= left ||
+            wm.coop_pass_task.passer_id != 2 || wm.coop_pass_task.receiver_id != 3 ||
+            wm.coop_stats.released != 1 || wm.coop_pass_task.phase != CoopPassPhase::Preparing) {
+            printf("FAIL: second-pass task did not execute kind=%d\n", (int)first_kind); return 1;
+        }
+        auto &task = wm.coop_pass_task;
+        const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+        const double dx = (task.rx - wm.ball.x) / len, dy = (task.ry - wm.ball.y) / len;
+        task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
+        task.push_dir_x = dx; task.push_dir_y = dy;
+        wm.home[2].x = wm.ball.x - dx * 8.0; wm.home[2].y = wm.ball.y - dy * 8.0;
+        wm.ball.x += dx * 8.0; wm.ball.y += dy * 8.0;
+        wm.ball.vx = dx * 6.0; wm.ball.vy = dy * 6.0;
+        strategy.run(wm);
+        if (!task.active || task.phase != CoopPassPhase::Receiving || wm.coop_stats.released != 2 ||
+            task.passer_id != 2 || task.receiver_id != 3) {
+            printf("FAIL: second pass lacks independent real Release kind=%d phase=%d released=%lu\n",
+                   (int)first_kind, (int)task.phase, wm.coop_stats.released); return 1;
+        }
+    }
+    WorldModel reverse = handoff_scene(3, 4, PassTaskKind::Ordinary);
+    reverse.home[1].x = 100.0; reverse.home[1].y = 110.0;
+    Strategy reverse_strategy;
+    reverse_strategy.run(reverse);
+    reverse.ball.x = 90.0; reverse.ball.vx = 0.0; reverse.home[4].x = 90.0;
+    reverse_strategy.run(reverse); reverse_strategy.run(reverse);
+    const PassPlan next = plan_pass(reverse, 4);
+    if (reverse.active_id != 4 || !next.viable || next.receiver_id != 1) {
+        printf("FAIL: 3->4 reception cannot replan 4->1 active=%d receiver=%d\n",
+               reverse.active_id, next.receiver_id); return 1;
+    }
+    for (int failure = 0; failure < 4; ++failure) {
+        WorldModel interrupted = handoff_scene(1, 2, PassTaskKind::Ordinary);
+        Strategy strategy;
+        if (failure == 0) interrupted.coop_pass_task.observing_push = false;
+        strategy.run(interrupted);
+        if (failure == 0) {
+            strategy.run(interrupted);
+        } else if (failure == 1) {
+            interrupted.coop_pass_task.frames_left = 0;
+            strategy.run(interrupted);
+        } else if (failure == 2) {
+            interrupted.opp[0].x = interrupted.ball.x;
+            interrupted.opp[0].y = interrupted.ball.y;
+            strategy.run(interrupted);
+        } else {
+            interrupted.runtime_phase = RuntimePhase::RestartSetup;
+            strategy.run(interrupted);
+        }
+        if (interrupted.active_id == 2 || interrupted.coop_ball_control.active ||
+            interrupted.coop_stats.received != 0 ||
+            (interrupted.coop_pass_task.active && interrupted.coop_pass_task.passer_id != 1)) {
+            printf("FAIL: interrupted first pass advanced to second case=%d\n", failure); return 1;
+        }
+    }
+    WorldModel lost = handoff_scene(1, 2, PassTaskKind::Ordinary);
+    Strategy lost_strategy;
+    lost_strategy.run(lost);
+    lost.ball.x = 90.0; lost.ball.vx = 0.0; lost.home[2].x = 90.0;
+    lost_strategy.run(lost); lost_strategy.run(lost);
+    lost.home[2].x = 115.0;
+    lost.opp[0].x = lost.ball.x; lost.opp[0].y = lost.ball.y;
+    lost_strategy.run(lost);
+    if (lost.coop_ball_control.active || lost.coop_pass_task.active || lost.coop_stats.created != 0) {
+        printf("FAIL: lost ball after handoff created a second pass\n"); return 1;
+    }
+    printf("second pass after handoff: OK (1->2->3 task and real Release; 3->4 can replan 4->1)\n");
     return 0;
 }
 
@@ -7034,16 +7162,23 @@ int main(int argc, char **argv) {
     bool coop_pass_only = false;
     bool p0_control_only = false;
     bool dynamic_pass_only = false;
+    bool second_pass_only = false;
 // --params <文件>：注入参数后再跑全部测试（自动调参的行为护栏）
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
         if (strcmp(argv[i], "--p0-control-only") == 0) p0_control_only = true;
         if (strcmp(argv[i], "--dynamic-pass-only") == 0) dynamic_pass_only = true;
+        if (strcmp(argv[i], "--second-pass-only") == 0) second_pass_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
+    }
+    if (second_pass_only) {
+        rc |= test_second_pass_after_handoff();
+        printf(rc ? "=== SECOND PASS TEST FAILED ===\n" : "=== SECOND PASS TEST PASSED ===\n");
+        return rc;
     }
     if (dynamic_pass_only) {
         rc |= test_dynamic_pass_actors();
@@ -7125,6 +7260,7 @@ int main(int argc, char **argv) {
         return rc;
     }
     rc |= test_strategy_run(300);
+    rc |= test_second_pass_after_handoff();
     rc |= test_dynamic_pass_actors();
     rc |= test_pass_handoff();
     rc |= test_formation();

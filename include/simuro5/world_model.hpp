@@ -90,6 +90,7 @@ struct CoopBallControl {
     int receiver_id = -1;
     int loose_frames = 0;
     bool handoff_pending = false;  // 接稳后帧末只交接一次
+    bool owner_carried_once = false;  // 新主攻先执行一帧接球控球，再恢复普通决策
 };
 
 struct WorldModel {
