@@ -25,6 +25,7 @@ GkTargetProbe g_gk_probe;
 void position(RobotState &r, double tx, double ty, TargetMode mode) {
     double dx = tx - r.x, dy = ty - r.y;
     double de = std::hypot(dx, dy);
+    r.tgt_x = tx; r.tgt_y = ty; r.tgt_mode = (int)mode;   // 记下本帧目标（门将重发用）
 #ifdef SIMURO5_GK_PROBE
     g_gk_probe.note(tx, ty);     // 先记：目标点本身就算是 NaN 也要看得见（否则探针显示 0 是假象）
 #endif

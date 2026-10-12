@@ -126,6 +126,9 @@ void Strategy::run(WorldModel &wm) {
         if (kZoneMode > 0.5 && wm.live_play && !wm.in_penalty_exec && wm.role[i] != ROLE_ACTIVE) {
             run_zone(wm, i); continue;
         }
+        // 重启抢球（roles.kRestartCharge，**默认关**：sim A/B 更差，见 roles.cpp 该处说明）：
+        //   球还钉在重启摆放点时，球后离球最近的那台直接穿球推出去，不走上层会左右摆的分支
+        if (restart_charge(wm, i)) continue;
         if (i == wm.presser_id) { run_press(wm, i); continue; }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
@@ -164,6 +167,7 @@ void Strategy::run(WorldModel &wm) {
     // 门区纪律：门区只能有门将；大禁区非门将最多 3 人（规则7.10.4 红线=4），超限顶离球最远
     enforce_own_goal_area(wm);
     enforce_own_penalty_count(wm);
+    enforce_teammate_spacing(wm);      // 须在防乌龙闸之前（可能把队友推开的方向正朝自家门）
     enforce_no_own_goal_touch(wm);
 }
 
@@ -206,6 +210,58 @@ void enforce_own_penalty_count(WorldModel &wm) {
     RobotState &r = wm.home[far_id];
     const double out_x = ctx.our_goal_x() + ctx.attack_dir() * (80.0 + kOwnBoxMarginOut);
     motion::position(r, out_x, clamp(r.y, 72.5, 107.5), motion::TM_PASS);
+}
+
+// ═══ 同队最小间距（2026-10-09）═══
+// 取证（sim_bench 3 局 72000 帧，`_dsh_session/now/` 四个脚本）：
+//   · 23.9% 的帧有我方两台车 <12cm（两车半径各 4cm，接触距离 8cm）；<10cm 占 7.8%
+//   · 贴住的连续段：中位 8 帧(0.2s)、p90 28 帧(0.7s)、最长 110 帧(2.75s)（黄位最长 6.88s）
+//   · 紧贴对里 77.6% 是"两车都在球的后方"（排队等推球），48.9% 两人都在球 40cm 内
+//   · 四人散布中位 62cm，而真机基线（docs/03）是 100~101cm
+// 根因：全仓唯一的同队间距纪律只作用于 situation.cpp 的三个防守锚点（两两 20cm），
+//   而争抢路径（run_swarm 的球后落点 / run_active 的准备点 / 护送 / 持球离场）全绕过它；
+//   move_avoiding 的障碍表里只有对手，自己人一个都没有。
+// 做法与防乌龙闸同源：把轮速拆成"平动 + 转动"，只往平动里加一个"背离队友"的分量，
+//   转动分量（vl 与 vr 之差）原样保留 ⇒ 照样能转身、能对准球，只是不再往队友身上挤。
+//   位移增量随重叠量线性消失（贴着阈值时为 0）⇒ 不会在门限上抖。
+// ⚠️ 不含 0 号门将（与 enforce_own_goal_area 一致）：门将有自己的门线闸，且大量测试断言它的轮速。
+// ⚠️ 纯侧向的推力不改（差速车横移不了）：那种"并排挤"交给 roles.cpp 的 run_swarm 错层处理。
+// ⚠️ 默认 0 = 关闭。2026-10-09 实测（6 种子×3 局的同种子对照见 docs/06 第 69 轮）：
+//   · 增益 6（温和）：<12cm 帧 23.03%→22.67%，几乎没用；
+//   · 增益 25（强）：反而更差，23.03%→24.38% —— 13cm 处就被全速推开 ⇒ 冲过头、被角色控制器
+//     拉回、再撞，变成"抖"；而且纯侧向（并排挤）的情况按构造它根本推不动（差速车横移不了）。
+//   所以不随构建生效；真机 A/B 时把 `strategy.kTeammateMinSep` 改成 14 再重编。
+TUNABLE(kTeammateMinSep, 0.0);    // cm：我方两车小于此距离就互相推开（0 = 整条关闭）
+TUNABLE(kTeammatePush, 6.0);      // 推开增益：轮速增量 = 重叠量(cm) × 本值（1cm/帧 ≈ 35 单位）
+
+void enforce_teammate_spacing(WorldModel &wm) {
+    if (kTeammateMinSep <= 0.0) return;
+    for (int a = 1; a < PLAYERS_PER_SIDE; ++a) {
+        RobotState &ra = wm.home[a];
+        if (!std::isfinite(ra.x) || !std::isfinite(ra.y)) continue;
+        for (int b = a + 1; b < PLAYERS_PER_SIDE; ++b) {
+            RobotState &rb = wm.home[b];
+            if (!std::isfinite(rb.x) || !std::isfinite(rb.y)) continue;
+            double dx = ra.x - rb.x, dy = ra.y - rb.y;
+            double d = std::hypot(dx, dy);
+            if (d >= kTeammateMinSep) continue;
+            if (d < 1e-6) { dx = 1.0; dy = 0.0; d = 1.0; }   // 完全重合：随便挑一个方向
+            const double ux = dx / d, uy = dy / d;
+            const double need = (kTeammateMinSep - d) * 0.5;  // 各让一半
+            // 只加平动：沿机头轴投影，正前方加、正后方减
+            auto push = [&](RobotState &r, double wx, double wy) {
+                const double fx = std::cos(r.rot * SIMURO5_PI / 180.0);
+                const double fy = std::sin(r.rot * SIMURO5_PI / 180.0);
+                const double c = wx * fx + wy * fy;
+                if (std::fabs(c) < 1e-9) return;              // 纯侧向：推不动，交给角色自己解决
+                const double add = std::copysign(need * kTeammatePush, c);
+                r.vl = clamp(r.vl + add, -motion::kMaxWheel, motion::kMaxWheel);
+                r.vr = clamp(r.vr + add, -motion::kMaxWheel, motion::kMaxWheel);
+            };
+            push(ra, ux, uy);        // a 背离 b
+            push(rb, -ux, -uy);      // b 背离 a
+        }
+    }
 }
 
 void Strategy::update_team_state(WorldModel &wm) {
@@ -289,6 +345,9 @@ TUNABLE(kPressStillSpeed, 1.0);
 TUNABLE(kForwardBonus, 0.6);
 TUNABLE(kForwardMax, 60.0);
 TUNABLE(kPressHysteresis, 15.0);
+// 后场散球归属（2026-10-10）：见 update_presser 里的说明。0 = 关闭（回到"只在前场派"）
+TUNABLE(kPressBackEnabled, 1.0);
+TUNABLE(kPressBackMinGoalDist, 35.0);   // cm：球离己方门线近于此就不派（交给门将）
 
 void Strategy::update_presser(WorldModel &wm) {
     int cur = wm.presser_id;
@@ -303,7 +362,14 @@ void Strategy::update_presser(WorldModel &wm) {
     double bx = wm.ball.x, by = wm.ball.y;
 
     bool front = (ctx.attack_dir() > 0) ? (bx > 110.0) : (bx < 110.0);
-    if (!front) return;
+    // 2026-10-10：后场也派一个人去抢「没人管」的散球。
+    //   真机 8 场 20 个失球取证：越线前 0.5 秒我方没有任何非门将在球 30cm 内占 **45%**；
+    //   其中 6~7 球是球从 70~190cm 外一路滚进自家门、两边都没人碰它。
+    //   原来 `if (!front) return;` —— 逼抢者**只在前场指派**，后场散球没有归属。
+    //   离门线太近（< kPressBackMinGoalDist）不派：那里交给门将和门区纪律（别抢门将的活）。
+    const bool back_loose = (kPressBackEnabled > 0.5) && !front &&
+                            ctx.dist_our_goal(bx) > kPressBackMinGoalDist;
+    if (!front && !back_loose) return;
 
     bool still = std::hypot(wm.ball.vx, wm.ball.vy) < kPressStillSpeed;
     if (!still) {

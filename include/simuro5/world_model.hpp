@@ -17,6 +17,10 @@ struct RobotState {
     double x = 0, y = 0;
     double rot = 0;
     double vl = 0, vr = 0;      // 差速轮速（仅己方有效）
+    // 本帧最后被命令的目标点（由 motion::position 写入）。用途：门将要"用新驱动律重发同一个目标"
+    //   —— 决策用旧口径算、驱动用新口径发（见 run_goalie）；顺带也是排障时最有用的一个字段。
+    double tgt_x = 0, tgt_y = 0;
+    int    tgt_mode = 0;        // motion::TargetMode（0=TM_STOP 1=TM_PASS）
 };
 
 struct BallState {
@@ -109,6 +113,11 @@ struct WorldModel {
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
+    // 门将上一帧位置（run_goalie 自己记）：用来量门将**真实**移动量（平台上报的 vl/vr 只是上一帧命令），
+    //   和认出"平台把门将瞬移回门口"（重新开球）。goalie_last_id=-1 表示还没有上一帧。
+    int    goalie_last_id = -1;
+    double goalie_last_x = 0.0, goalie_last_y = 0.0;
+    double goalie_moved = 0.0;    // 本帧量到的门将上一帧位移（cm/帧）
     bool we_have_ball = false;
 
     TeamState team_state = TS_DEFENSE;

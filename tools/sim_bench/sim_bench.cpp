@@ -279,6 +279,34 @@ static void traj_write_row(FILE *fp, const SimState &s) {
     fprintf(fp, ",%.2f,%.2f\n", s.bx, s.by);
 }
 
+// 逐帧目标点导出（诊断，2026-10-11）：--target-csv out.csv
+//   为什么需要：光看位置轨迹只能"猜"它在绕球；把每台车**本帧想去哪**(tgt_x/tgt_y)、
+//   用什么语义(tgt_mode) 和**这条指令来自哪一行源码**打出来，才能指认是哪条分支在绕。
+//   数据来自 motion::position() 里记的 RobotState::tgt_*（不改策略行为，只读）。
+static FILE *g_tgt_csv = nullptr;
+
+static void tgt_write_header(FILE *fp) {
+    fprintf(fp, "frame,live,team_state,ball_x,ball_y");
+    for (int i = 0; i < 5; ++i)
+        fprintf(fp, ",b%d_x,b%d_y,b%d_rot,b%d_tx,b%d_ty,b%d_mode,b%d_line,b%d_role", i, i, i, i, i, i, i, i);
+    fprintf(fp, "\n");
+}
+
+static void tgt_write_row(FILE *fp, const SimState &s, const WorldModel &wm) {
+    fprintf(fp, "%d,%d,%d,%.2f,%.2f", s.frames, wm.live_play ? 1 : 0, (int)wm.team_state, s.bx, s.by);
+    for (int i = 0; i < 5; ++i) {
+        const RobotState &r = wm.home[i];
+        int line = 0;
+#ifdef SIMURO5_BRANCH_TRACE
+        const trace::Mark *m = trace::find(&r);
+        if (m) line = m->line;
+#endif
+        fprintf(fp, ",%.2f,%.2f,%.1f,%.2f,%.2f,%d,%d,%d",
+                s.blue[i].x, s.blue[i].y, s.blue[i].rot, r.tgt_x, r.tgt_y, r.tgt_mode, line, wm.role[i]);
+    }
+    fprintf(fp, "\n");
+}
+
 // 门球演练（诊断，2026-10-05）：--goalkick-drill 时除开场外每次复位都摆成「我方门球」，
 //   摆位抄真机 rlg 实测（球 (205,78)，门将 (215,90) 朝 -90°，对手在 80~100cm 外）。
 //   真机 15 场 114 次门球 113 次 1 秒后球没离开 15cm —— 原 sim 从不复位成门球，测不到。
@@ -292,6 +320,8 @@ static std::map<std::string, long> g_gkd_rules;   // 门球后前 80 帧门将�
 //   我方 1~4 号与对手全部摆远，保证这一帧只有"球在横移"这一个变量。
 //   球速很慢（0.30cm/帧 = 12cm/s）——"门前横移的慢球"正是丢球形状。
 static bool g_gk_cross_drill = false;
+static bool g_restart_gamestate = false;   // --restart-gamestate：复位后前 N 帧报"重启态"（真机口径）
+static int  g_reset_hold = 20;             // 重启态持续帧数（0.5s）
 static bool g_true_ball_history = false;   // --true-ball-history：把球速修真（见 play_match 里的说明）
 static double g_gkc_dist = 18.0;                  // --cross-dist：球摆在门前多少 cm 处
 static double g_gkc_vx = 0.0;                     // --cross-vx：朝门分量 cm/帧（0=纯横移）
@@ -869,12 +899,19 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         // 门前横移演练：每帧把场景钉成"球在门前 18cm 横着走"，扫完一轮（球出门框）从头再来。
         if (g_gk_cross_drill && opp_mode != 2) gk_cross_place(s);
         const int old_epoch = s.reset_epoch;
+        static int rg_epoch = -1, rg_frame = 0;   // --restart-gamestate 用：本次复位从第几帧开始
         if (f == frames - 1) last_decision_state = s;
         // 蓝队决策：opp_mode=2 时蓝队是脚本；否则蓝队是我们的策略
         if (opp_mode == 2) {
             scripted_opponent(s, true, opp_strength);
         } else {
             fill_env(env_b, s, true);
+            // 真机口径：复位（=平台重新发球）后前 g_reset_hold 帧 gameState 报"重启态"，
+            //   让策略走它真正会走的那条路（live_play=false）。默认关，保持与历史 A/B 可比。
+            if (g_restart_gamestate) {
+                if (s.reset_epoch != rg_epoch) { rg_epoch = s.reset_epoch; rg_frame = f; }
+                if (f - rg_frame < g_reset_hold) env_b.gameState = PM_PlaceKick_Blue;
+            }
             wm_b.update(&env_b, ctx_blue);
 #ifdef SIMURO5_BRANCH_TRACE
             trace::reset();
@@ -996,6 +1033,7 @@ static void play_match(int frames, int opp_mode, int debug, double opp_strength,
         }
 
         if (g_traj) traj_write_row(g_traj, s);   // docs/18：轨迹导出（仅第一场）
+        if (g_tgt_csv && opp_mode != 2) tgt_write_row(g_tgt_csv, s, wm_b);   // 逐帧目标点+分支（仅第一场）
 
         // 球权统计：谁离球最近算谁控球（阈值 20cm 内；无人区不算）
         double d_b = 1e9, d_y = 1e9;
@@ -1161,6 +1199,7 @@ int main(int argc, char **argv) {
     double opp_strength = 1.0;               // 脚本对手强度倍率（1.0=demo 校准档，>1 更强，见 docs/12）
     uint64_t seed = 0;                       // 0 = 用时间种子（每场不同）
     const char *traj_path = nullptr;         // --traj out.csv：导出第一场逐帧轨迹（docs/18）
+    const char *tgt_path = nullptr;          // --target-csv out.csv：导出第一场逐帧目标点+命中分支
     const char *def_csv_path = nullptr;      // --def-csv out.csv：失球取证（球/门将/全场逐帧）
     const char *params_path = nullptr;       // --params in.txt：注入策略参数（离线搜索用）
     const char *dump_path = nullptr;         // --dump-params out.txt：导出参数表
@@ -1175,6 +1214,7 @@ int main(int argc, char **argv) {
         else if (a == "--true-ball-history") g_true_ball_history = true;
         else if (a == "--goalkick-drill") g_gk_drill = true;
         else if (a == "--gk-cross-drill") g_gk_cross_drill = true;
+        else if (a == "--restart-gamestate") g_restart_gamestate = true;
         else if (a == "--cross-dist" && i + 1 < argc) g_gkc_dist = std::atof(argv[++i]);
         else if (a == "--cross-vx" && i + 1 < argc) g_gkc_vx = std::atof(argv[++i]);
         else if (a == "--cross-vy" && i + 1 < argc) g_gkc_vy = std::atof(argv[++i]);
@@ -1190,6 +1230,7 @@ int main(int argc, char **argv) {
         else if (a == "--debug" && i + 1 < argc) debug = std::atoi(argv[++i]);
         else if (a == "--seed" && i + 1 < argc) seed = (uint64_t)std::atoll(argv[++i]);
         else if (a == "--traj" && i + 1 < argc) traj_path = argv[++i];
+        else if (a == "--target-csv" && i + 1 < argc) tgt_path = argv[++i];
         // 参数注入（离线搜索用；默认不注入 ⇒ 行为与编译期常量完全一致）
         else if (a == "--params" && i + 1 < argc) params_path = argv[++i];
         else if (a == "--dump-params" && i + 1 < argc) dump_path = argv[++i];
@@ -1198,6 +1239,7 @@ int main(int argc, char **argv) {
             printf("           --coop-csv out.csv（配合生命周期观测） --correct-ball-history（独立球速输入修正实验）\n");
             printf("           --params in.txt（注入参数） --dump-params out.txt（导出全部可调参数及默认值）\n");
             printf("           --gk-probe（门将逐帧命中规则+目标y） --gk-cross-drill（门前横移演练摆位）\n");
+            printf("           --target-csv out.csv（第一场逐帧：每台车的目标点/语义/命中的源码行）\n");
             return 0;
         }
     }
@@ -1221,6 +1263,11 @@ int main(int argc, char **argv) {
         g_traj = fopen(traj_path, "w");
         if (!g_traj) { printf("sim_bench: 无法写入轨迹文件 %s\n", traj_path); return 1; }
         traj_write_header(g_traj);
+    }
+    if (tgt_path) {
+        g_tgt_csv = fopen(tgt_path, "w");
+        if (!g_tgt_csv) { printf("sim_bench: 无法写入目标点文件 %s\n", tgt_path); return 1; }
+        tgt_write_header(g_tgt_csv);
     }
     if (def_csv_path) {
         g_def_csv = fopen(def_csv_path, "w");
@@ -1259,6 +1306,7 @@ int main(int argc, char **argv) {
         play_match(frames, opp_mode, debug, opp_strength, rng, b, y, poss, shots, zones, ga_frames, ga_eps, ga_solo, ga_solo_eps, fb, fb_corner, rescue, og, og_gk, gk_ep);
         t_og += og; t_og_gk += og_gk; t_gk_ep += gk_ep;
         if (g_traj) { fclose(g_traj); g_traj = nullptr; }   // 轨迹只导第一场
+        if (g_tgt_csv) { fclose(g_tgt_csv); g_tgt_csv = nullptr; }
         // play_match 已按 opp_mode 归一化：返回的 b=我们进球、y=对手进球
         printf("  场%02d: 我们 %ld : %ld 对手   控球率(我们) %.0f%%   射门 %d   球位 %ld%%/%ld%%/%ld%%   禁区2+人 %ld帧/%ld次 单人>20帧 %ld帧/%ld次 争球重置 %ld次(角区%ld) 救球%ld次\n",
                g + 1, b, y, poss, shots,

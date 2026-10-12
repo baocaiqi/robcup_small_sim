@@ -28,7 +28,19 @@ TUNABLE(kMySpeed, 2.18624);
 TUNABLE(kReachMargin, 1.04068);
 
 // 主动截球：开关 / 采样步长 10cm、最远 150cm / 截点限我方门前 140cm / 对手贴球 20cm 算带球
+// ⚠️ **2026-10-11 真机 A/B：默认从 1.0 改回 0.0**。
+//   第 70 轮把它打开（0→1）后，真机 13 场（含 70+71+72 三轮一起上）实测：
+//   失球 2.07→1.00/场（t=2.49，好），**但进球 1.53→0.85/场（t=1.88，坏）**，净胜只从 −0.54 到 −0.15（不显著）。
+//   三轮捆在一起分不清谁的功劳/责任，而"提前拦截"的机制（后卫离开自己片区扑球轨迹）最可能吃掉进攻，
+//   所以这一版**只把它单独关掉**做单变量 A/B：其它两轮（71 门将收缩、72 重启角色表）保持不动。
+//   若 A/B 证明进球回来且失球没回去 ⇒ 保留 0；否则改回 1.0。
 TUNABLE(kEarlyEnable, 0.0);
+// ⚠️ 默认由 0 改为 1（2026-10-10）。第 100 轮实现时实测「0 次触发」而默认关，
+//   原因是它只挂在 `plan_defense` 的 `else if` 上 —— 只有 `intercept_point` **失败**时才轮到它；
+//   而"球朝门滚"时 `intercept_point` 几乎总会成功，所以这条分支走不到（docs/06:4455 当时就存疑）。
+//   真机取证（8 场 20 个失球）：6~7 球是球从 70~190cm 外一路滚进来、越线前 0.5 秒两边都没人碰它；
+//   45% 的失球我方没有任何非门将在球 30cm 内。这正是"飞球"窗口。
+//   现在 `plan_defense` 在「交点追不上」时也会先问它 ⇒ 它才真正接上电。
 TUNABLE(kEarlyStep, 10.0);
 TUNABLE(kEarlyMaxDist, 150.0);
 TUNABLE(kEarlyProtectDist, 140.0);
@@ -127,22 +139,26 @@ DefensePlan plan_defense(const WorldModel &wm, int defender_id) {
     double toward_goal = wm.ball.vx * (ctx.our_goal_x() - wm.ball.x);
     plan.approaching = toward_goal > 0.0;
 
-    // 有威胁 → 真实轨迹断球点；追不上或球慢/背离 → 回退静态球-门连线点
+    // 有威胁 → 真实轨迹断球点；追不上或球慢/背离 → 先找"更早的可截点"，再回退静态球-门连线点
     double ix = 0.0, iy = 0.0;
     bool on_ball_path = false;
+    bool got_line = false;
     if (plan.approaching && plan.ball_spd >= kMinBallSpeed &&
         intercept_point(wm, kInterceptLineDist, ix, iy)) {
         double t_ball = dist(wm.ball.x, wm.ball.y, ix, iy) / plan.ball_spd;
         double t_me   = dist(wm.home[defender_id].x, wm.home[defender_id].y, ix, iy) / kMySpeed;
-        if (t_me <= t_ball * kReachMargin) {
-            plan.target_x = ix;
-            plan.target_y = iy;
-            on_ball_path = true;
-        } else {
-            plan.target_x = wm.passive_x;
-            plan.target_y = wm.passive_y;
-        }
+        got_line = (t_me <= t_ball * kReachMargin);
+    }
+    if (got_line) {
+        plan.target_x = ix;
+        plan.target_y = iy;
+        on_ball_path = true;
     } else if (early_intercept_point(wm, defender_id, ix, iy)) {
+        // 2026-10-10 接线：原来这里在"追不上门前 48.5cm 的交点"时**直接退回静态球-门连线点**
+        //   ⇒ 球一旦进到离门线 48.5cm 以内，`intercept_point` 因为 t<0 必然失败，
+        //     防守者就彻底站住不动了。真机 20 个失球里 11 球发生在门前 60cm 内。
+        //   现在改成：先沿球轨迹找一个"我确实能比球先到"的更早点（kEarlyProtectDist 护栏仍然生效），
+        //   只有连这个都找不到才站定。
         plan.target_x = ix;
         plan.target_y = iy;
         on_ball_path = true;

@@ -2153,6 +2153,52 @@ static int test_goalie_cross_track() {
     return 0;
 }
 
+// 门将横移到位速度 —— 同时守住「换新驱动律更慢」这个负面结论（2026-10-10）。
+//   场景：慢球朝门、预测进门点 y≈78（离门中心 12cm），门将起始在门中心 y=90、朝场内 rot=180
+//   ⇒ 往 y 走是**纯横移**，必须先转 90°（这才对应真机的横移）。
+// 实测结论：**把定位路径换成新驱动律反而更慢** ——
+//     旧律 5 帧到 5cm、40 帧后剩 5.6cm ； 新律 40 帧都没到、剩 10.9cm。
+//   原因是新律的横向阻尼 `motion.kLatDamp` 在目标正侧方时把油门减半：
+//   `docs/06:4333` 那个用例是"在侧方 6.6cm 处碰球"（转向比平移重要 ⇒ 新律赢），
+//   而门将定位是"横移十几厘米重新站位"（油门减半就是纯损失）。两个场景不能混用结论。
+//   ⇒ `roles.kGkNewDrive` 默认 0；本用例守住"默认口径能在 40 帧内横移到 5cm"这个能力。
+static int test_gk_lateral_transit() {
+    auto run = [](double knob) {
+        WorldModel wm;
+        set_param("roles.kGkNewDrive", knob);
+        gk_test_field(wm);
+        wm.ball.x = 200.0; wm.ball.y = 78.0;
+        wm.ball.vx = 0.35; wm.ball.vy = 0.0;          // 朝门、慢，预测进门点就在 y≈78
+        wm.home[0].x = 212.0; wm.home[0].y = 90.0; wm.home[0].rot = 180.0;   // 朝场内 ⇒ 往 y 走是纯横移
+        int hit = -1;
+        for (int f = 0; f < 40; ++f) {
+            run_goalie(wm, 0);
+            RobotState &g = wm.home[0];
+            double v = 0.5 * (g.vl + g.vr) * 0.025;
+            double w = (g.vr - g.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+            g.rot = normalize_angle(g.rot + w);
+            g.x += v * std::cos(g.rot * SIMURO5_PI / 180.0);
+            g.y += v * std::sin(g.rot * SIMURO5_PI / 180.0);
+            wm.ball.x += wm.ball.vx; wm.ball.y += wm.ball.vy;
+            if (hit < 0 && std::fabs(g.y - wm.ball.y) < 5.0) hit = f;
+        }
+        return std::make_pair(hit, std::fabs(wm.home[0].y - wm.ball.y));
+    };
+    std::pair<int, double> on = run(1.0), off = run(0.0);
+    set_param("roles.kGkNewDrive", 0.0);              // 默认口径
+    printf("gk lateral transit: 默认(旧律) %d 帧到 5cm / 40 帧后剩 %.1fcm ； 新律 %d 帧 / %.1fcm\n",
+           off.first, off.second, on.first, on.second);
+    if (off.first < 0 || off.second > 8.0) {
+        printf("FAIL: 默认口径 40 帧内没能横移到 5cm（%d 帧 / 剩 %.1fcm）\n", off.first, off.second);
+        return 1;
+    }
+    if (on.first >= 0 && on.second < off.second - 0.3) {
+        printf("NOTE: 新驱动律现在更快了（新 %.1fcm vs 旧 %.1fcm）——可以重新考虑 kGkNewDrive=1\n",
+               on.second, off.second);
+    }
+    return 0;
+}
+
 // 贴门线静止球「直线推出」：门球往侧面空当推，被抢时直线远离己门
 static int test_goalie_straight_clear() {
     WorldModel wm;
@@ -2568,8 +2614,11 @@ static int test_goalie_side_step() {
         printf("FAIL: 目标点越过了球（会自己把球顶进门）tx=%.1f 球x=%.1f\n", tx, wm.ball.x);
         return 1;
     }
-    if (fabs(ty - 106.0) > 0.5 && fabs(ty - 74.0) > 0.5) {
-        printf("FAIL: 侧向让开目标 y 应贴到 106/74 边界，实际 %.1f\n", ty);
+    // 合同 = 「夹到门将 y 带的边界」，不是写死 106/74 —— y 带 2026-10-10 已放宽成旋钮
+    // （`roles.kGkYLo/kGkYHi`，74/106 → 70/110，真机 55% 的失球从离门柱 12cm 内进）。
+    const double gk_ylo = get_param("roles.kGkYLo", 70.0), gk_yhi = get_param("roles.kGkYHi", 110.0);
+    if (fabs(ty - gk_yhi) > 0.5 && fabs(ty - gk_ylo) > 0.5) {
+        printf("FAIL: 侧向让开目标 y 应贴到门将 y 带边界(%.0f/%.0f)，实际 %.1f\n", gk_yhi, gk_ylo, ty);
         return 1;
     }
     wm.home[0].y = 135;   // 侧向已让开 40cm ≥ kGkSideClear(35)
@@ -3960,6 +4009,96 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 重启抢球：重新开球时必须"直着穿球"，不许原地转/左右挪（2026-10-11）
+//   取证（sim_trace --target-csv）：复位帧球边 7.5cm 的那台拿的是抢球角色、目标=球心；
+//   主攻在 49cm 外，7 帧后才换过来，这 0.18s 球已被推走 21cm。
+static int test_restart_charge() {
+    // 该规则默认关（sim A/B 更差，见 roles.cpp），用例必须自己打开；跑完还原
+    const double save_on = get_param("roles.kRestartCharge", 0.0);
+    ::simuro5::set_param("roles.kRestartCharge", 1.0);
+    auto setup = [](WorldModel &wm) {
+        wm.ctx = TeamContext{true};                 // 蓝队：守 x=220，攻向 x=0
+        wm.game_state = PM_PlayOn;
+        wm.live_play = false;                       // 球还钉在重启摆放点
+        wm.ball.valid = wm.ball_pred.valid = true;
+        wm.ball.x = wm.ball_pred.x = 110; wm.ball.y = wm.ball_pred.y = 90;
+        wm.ball.vx = wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) {
+            wm.home[i].x = 200; wm.home[i].y = 20 + i * 30; wm.home[i].rot = 180;
+            wm.opp[i].x = 20;   wm.opp[i].y = 20 + i * 30;
+            wm.role[i] = ROLE_PASSIVE;
+        }
+        wm.role[0] = ROLE_GOALIE; wm.home[0].x = 214; wm.home[0].y = 90;
+    };
+    WorldModel wm;
+    // ① 球后最近(7cm)的那台必须接管，且目标在"球的正后方延长线"上（= 穿过球），命令是直冲
+    setup(wm);
+    wm.home[4].x = 117; wm.home[4].y = 90; wm.home[4].rot = 180;
+    if (!restart_charge(wm, 4)) { printf("FAIL: 重启时球后 7cm 的队员应接管抢球\n"); return 1; }
+    const RobotState &r = wm.home[4];
+    double want_x = 110 + (110 - 117) / 7.0 * 30.0;          // 沿"我→球"方向再往前 30cm
+    if (fabs(r.tgt_x - want_x) > 0.5 || fabs(r.tgt_y - 90.0) > 0.5) {
+        printf("FAIL: 穿球目标点应为 (%.1f,90)，实际 (%.1f,%.1f)\n", want_x, r.tgt_x, r.tgt_y);
+        return 1;
+    }
+    if (r.vl + r.vr < 80.0 || fabs(r.vl - r.vr) > 30.0) {
+        printf("FAIL: 重启抢球应直线冲球 (vl=%.1f vr=%.1f)\n", r.vl, r.vr); return 1;
+    }
+    // ② 球在正侧方 90°：旧路径这一档前进分量硬性为 0（原地转）；新规则必须先接管，
+    //    且目标点在球的另一侧（穿球）；机头一旦对准该方向就必须是直冲
+    setup(wm);
+    wm.home[4].x = 110; wm.home[4].y = 105; wm.home[4].rot = -90.0;   // 正侧方 15cm、机头朝球
+    if (!restart_charge(wm, 4)) { printf("FAIL: 球在正侧方也应接管（否则就是原地转）\n"); return 1; }
+    if (wm.home[4].vl + wm.home[4].vr < 60.0) {
+        printf("FAIL: 机头对着球时应直线冲穿 (vl=%.1f vr=%.1f)\n", wm.home[4].vl, wm.home[4].vr);
+        return 1;
+    }
+    {   // 目标必须落在"球的另一侧"：球在 我→目标 这条线段中间
+        const double ux = 110.0 - wm.home[4].x, uy = 90.0 - wm.home[4].y;
+        const double vx = wm.home[4].tgt_x - 110.0, vy = wm.home[4].tgt_y - 90.0;
+        if (ux * vx + uy * vy <= 0.0) {
+            printf("FAIL: 目标点应在球的另一侧（穿球）实际 (%.1f,%.1f)\n",
+                   wm.home[4].tgt_x, wm.home[4].tgt_y);
+            return 1;
+        }
+    }
+    // ③ 球在推进方向的"前面"（人已在对方门侧）→ 绝不接管（否则把球顶向自家门）
+    setup(wm);
+    wm.home[4].x = 100; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 人已在球的门侧时不许接管（会把球顶向自家门）\n"); return 1; }
+    // ④ 离球太远 → 不接管
+    setup(wm);
+    wm.home[4].x = 185; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 离球 75cm 的不该接管\n"); return 1; }
+    // ⑤ 对方开球 → 不许去抢（定位球犯规）
+    setup(wm);
+    wm.game_state = PM_PlaceKick_Yellow;
+    wm.home[4].x = 117; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 对方开球时不该去抢\n"); return 1; }
+    // ⑥ 球在自家门区（我方门球）→ 交给门将，场上队员不进
+    setup(wm);
+    wm.ball.x = wm.ball_pred.x = 205; wm.ball.y = wm.ball_pred.y = 78;
+    wm.home[4].x = 195; wm.home[4].y = 78;
+    if (restart_charge(wm, 4)) { printf("FAIL: 球在自家门区应交给门将\n"); return 1; }
+    // ⑦ 球在滚（活球）→ 交回原逻辑
+    setup(wm);
+    wm.live_play = true; wm.ball.vx = 3.0;
+    wm.home[4].x = 117; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 球在滚时不该接管\n"); return 1; }
+    // ⑧ 黄队镜像：攻向 +x，人须在球的 -x 侧，目标须落在 +x 侧
+    setup(wm);
+    wm.ctx = TeamContext{false};
+    wm.home[4].x = 103; wm.home[4].y = 90;
+    if (!restart_charge(wm, 4)) { printf("FAIL: 黄队镜像应接管\n"); return 1; }
+    if (wm.home[4].tgt_x <= 110.0) {
+        printf("FAIL: 黄队穿球目标应在球的 +x 侧，实际 %.1f\n", wm.home[4].tgt_x); return 1;
+    }
+    printf("restart charge: OK (重启直穿球/侧方也推出去/门侧不接管/太远不管/对方开球不抢/"
+           "门区交门将/活球不管/黄队镜像)\n");
+    ::simuro5::set_param("roles.kRestartCharge", save_on);
+    return 0;
+}
+
 // 争抢直冲：对手贴球、主攻在球侧上方 → 直接朝球冲，不绕球后
 static int test_contest_charge() {
     TeamContext ctx{true};               // 蓝队：攻向 x=0
@@ -4031,6 +4170,138 @@ static int test_gk_goal_kick_reach() {
     // 发球必须利落：y78 是 formation_set_ball 实际摆的球门球落点，改前要 130 帧（3.25 秒左右磨蹭）
     if (new78 > 60) { printf("FAIL: 门球 y78 发球拖沓 %d 帧（应 <=60；改前 130 帧，属左右磨蹭回归）\n", new78); return 1; }
     if (new66 > 70 || new72 > 90) { printf("FAIL: 门球 y66/y72 发球拖沓 %d/%d 帧（应 <=70/<=90；改前 83/121）\n", new66, new72); return 1; }
+    return 0;
+}
+
+// 重新开球必须作废"发球承诺"（2026-10-11 二次修复；用户投诉"门将每次发球都往旁边冲"）
+//   真机取证（replay_trace 回放 20261011144043 帧 4655~4754）：平台把球摆回门球点那一帧，
+//   `goalie_serve_phase` 还是上一轮留下的 1 → 门将在"人还在门口 (214.8,89.9)、离球 y 方向 12.2cm"
+//   的状态下直接进承诺期 → 满速冲向穿球目标 (163.1,74.0)。这条直线在球的 x=205.2 处高 **9.2cm**，
+//   根本没过球心 → 只是擦着球边过去（最近 6.5cm，球被蹭到 0.13cm/帧 = 5cm/s）→ 冲过头
+//   → `ball_behind` 判"球已在我身后" → 全速倒车（vl=-150 vr=-126）→ 门将 x 在 [192.4,224.1]
+//   之间来回冲、球 89 帧几乎不动。
+// 本测试用同一起始位，唯一差别是"这一帧球有没有被平台重新摆过"。
+struct GkServeProbe { int hit; double across; double trail; int phase0; };
+
+static GkServeProbe gk_serve_probe(double reset) {
+    const double save = get_param("roles.kGkRestartReset", 1.0);
+    ::simuro5::set_param("roles.kGkRestartReset", reset);
+    WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
+    wm.ball.valid = wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 205.2; wm.ball.y = wm.ball_pred.y = 77.7;    // 真机门球摆点
+    wm.ball_last.x = 203.7; wm.ball_last.y = 37.0; wm.ball_last.valid = true;  // 上一帧球位：单帧瞬移 40.8cm
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 20 + i * 30;
+        wm.opp[i].x = 60;   wm.opp[i].y = 20 + i * 30;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
+    wm.goalie_serve_phase = 1;                       // 上一轮门球留下的承诺
+    GkServeProbe out{-1, 0.0, 0.0, -1};
+    double py = wm.home[0].y;
+    for (int f = 0; f < 200; ++f) {
+        run_goalie(wm, 0);
+        if (f == 0) out.phase0 = wm.goalie_serve_phase;
+        RobotState &r = wm.home[0];
+        double v = 0.5 * (r.vl + r.vr) * 0.025, w = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        out.trail += std::fabs(r.y - py); py = r.y;
+        double ex = wm.ball.x - r.x, ey = wm.ball.y - r.y, d = std::hypot(ex, ey);
+        if (d < 7.0 && d > 1e-6) {                   // 碰到 → 球被顶到车身外沿
+            if (out.hit < 0) out.across = std::fabs(wm.ball.y - r.y);   // 第一次接触时的横向偏差
+            wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
+        }
+        wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
+        wm.ball_last = wm.ball;                      // 下一帧起球位连续（只有第 0 帧算"重新摆放"）
+        if (wm.ball.x < 195.0) { out.hit = f; break; }
+    }
+    ::simuro5::set_param("roles.kGkRestartReset", save);
+    return out;
+}
+
+static int test_gk_restart_reset_phase() {
+    GkServeProbe on = gk_serve_probe(1.0), off = gk_serve_probe(0.0);
+    printf("gk restart reset: 清零承诺 推出=%2d 帧 擦球横向偏差=%.1fcm 门将横向里程=%.1fcm (首帧 ph=%d)\n",
+           on.hit, on.across, on.trail, on.phase0);
+    printf("gk restart reset: 回滚(粘住) 推出=%2d 帧 擦球横向偏差=%.1fcm 门将横向里程=%.1fcm (首帧 ph=%d)\n",
+           off.hit, off.across, off.trail, off.phase0);
+    if (on.phase0 != 0) { printf("FAIL: 重新摆球那一帧承诺期没清零 ph=%d\n", on.phase0); return 1; }
+    if (off.phase0 != 1) { printf("FAIL: 回滚臂第一帧不该动承诺期 ph=%d\n", off.phase0); return 1; }
+    if (on.hit < 0) { printf("FAIL: 清零承诺后 200 帧没把球推出去\n"); return 1; }
+    if (on.hit > 60) { printf("FAIL: 清零承诺后发球仍拖沓 %d 帧（应 <=60）\n", on.hit); return 1; }
+    if (on.across > off.across) {
+        printf("FAIL: 清零承诺后擦球横向偏差反而更大 %.1f > %.1f cm\n", on.across, off.across); return 1;
+    }
+    if (on.trail > off.trail) {
+        printf("FAIL: 清零承诺后门将横向里程反而更大 %.1f > %.1f cm（就是「往旁边冲」）\n",
+               on.trail, off.trail); return 1;
+    }
+    // 回滚臂必须复现用户报的现象（球推不出去、门将横向磨 60cm），否则这个测试就失去意义了
+    if (off.hit >= 0 || off.trail < 40.0) {
+        printf("FAIL: 回滚臂没复现「球推不出去」的故障（推出=%d 横向里程=%.1f）——"
+               "起始几何变了，请重核真机帧 20261011144043\n", off.hit, off.trail); return 1;
+    }
+    return 0;
+}
+
+// 第 76 轮（2026-10-11 夜）：第 75 轮上机后那场（20261011163823）门球仍要 125 帧
+//   ① 门将斜着赶到后撤点、带着惯性就进承诺期 → 原地转正时滑出 10cm → 推穿擦球边；
+//   ② 重新摆球时球只挪了 13cm（<30 认不出），但门将被平台瞬移 11cm → 承诺期粘着。
+// 本测试的运动学带"惯性"：命令速度一阶滞后（每帧只追上 35%），模拟真机里"切成原地转正后还会滑"。
+struct GkSettleProbe { int hit; double across; int own_goal; };
+static GkSettleProbe gk_settle_probe(double aim, double tele, bool teleport_start) {
+    const double s0 = get_param("roles.kGkAimBall", 1.0), t0 = get_param("roles.kGkTeleportReset", 1.0);
+    ::simuro5::set_param("roles.kGkAimBall", aim);
+    ::simuro5::set_param("roles.kGkTeleportReset", tele);
+    WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
+    wm.ball.valid = wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 205.2; wm.ball.y = wm.ball_pred.y = 77.7;   // 真机门球摆点
+    wm.ball_last = wm.ball; wm.ball_last.valid = true;                      // 球位连续：只靠门将信号
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 20 + i * 30; wm.opp[i].x = 60; wm.opp[i].y = 20 + i * 30; wm.role[i] = ROLE_PASSIVE; }
+    wm.role[0] = ROLE_GOALIE;
+    if (teleport_start) {
+        // 帧 7907→7908：门将上一帧在 (225.6,93.2)，这一帧被摆回门口；承诺期还粘着 1
+        wm.goalie_last_id = 0; wm.goalie_last_x = 225.6; wm.goalie_last_y = 93.2;
+        wm.goalie_serve_phase = 1;
+    }
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
+    GkSettleProbe out{-1, 0.0, 0};
+    double v = 0.0, w = 0.0;
+    for (int f = 0; f < 200; ++f) {
+        run_goalie(wm, 0);
+        RobotState &r = wm.home[0];
+        double vc = 0.5 * (r.vl + r.vr) * 0.025, wc = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        v += 0.35 * (vc - v); w += 0.6 * (wc - w);                  // 惯性：真车不会一帧停住
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        double ex = wm.ball.x - r.x, ey = wm.ball.y - r.y, d = std::hypot(ex, ey);
+        if (d < 7.0 && d > 1e-6) {
+            if (out.across == 0.0) out.across = std::fabs(wm.ball.y - r.y);
+            wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
+        }
+        wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
+        wm.ball_last = wm.ball;
+        if (wm.ball.x > 219.0) { out.own_goal = 1; break; }
+        if (wm.ball.x < 195.0) { out.hit = f; break; }
+    }
+    ::simuro5::set_param("roles.kGkAimBall", s0);
+    ::simuro5::set_param("roles.kGkTeleportReset", t0);
+    return out;
+}
+
+static int test_gk_serve_settle() {
+    GkSettleProbe on = gk_settle_probe(1.0, 1.0, false), off = gk_settle_probe(0.0, 1.0, false);
+    GkSettleProbe ton = gk_settle_probe(1.0, 1.0, true), toff = gk_settle_probe(1.0, 0.0, true);
+    printf("gk serve settle: 对准球心 推出=%3d 帧 首触横偏=%.1fcm | 回滚(固定方向) 推出=%3d 帧 首触横偏=%.1fcm\n",
+           on.hit, on.across, off.hit, off.across);
+    printf("gk serve settle: 瞬移清零 推出=%3d 帧 | 回滚(承诺粘住) 推出=%3d 帧\n", ton.hit, toff.hit);
+    if (on.own_goal || ton.own_goal) { printf("FAIL: 门球顶进自家门\n"); return 1; }
+    if (on.hit < 0 || on.hit > 90) { printf("FAIL: 带惯性场景门球 %d 帧（应 0~90）\n", on.hit); return 1; }
+    if (ton.hit < 0 || ton.hit > 90) { printf("FAIL: 门将被瞬移后门球 %d 帧（应 0~90）\n", ton.hit); return 1; }
+    if (off.hit >= 0 && on.hit > off.hit + 10) { printf("FAIL: 对准球心反而更慢 %d > %d+10\n", on.hit, off.hit); return 1; }
+    if (toff.hit >= 0 && ton.hit > toff.hit) { printf("FAIL: 瞬移清零反而更慢 %d > %d\n", ton.hit, toff.hit); return 1; }
     return 0;
 }
 
@@ -4123,6 +4394,46 @@ static int test_live_play() {
 // 旧实现（defense.hpp:goalie_block_depth）写死 max_out=40：
 //   球离门 >=52cm 时门将一律站到离门线 40cm。真机实测门将 x 中位 14~16cm、p99 42cm、
 //   最大 49.8cm；由于回程太长，丢球时门将 x=8.6~27.7 而球已在门线上（球从门将身后进网）。
+// 门球（平台把球钉在摆点上）时门将必须"去推球"，不许走"球在身后 → 横向让开/倒车"那两条
+//   真机取证（replay_trace 逐帧回放 20261010193949 帧 2700~2795）：门球摆点 (205.2,77.7) 离门线
+//   只有 14.8cm，门将一走到球后就同时满足 gk_rule_ball_behind 与闸零 → 被命令"钉住 x、横移 11cm"，
+//   运动学在 rot≈-162° 下把它变成全速倒车（vl=-150 vr=-126），门将被甩到 x=192.9；
+//   89 帧球一动不动、门将 x 在 [192.9,225.4] 来回冲 —— 就是用户说的"每次发球都往旁边冲"。
+static int test_gk_serve_held_ball() {
+    // 场景取**真机卡死那一刻**的位置：门将已经越过球（x=198.3 < 球 205.2）、横向差 6.4cm、
+    //   rot=-162°。这一步是关键 —— 只有在这个位置，`gk_rule_ball_behind` 才会命中。
+    auto scene = []() {
+        WorldModel wm;
+        gk_test_field(wm);
+        wm.ball.x = 205.2; wm.ball.y = 77.7;          // 我方门球摆点（真机实测值）
+        wm.ball.vx = 0.0;  wm.ball.vy = 0.0;          // 平台把球钉住：速度恒 0
+        wm.home[0].x = 198.3; wm.home[0].y = 84.1; wm.home[0].rot = -162.0;
+        return wm;
+    };
+    // 新口径：不许再"钉住自己的 x 横向让开"（那一步在 rot≈-162° 下被运动学变成全速倒车）
+    WorldModel now = scene();
+    run_goalie(now, 0);
+    const RobotState &a = now.home[0];
+    if (std::fabs(a.tgt_x - a.x) <= 1.5) {
+        printf("FAIL: 门球时门将又被命令「钉住 x=%.1f、横向让开」到 (%.1f,%.1f)\n",
+               a.x, a.tgt_x, a.tgt_y);
+        return 1;
+    }
+    // 反证：回滚成"静止球也允许横向让开"→ 必须复现旧行为（x 钉死）
+    set_param("roles.kTkDeadSkip", 0.0);
+    WorldModel old = scene();
+    run_goalie(old, 0);
+    const RobotState &b = old.home[0];
+    set_param("roles.kTkDeadSkip", 1.0);
+    if (std::fabs(b.tgt_x - b.x) > 1.5) {
+        printf("FAIL: 回滚档没有复现旧行为（x=%.1f 目标 x=%.1f），用例失去判别力\n", b.x, b.tgt_x);
+        return 1;
+    }
+    printf("gk serve held ball: OK (门球摆点卡死位：旧「钉住 x=%.1f 横移」→ 新目标 (%.1f,%.1f))\n",
+           b.tgt_x, a.tgt_x, a.tgt_y);
+    return 0;
+}
+
 // 回归：门前慢球死锁（真机实测形状，13 个失球里约 10 个是这一种）
 //   球在门前 14.7cm；门将在球的【场侧】23.1cm 处、横向已经让开约 24cm
 //   （= gk_rule_ball_behind 的兜底目标 kGkBallRetreatLat=30 被门框夹住后的结果）。
@@ -4217,8 +4528,11 @@ static int test_goalie_line_block() {
     wm.ball.x = 217.5; wm.ball.y = 140; wm.ball.vx = 0.0; wm.ball.vy = -1.0;
     wm.home[0].x = 209; wm.home[0].y = 104;
     if (!gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 贴门线滚球应堵路径\n"); return 1; }
-    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 106.0) > 0.5) {
-        printf("FAIL: 贴门线堵点应为 (217,106)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
+    {   // 合同 = 「堵在门线上、y 夹到门将 y 带上沿」，上沿 2026-10-10 由 106 放宽成旋钮
+        const double yhi = get_param("roles.kGkYHi", 110.0);
+        if (fabs(tx - 217.0) > 0.5 || fabs(ty - yhi) > 0.5) {
+            printf("FAIL: 贴门线堵点应为 (217,%.0f)，实际 (%.1f,%.1f)\n", yhi, tx, ty); return 1;
+        }
     }
     wm.ball.y = 80; wm.ball.vy = 2.0;
     if (!gk_line_block_point(wm, 0, tx, ty) || fabs(ty - 92.0) > 0.5) {
@@ -4466,6 +4780,7 @@ int main(int argc, char **argv) {
     rc |= test_possession_source();
     rc |= test_goalie_clear_push();
     rc |= test_goalie_cross_track();
+    rc |= test_gk_lateral_transit();
     rc |= test_goalie_straight_clear();
     rc |= test_goalie_kick_far();
     rc |= test_passive_front_sweep();
@@ -4475,13 +4790,17 @@ int main(int argc, char **argv) {
     rc |= test_presser();
     rc |= test_goalie_line_cover();
     rc |= test_goalie_line_block();
+    rc |= test_gk_serve_held_ball();
     rc |= test_gk_last_ditch_no_freeze();
     rc |= test_live_play();
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
+    rc |= test_restart_charge();
     rc |= test_no_align_wait();
     rc |= test_zone_mode();
     rc |= test_gk_goal_kick_reach();
+    rc |= test_gk_restart_reset_phase();
+    rc |= test_gk_serve_settle();
     rc |= test_defense_intercept();
     rc |= test_hungarian_solver();
     rc |= test_mark_assignment();

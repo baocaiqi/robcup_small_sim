@@ -34,6 +34,13 @@ double shoot_prep_dist(const WorldModel &wm);
 // 追球者（持球核心）：射门 → 传球推进 → 追球
 void run_active(WorldModel &wm, int id);
 
+// 重启抢球：球还钉在重启摆放点/基本静止时，球后离球最近的那台直接穿球推出去；
+// 返回 true = 本帧已被接管（调用方不要再跑该角色的分支）。不在球后/非我方开球 → false
+bool restart_charge(WorldModel &wm, int id);
+
+// 这个 gameState 是不是「该我们开球」（争球算双方都可抢）
+bool our_restart(const WorldModel &wm);
+
 // 角色执行前取消不安全的配合任务/临时控球；飞行中不按散球或重算线路取消
 void cancel_unsafe_coop_pass(WorldModel &wm);
 

@@ -31,16 +31,56 @@ static double ball_cost(const WorldModel &wm, int i) {
     return d + kActTurnCost * a / 90.0 + (ahead < -5.0 ? kActAheadCost : 0.0);
 }
 
+// 死球/重启期"立刻换人"（2026-10-11）：见下方 assign() 里的说明。
+// ⚠️ 默认 0 = 关。实测（40 局 × 3 种子 × scripted/wall，`--restart-gamestate` 口径）：
+//   "只保留角色表" net 3.975 / 自己门区2+人 8.1 帧；再叠加"立刻换人" → 3.192；
+//   再把"重启抢球"也开上 → 3.083。⇒ 越激进越差，**只留保留角色表那一条**。
+TUNABLE(kActDeadInstant, 0.0);
+// 额外的"球静止"判定（cm/帧）：默认 0 = 关。只用 live_play 判重启 —— 实测（sim 默认口径球速恒 0、
+// 真机慢滚球也常见）一旦拿"球速小"当条件，本规则会整场都在免确认换人，把滞回/冻结全废掉。
+TUNABLE(kActDeadStill, 0.0);
+// 重启期是否保留原角色表：1 = 保留（新，默认）；0 = 回滚成"每帧重置成固定档"（HEAD 行为，A/B 对照用）
+TUNABLE(kActKeepRoleDead, 1.0);
+// 重启期(球还钉在摆放点)换人要多快：>0 时用这个更短的确认帧数、且不受 active_hold 冻结；
+//   0 = 关（与活球期同口径：8 帧确认 + 球在我方 110cm 内时 70 帧冻结）
+TUNABLE(kActDeadConfirm, 0.0);
+
 void RoleAssignment::assign(WorldModel &wm) {
-    const bool frozen = kActDynamic < 0.5 || !wm.live_play || wm.in_penalty_exec ||
-                        !wm.ball.valid;
-    if (frozen || wm.active_id < 1 || wm.active_id >= PLAYERS_PER_SIDE ||
-        wm.role[0] != ROLE_GOALIE || wm.role[wm.active_id] != ROLE_ACTIVE) {   // 未初始化或被外部改写
+    const bool table_ok = wm.active_id >= 1 && wm.active_id < PLAYERS_PER_SIDE &&
+                          wm.role[0] == ROLE_GOALIE && wm.role[wm.active_id] == ROLE_ACTIVE;
+    const bool old_freeze = !wm.live_play && kActKeepRoleDead < 0.5;   // HEAD：重启期每帧重置成固定档
+    if (kActDynamic < 0.5 || wm.in_penalty_exec || !wm.ball.valid || old_freeze || !table_ok) {
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) wm.role[i] = kFixedRole[i];
         wm.active_id = 1; wm.active_cand = -1; wm.active_cand_frames = 0; wm.active_hold = 0;
         return;
     }
-    if (wm.active_hold > 0) { --wm.active_hold; return; }
+    // ★ 重启/死球：球还没离开摆放点(live_play=false)或基本静止 → **本帧就把主攻交给离球最近的人**，
+    //   不等 kActSwapFrames(8 帧) 确认、也不受 active_hold(球在我方 110cm 内时 70 帧) 冻结。
+    //   为什么必须立刻：逐帧取证（sim_trace --target-csv）——复位那一帧离球 7.5cm 的那台是"抢球"，
+    //   49cm 外的那台才是"主攻"；7 帧(0.18s)后才换过来，而这 0.18 秒球已经被推走 16~21cm。
+    //   球一旦滚起来（live_play=true 且球速起来）就退回原来的滞回口径，避免整场都在换人。
+    const bool ball_dead = !wm.live_play ||
+                           (kActDeadStill > 0.0 && std::hypot(wm.ball.vx, wm.ball.vy) <= kActDeadStill);
+    const bool dead = !wm.live_play;   // 球还钉在重启摆放点 = 重启窗口
+    if (kActDeadInstant > 0.5 && ball_dead) {
+        const int cur = wm.active_id;
+        int best = -1;
+        double best_c = ball_cost(wm, cur) - kActSwapMargin;
+        for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+            if (i == cur || wm.ga_cooldown[i] > 0) continue;
+            double c = ball_cost(wm, i);
+            if (c < best_c) { best_c = c; best = i; }
+        }
+        if (best >= 0) {
+            std::swap(wm.role[cur], wm.role[best]);
+            wm.active_id = best;
+            wm.shoot_align_frames = 0; wm.shoot_push_count = 0;
+            wm.active_ga_frames = 0; wm.active_ga_total = 0;
+        }
+        wm.active_cand = -1; wm.active_cand_frames = 0; wm.active_hold = 0;
+        return;
+    }
+    if (wm.active_hold > 0 && !(dead && kActDeadConfirm > 0.0)) { --wm.active_hold; return; }
     if (wm.coop_pass_task.active || wm.coop_ball_control.active) { wm.active_cand_frames = 0; return; }
     const int cur = wm.active_id;
     int best = -1;
@@ -54,7 +94,7 @@ void RoleAssignment::assign(WorldModel &wm) {
     if (best < 0) { wm.active_cand = -1; wm.active_cand_frames = 0; return; }
     wm.active_cand_frames = (best == wm.active_cand) ? wm.active_cand_frames + 1 : 1;
     wm.active_cand = best;
-    if (wm.active_cand_frames < kActSwapFrames) return;
+    if (wm.active_cand_frames < ((dead && kActDeadConfirm > 0.0) ? kActDeadConfirm : kActSwapFrames)) return;
     std::swap(wm.role[cur], wm.role[best]);
     wm.active_id = best; wm.active_cand = -1; wm.active_cand_frames = 0;
     const double depth = (wm.ball.x - wm.ctx.our_goal_x()) * wm.ctx.attack_dir();
