@@ -4185,7 +4185,17 @@ struct GkServeProbe { int hit; double across; double trail; int phase0; };
 
 static GkServeProbe gk_serve_probe(double reset) {
     const double save = get_param("roles.kGkRestartReset", 1.0);
+    // ⚠️ 2026-10-12：回滚臂必须把**同一路径上后来新增的旋钮一起关掉**，否则它就不再是回滚臂。
+    //   第 76 轮的 kGkAimBall（默认开：承诺期推球方向由"固定出球方向"改成"门将→球心"）
+    //   自己就能治好"擦球边"，于是"只关 kGkRestartReset"的这一臂照样能把球推出去、
+    //   门将横向里程也只有 16cm —— 用户报的故障复现不出来，这条断言就变成恒假，
+    //   测试失去意义（这正是它 2026-10-12 变红的原因，跟真机几何无关）。
+    //   => 回滚臂 = 连 kGkAimBall 一起关，才等于真正的"退回第 75 轮交付版"。
+    const double saveAim = get_param("roles.kGkAimBall", 1.0);
+    const double saveTele = get_param("roles.kGkTeleportReset", 1.0);
     ::simuro5::set_param("roles.kGkRestartReset", reset);
+    if (reset <= 0.5) ::simuro5::set_param("roles.kGkAimBall", 0.0);
+    ::simuro5::set_param("roles.kGkTeleportReset", 0.0);   // 本测试只问"重新摆球"这一条信号
     WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
     wm.ball.valid = wm.ball_pred.valid = true;
     wm.ball.x = wm.ball_pred.x = 205.2; wm.ball.y = wm.ball_pred.y = 77.7;    // 真机门球摆点
@@ -4218,6 +4228,8 @@ static GkServeProbe gk_serve_probe(double reset) {
         if (wm.ball.x < 195.0) { out.hit = f; break; }
     }
     ::simuro5::set_param("roles.kGkRestartReset", save);
+    ::simuro5::set_param("roles.kGkAimBall", saveAim);
+    ::simuro5::set_param("roles.kGkTeleportReset", saveTele);
     return out;
 }
 
@@ -4250,7 +4262,7 @@ static int test_gk_restart_reset_phase() {
 //   ① 门将斜着赶到后撤点、带着惯性就进承诺期 → 原地转正时滑出 10cm → 推穿擦球边；
 //   ② 重新摆球时球只挪了 13cm（<30 认不出），但门将被平台瞬移 11cm → 承诺期粘着。
 // 本测试的运动学带"惯性"：命令速度一阶滞后（每帧只追上 35%），模拟真机里"切成原地转正后还会滑"。
-struct GkSettleProbe { int hit; double across; int own_goal; };
+struct GkSettleProbe { int hit; double across; int own_goal; int phase0; };
 static GkSettleProbe gk_settle_probe(double aim, double tele, bool teleport_start) {
     const double s0 = get_param("roles.kGkAimBall", 1.0), t0 = get_param("roles.kGkTeleportReset", 1.0);
     ::simuro5::set_param("roles.kGkAimBall", aim);
@@ -4267,10 +4279,11 @@ static GkSettleProbe gk_settle_probe(double aim, double tele, bool teleport_star
         wm.goalie_serve_phase = 1;
     }
     wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
-    GkSettleProbe out{-1, 0.0, 0};
+    GkSettleProbe out{-1, 0.0, 0, -1};
     double v = 0.0, w = 0.0;
     for (int f = 0; f < 200; ++f) {
         run_goalie(wm, 0);
+        if (f == 0) out.phase0 = wm.goalie_serve_phase;
         RobotState &r = wm.home[0];
         double vc = 0.5 * (r.vl + r.vr) * 0.025, wc = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
         v += 0.35 * (vc - v); w += 0.6 * (wc - w);                  // 惯性：真车不会一帧停住
@@ -4296,12 +4309,24 @@ static int test_gk_serve_settle() {
     GkSettleProbe ton = gk_settle_probe(1.0, 1.0, true), toff = gk_settle_probe(1.0, 0.0, true);
     printf("gk serve settle: 对准球心 推出=%3d 帧 首触横偏=%.1fcm | 回滚(固定方向) 推出=%3d 帧 首触横偏=%.1fcm\n",
            on.hit, on.across, off.hit, off.across);
-    printf("gk serve settle: 瞬移清零 推出=%3d 帧 | 回滚(承诺粘住) 推出=%3d 帧\n", ton.hit, toff.hit);
+    printf("gk serve settle: 瞬移清零 推出=%3d 帧 首触横偏=%.1fcm ph0=%d | 回滚(承诺粘住) 推出=%3d 帧 首触横偏=%.1fcm ph0=%d\n",
+           ton.hit, ton.across, ton.phase0, toff.hit, toff.across, toff.phase0);
     if (on.own_goal || ton.own_goal) { printf("FAIL: 门球顶进自家门\n"); return 1; }
     if (on.hit < 0 || on.hit > 90) { printf("FAIL: 带惯性场景门球 %d 帧（应 0~90）\n", on.hit); return 1; }
     if (ton.hit < 0 || ton.hit > 90) { printf("FAIL: 门将被瞬移后门球 %d 帧（应 0~90）\n", ton.hit); return 1; }
     if (off.hit >= 0 && on.hit > off.hit + 10) { printf("FAIL: 对准球心反而更慢 %d > %d+10\n", on.hit, off.hit); return 1; }
-    if (toff.hit >= 0 && ton.hit > toff.hit) { printf("FAIL: 瞬移清零反而更慢 %d > %d\n", ton.hit, toff.hit); return 1; }
+    // ⚠️ 2026-10-12：这条不能拿"帧数"当判据（原来写的是 `ton.hit > toff.hit` 就 FAIL）。
+    //   清零承诺后门将先横摆到"球后准备点"再推穿，帧数上**必然**比"带惯性直接满速冲"慢几帧；
+    //   它买的是**不擦球边**（真机 20261011163823 那场就是擦球边 -> 冲过头 -> 倒车 -> 89 帧球不动）。
+    //   本探针的 hit 只是"球被推出 10cm 用了多少帧"，压根不建模那条失败链，所以它量不出这个改动的价值
+    //   —— 拿它 gate 等于要求"修 bug 必须更快"，方向就错了。
+    //   => 判据换成这条改动**真正负责的两件事**：①承诺期确实被清零；②首触横向偏差不更大。
+    if (ton.phase0 != 0) { printf("FAIL: 门将被瞬移那一帧承诺期没清零 ph=%d\n", ton.phase0); return 1; }
+    if (toff.phase0 != 1) { printf("FAIL: 回滚臂第一帧不该动承诺期 ph=%d\n", toff.phase0); return 1; }
+    if (ton.across > toff.across) {
+        printf("FAIL: 瞬移清零后首触横向偏差反而更大 %.1f > %.1f cm（就是擦球边）\n", ton.across, toff.across);
+        return 1;
+    }
     return 0;
 }
 
