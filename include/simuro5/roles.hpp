@@ -9,6 +9,13 @@ namespace simuro5 {
 // 推球守卫总开关：true = 死球/摆位期或球在角区时一律不碰球（防 No pushing 犯规）
 constexpr bool kNoPushGuardEnabled = false;
 
+namespace detail {
+// 纯推球许可判断；显式守卫参数仅用于测试 seam，比赛路径始终传正式配置值。
+bool push_allowed_with_guard(const WorldModel &wm, bool guard_enabled);
+// 带机器人身份的测试 seam；RestartSetup 例外仍须由现有 restart 归属/执行者确定。
+bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool guard_enabled);
+}  // namespace detail
+
 // 门将门线封堵：球在门框内轨迹上且快到门线时，把门线预测落点（贴线 3cm）写入 (tx,ty)
 bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty);
 
@@ -33,6 +40,13 @@ double shoot_prep_dist(const WorldModel &wm);
 
 // 追球者（持球核心）：射门 → 传球推进 → 追球
 void run_active(WorldModel &wm, int id);
+
+// 重启抢球：球还钉在重启摆放点/基本静止时，球后离球最近的那台直接穿球推出去；
+// 返回 true = 本帧已被接管（调用方不要再跑该角色的分支）。不在球后/非我方开球 → false
+bool restart_charge(WorldModel &wm, int id);
+
+// 这个 gameState 是不是「该我们开球」（争球算双方都可抢）
+bool our_restart(const WorldModel &wm);
 
 // 角色执行前取消不安全的配合任务/临时控球；飞行中不按散球或重算线路取消
 void cancel_unsafe_coop_pass(WorldModel &wm);

@@ -13,10 +13,22 @@ enum TeamState {
     TS_DEFENSE = 1
 };
 
+enum class RuntimePhase {
+    RestartSetup,
+    Running
+};
+
+// 运动战球权只表达场上空间关系；定位球归属仍由 raw game_state 单独识别。
+enum class Possession { Unknown, Ours, Opponent, Loose };
+
 struct RobotState {
     double x = 0, y = 0;
     double rot = 0;
     double vl = 0, vr = 0;      // 差速轮速（仅己方有效）
+    // 本帧最后被命令的目标点（由 motion::position 写入）。用途：门将要"用新驱动律重发同一个目标"
+    //   —— 决策用旧口径算、驱动用新口径发（见 run_goalie）；顺带也是排障时最有用的一个字段。
+    double tgt_x = 0, tgt_y = 0;
+    int    tgt_mode = 0;        // motion::TargetMode（0=TM_STOP 1=TM_PASS）
 };
 
 struct BallState {
@@ -27,10 +39,12 @@ struct BallState {
 
 enum class CoopPassPhase { Preparing, Receiving, Received };
 enum class PassTaskKind { Coop, Ordinary };
+// 普通传球人自己的准备进度；不改变 CoopPass 的生命周期阶段。
+enum class OrdinaryPassPrepPhase { GoPrepSide, GoPrepPoint, Align, Prepared };
 
 // 结算原因，只用于记账
 enum class CoopOutcome {
-    Success, PrepareTimeout, ReceiveTimeout, GameState, InvalidBall, Penalty,
+    Success, PrepareTimeout, ReceiveTimeout, PhaseInterrupted, InvalidBall, Penalty,
     HighThreat, Corner, Intercepted, EmergencyDefense, IncomingShot,
     InvalidTarget, GoalDiscipline, ReceiverMarked, LaneBlocked, PushForbidden,
     DeadBall, DegenerateTarget, PrepPoint, MatchEnd, LooseBall, TeammateTakeover,
@@ -49,20 +63,31 @@ struct CoopPassTask {
     int passer_id = -1, receiver_id = -1;
     double rx = 0.0, ry = 0.0;
     int frames_left = 0;
-    int game_state = 0;
     CoopPassPhase phase = CoopPassPhase::Preparing;
     // 推球指令只开观察窗口，之后的球位/速度/人球分离才是出球证据
     bool observing_push = false;
     double push_ball_x = 0.0, push_ball_y = 0.0;
     double push_dir_x = 0.0, push_dir_y = 0.0;
+    // 普通传球首次合法 Push 时固定穿球目标；出球或任务结束后清除。
+    bool push_target_locked = false;
+    double push_start_ball_x = 0.0, push_start_ball_y = 0.0;
+    double push_start_dir_x = 0.0, push_start_dir_y = 0.0;
+    double locked_push_target_x = 0.0, locked_push_target_y = 0.0;
     int receive_frames = 0;
     PassTaskKind kind = PassTaskKind::Coop;
+    OrdinaryPassPrepPhase ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepPoint;
+    int ordinary_prep_side = 0;
+    void clear_push_target_lock() {
+        push_target_locked = false;
+        push_start_ball_x = push_start_ball_y = 0.0;
+        push_start_dir_x = push_start_dir_y = 0.0;
+        locked_push_target_x = locked_push_target_y = 0.0;
+    }
 };
 
 struct CoopBallControl {
     bool active = false;
     int receiver_id = -1;
-    int game_state = 0;
     int loose_frames = 0;
 };
 
@@ -92,13 +117,13 @@ struct WorldModel {
 
     Bounds field;
     Bounds goal;
-    int game_state = 0;      // PlayMode
+    int game_state = 0;      // raw PlayMode: referee events/restart type, not normal-action permission
     int game_state_last = 0;
-    // 活球判定：真机 gameState 从不回 PlayOn，故用"球已离开重启摆放点"补判
-    bool live_play = true;
+    // RuntimePhase is the sole normal-play action gate; update() derives it from PlayMode and restart-ball motion.
+    RuntimePhase runtime_phase = RuntimePhase::Running;
     bool restart_armed = false;
     double restart_x = 0.0, restart_y = 0.0;
-    long whos_ball = 0;      // 平台球权 0=未知；whos_disagree 为与自算不一致帧数
+    long whos_ball = 0;      // raw platform possession hint; retained for diagnostics, not our possession authority
     int whos_disagree = 0;
     // 我方点球执行中：roles 用它区分"对方门球(不抢)"与"我方点球(必须射门)"
     bool in_penalty_exec = false;
@@ -109,7 +134,13 @@ struct WorldModel {
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
-    bool we_have_ball = false;
+    // 门将上一帧位置（run_goalie 自己记）：用来量门将**真实**移动量（平台上报的 vl/vr 只是上一帧命令），
+    //   和认出"平台把门将瞬移回门口"（重新开球）。goalie_last_id=-1 表示还没有上一帧。
+    int    goalie_last_id = -1;
+    double goalie_last_x = 0.0, goalie_last_y = 0.0;
+    double goalie_moved = 0.0;    // 本帧量到的门将上一帧位移（cm/帧）
+    bool we_have_ball = false;  // in-play possession inferred by Situation; separate from phase/restart ownership
+    Possession possession = Possession::Unknown;  // Situation 的唯一球权结果；bool 字段仅为兼容投影
 
     TeamState team_state = TS_DEFENSE;
     int possession_frames = 0;

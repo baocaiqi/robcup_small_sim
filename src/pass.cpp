@@ -88,6 +88,10 @@ constexpr double OUR_ARRIVE_SPEED = 2.0;
 constexpr double OPP_MIN_SPEED    = 1.0;
 constexpr double ARRIVE_MARGIN    = 1.0;
 constexpr double SPEED_BASE       = 2.0;
+constexpr double ORDINARY_MOVE_COST_W = 0.25;
+constexpr double ORDINARY_OWNERSHIP_W = 0.35;
+constexpr double ORDINARY_LOCAL_STEP = 15.0;
+constexpr double ORDINARY_ANCHOR_DEVIATION_W = 0.5;
 
 // 假球位问 plan_shoot：只看球位/门将，即可判接应点有无射门开口
 bool receive_point_can_shoot(const WorldModel &wm, double tx, double ty) {
@@ -124,36 +128,68 @@ double speed_threat(const WorldModel &wm, double x, double y) {
     return threat;
 }
 
-}  // anonymous namespace
-
-bool pass_receiver_ready(const WorldModel &wm) {
-    const CoopPassTask &task = wm.coop_pass_task;
-    if (!task.active || task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
-        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
-        RECEIVER_READY_SPEED <= 1e-6 || PASS_BALL_SPEED <= 1e-6) return false;
-
-    const RobotState &receiver = wm.home[task.receiver_id];
-    const double t_receiver = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
-    const double t_ball = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
-    return t_receiver <= t_ball + RECEIVER_READY_TOLERANCE;
+// 普通传球排序项：低行程成本、且己方相对最近对手更容易占点时得分更低。
+double ordinary_receiver_score_delta(const WorldModel &wm, int receiver_id,
+                                     double target_x, double target_y) {
+    if (receiver_id < 0 || receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(target_x) || !std::isfinite(target_y) ||
+        !std::isfinite(wm.home[receiver_id].x) || !std::isfinite(wm.home[receiver_id].y)) return 0.0;
+    const RobotState &receiver = wm.home[receiver_id];
+    const double move_cost = dist(receiver.x, receiver.y, target_x, target_y);
+    double nearest_opp_dist = 1e9;
+    bool has_opponent = false;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (!std::isfinite(wm.opp[i].x) || !std::isfinite(wm.opp[i].y)) continue;
+        const double opponent_dist = dist(wm.opp[i].x, wm.opp[i].y, target_x, target_y);
+        if (!has_opponent || opponent_dist < nearest_opp_dist) {
+            nearest_opp_dist = opponent_dist;
+            has_opponent = true;
+        }
+    }
+    if (!has_opponent) nearest_opp_dist = move_cost;
+    const double ownership_margin = nearest_opp_dist - move_cost;
+    return ORDINARY_MOVE_COST_W * move_cost - ORDINARY_OWNERSHIP_W * ownership_margin;
 }
 
-bool pass_opponent_arrives_first(const WorldModel &wm) {
-    const CoopPassTask &task = wm.coop_pass_task;
-    if (!task.active || task.phase != CoopPassPhase::Preparing ||
-        task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
-        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+// Ordinary 候选沿用 Admission 已有的目标合法区、接球点净空和球到目标线路规则。
+bool ordinary_pass_target_safe(const WorldModel &wm, double target_x, double target_y) {
+    if (!std::isfinite(target_x) || !std::isfinite(target_y) ||
+        target_x < 0.0 || target_x > TeamContext::FIELD_LENGTH ||
+        target_y < 0.0 || target_y > TeamContext::FIELD_WIDTH ||
+        in_opp_goal_area(wm.ctx, target_x, target_y) ||
+        in_goal_area(wm.ctx, target_x, target_y) || in_no_push_zone(target_x, target_y)) return false;
+
+    CircleObstacle obstacles[PLAYERS_PER_SIDE];
+    int obstacle_count = 0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (!std::isfinite(wm.opp[i].x) || !std::isfinite(wm.opp[i].y)) continue;
+        if (dist(target_x, target_y, wm.opp[i].x, wm.opp[i].y) < 20.0) return false;
+        obstacles[obstacle_count++] = {wm.opp[i].x, wm.opp[i].y, 8.0};
+    }
+    if (wm.ball.valid) {
+        if (!std::isfinite(wm.ball.x) || !std::isfinite(wm.ball.y) ||
+            !segment_clear_of_circles(wm.ball.x, wm.ball.y, target_x, target_y,
+                                      obstacles, obstacle_count)) return false;
+    }
+    return true;
+}
+
+// Ordinary 创建前候选筛选与活动任务复查共用同一套 ETA 证据和阈值。
+bool opponent_arrives_first_for_target(const WorldModel &wm, int receiver_id,
+                                      double target_x, double target_y) {
+    if (receiver_id < 0 || receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(target_x) || !std::isfinite(target_y) ||
         !std::isfinite(RECEIVER_READY_SPEED) || !std::isfinite(OPPONENT_REACH_SPEED) ||
         !std::isfinite(OPPONENT_MOTION_HORIZON) || !std::isfinite(OPPONENT_FIRST_MARGIN) ||
         RECEIVER_READY_SPEED <= 1e-6 || OPPONENT_REACH_SPEED <= 1e-6 ||
         OPPONENT_MOTION_HORIZON < 0.0 || OPPONENT_FIRST_MARGIN < 0.0) return false;
 
-    const RobotState &receiver = wm.home[task.receiver_id];
+    const RobotState &receiver = wm.home[receiver_id];
     if (!std::isfinite(receiver.x) || !std::isfinite(receiver.y)) return false;
-    const double receiver_time = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double receiver_time = dist(receiver.x, receiver.y, target_x, target_y) / RECEIVER_READY_SPEED;
     double opponent_time = 1e9;
     for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
-        const double dx = task.rx - wm.opp[i].x, dy = task.ry - wm.opp[i].y;
+        const double dx = target_x - wm.opp[i].x, dy = target_y - wm.opp[i].y;
         const double distance = std::hypot(dx, dy);
         if (!std::isfinite(distance)) continue;
 
@@ -175,6 +211,26 @@ bool pass_opponent_arrives_first(const WorldModel &wm) {
     return opponent_time + OPPONENT_FIRST_MARGIN < receiver_time;
 }
 
+}  // anonymous namespace
+
+bool pass_receiver_ready(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.receiver_id < 0 || task.receiver_id >= PLAYERS_PER_SIDE ||
+        !std::isfinite(task.rx) || !std::isfinite(task.ry) ||
+        RECEIVER_READY_SPEED <= 1e-6 || PASS_BALL_SPEED <= 1e-6) return false;
+
+    const RobotState &receiver = wm.home[task.receiver_id];
+    const double t_receiver = dist(receiver.x, receiver.y, task.rx, task.ry) / RECEIVER_READY_SPEED;
+    const double t_ball = dist(wm.ball.x, wm.ball.y, task.rx, task.ry) / PASS_BALL_SPEED;
+    return t_receiver <= t_ball + RECEIVER_READY_TOLERANCE;
+}
+
+bool pass_opponent_arrives_first(const WorldModel &wm) {
+    const CoopPassTask &task = wm.coop_pass_task;
+    if (!task.active || task.phase != CoopPassPhase::Preparing) return false;
+    return opponent_arrives_first_for_target(wm, task.receiver_id, task.rx, task.ry);
+}
+
 PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     PassPlan plan{};
     const TeamContext &ctx = wm.ctx;
@@ -186,6 +242,11 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
     int best = -1;
     double best_score = 1e9;
     double best_tx = 0, best_ty = 0;
+
+    const double local_offsets[5][2] = {
+        {0.0, 0.0}, {ORDINARY_LOCAL_STEP, 0.0}, {-ORDINARY_LOCAL_STEP, 0.0},
+        {0.0, ORDINARY_LOCAL_STEP}, {0.0, -ORDINARY_LOCAL_STEP}
+    };
 
     for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
         if (id == passer_id) continue;
@@ -199,39 +260,56 @@ PassPlan plan_pass(const WorldModel &wm, int passer_id) {
             default: break;
         }
 
-        double tx = base_x + ad * OFFSET_BASE;
-        double ty = base_y;
-        clamp_receive_point(ctx, tx, ty);
+        double center_x = base_x + ad * OFFSET_BASE;
+        double center_y = base_y;
+        clamp_receive_point(ctx, center_x, center_y);
+        if (!std::isfinite(center_x) || !std::isfinite(center_y)) continue;
 
-        double pass_dist = dist(px, py, tx, ty);
-        if (pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) {
-            continue;
-        }
+        double seen_x[5] = {};
+        double seen_y[5] = {};
+        int seen_count = 0;
+        for (int p = 0; p < 5; ++p) {
+            double tx = center_x + ad * local_offsets[p][0];
+            double ty = center_y + local_offsets[p][1];
+            clamp_receive_point(ctx, tx, ty);
+            if (!std::isfinite(tx) || !std::isfinite(ty) ||
+                dist(center_x, center_y, tx, ty) > ORDINARY_LOCAL_STEP + 1e-6) continue;
 
-        if (route_blocked(wm, px, py, tx, ty)) {
-            continue;
-        }
+            bool duplicate = false;
+            for (int d = 0; d < seen_count; ++d)
+                duplicate = duplicate || (std::fabs(tx - seen_x[d]) <= 1e-6 &&
+                                          std::fabs(ty - seen_y[d]) <= 1e-6);
+            if (duplicate) continue;
+            seen_x[seen_count] = tx; seen_y[seen_count] = ty; ++seen_count;
 
-        double threat = count_near_opponent(wm, tx, ty);
-        int front_threat = count_front_opponent(wm, tx, ty, ad);
+            const double pass_dist = dist(px, py, tx, ty);
+            if (!std::isfinite(pass_dist) || pass_dist <= PASS_MIN_DIST || pass_dist >= PASS_MAX_DIST) continue;
+            if (route_blocked(wm, px, py, tx, ty)) continue;
+            if (!ordinary_pass_target_safe(wm, tx, ty)) continue;
+            if (opponent_arrives_first_for_target(wm, id, tx, ty)) continue;
 
-        bool can_shoot = receive_point_can_shoot(wm, tx, ty);
-        double t_opp = opp_arrive_time(wm, tx, ty);
-        double t_our = dist(wm.home[id].x, wm.home[id].y, tx, ty) / OUR_ARRIVE_SPEED;
-        bool opp_first = t_opp < t_our * ARRIVE_MARGIN;
-        double spd_threat = speed_threat(wm, tx, ty);
+            double threat = count_near_opponent(wm, tx, ty);
+            int front_threat = count_front_opponent(wm, tx, ty, ad);
 
-        double goal_dist = std::fabs(tx - ctx.opp_goal_x());
-        double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
-        if (can_shoot) score -= SHOOT_BONUS;
-        if (opp_first) score += ARRIVE_PENALTY;
-        score += spd_threat * SPEED_THREAT_W;
+            bool can_shoot = receive_point_can_shoot(wm, tx, ty);
+            double t_opp = opp_arrive_time(wm, tx, ty);
+            double t_our = dist(wm.home[id].x, wm.home[id].y, tx, ty) / OUR_ARRIVE_SPEED;
+            bool opp_first = t_opp < t_our * ARRIVE_MARGIN;
+            double spd_threat = speed_threat(wm, tx, ty);
 
-        if (score < best_score) {
-            best_score = score;
-            best = id;
-            best_tx = tx;
-            best_ty = ty;
+            double goal_dist = std::fabs(tx - ctx.opp_goal_x());
+            double score = goal_dist + threat * 20.0 + front_threat * 12.0 + pass_dist * 0.5;
+            if (can_shoot) score -= SHOOT_BONUS;
+            if (opp_first) score += ARRIVE_PENALTY;
+            score += spd_threat * SPEED_THREAT_W;
+            score += ordinary_receiver_score_delta(wm, id, tx, ty);
+            score += ORDINARY_ANCHOR_DEVIATION_W * dist(center_x, center_y, tx, ty);
+            if (score < best_score) {
+                best_score = score;
+                best = id;
+                best_tx = tx;
+                best_ty = ty;
+            }
         }
     }
 
@@ -292,6 +370,79 @@ CoopPass plan_coop_pass(const WorldModel &wm, int passer_id) {
         best.aim_rot = angle_to(0.0, 0.0, best.dir_x, best.dir_y);
     }
     return best;
+}
+
+// ═══ 门前横传 + 门柱包抄（docs/17 的 P4）═══
+// 目的：持球人在对方门前**一侧**时，把球横着送到**远门柱**，另一人包抄直接处理。
+// 与 plan_coop_pass 的关键差别：
+//   · 接球点由本函数**直接算出来**（远门柱），不是读角色锚点 —— 角色锚点被
+//     situation.cpp 明确压在对方禁区外沿，永远到不了门柱。
+//   · 打分只比"射门质量"，不用 plan_pass 的 goal_dist 权重（那个会把横传判成坏选择）。
+// ⚠️ 红线（平台规则）：进攻方在对方**门区**（门线前 50cm、y∈[62.5,117.5]）纯停留 >8 帧
+//   或累计 >18 帧 ⇒ **判点球**。所以包抄点压在门区**外** 6cm，不进那个矩形。
+TUNABLE(kCrossEnabled, 1.0);    // 0 = 整条套路关闭（一键回滚）
+TUNABLE(kCrossZone, 90.0);      // cm：球进对方门前这个距离内才算"门前一侧"
+TUNABLE(kCrossWide, 12.0);      // cm：球离中线至少这么偏才算"一侧"（否则是中路不需要横传）
+TUNABLE(kCrossPostY, 74.0);     // 门柱 y：夹在门框内、又留出余量（门框 70~110）
+TUNABLE(kCrossOutPad, 6.0);     // cm：包抄点压在对方门区**外**这么多（点球红线安全余量）
+TUNABLE(kCrossScore, 0.62);     // 横传质量：当作"≈0.47 质量射门 + 0.15 门槛"刚好够用
+
+CoopPass plan_cross(const WorldModel &wm, int passer_id) {
+    CoopPass c;
+    if (kCrossEnabled < 0.5 || !wm.ball.valid) return c;
+    if (!pass_context_safe(wm)) return c;
+    const TeamContext &ctx = wm.ctx;
+    const double ad = ctx.attack_dir();
+    const double bx = wm.ball.x, by = wm.ball.y;
+
+    // ① 球得在对方门前的一侧（边路横传位）
+    if (ctx.dist_opp_goal(bx) > kCrossZone) return c;
+    if (std::fabs(by - 90.0) < kCrossWide) return c;
+
+    // ② 远门柱：球在下路就去上柱，反之去下柱
+    const double post_y = (by < 90.0) ? (90.0 + kCrossPostY) : (90.0 - kCrossPostY);
+    // 包抄点在门区外沿之外（见本函数顶部红线）
+    const double post_x = ctx.opp_goal_x() - ad * (50.0 + kCrossOutPad);
+
+    // ③ 选包抄人：优先 ASSIST(2)，被占则 MIDFIELD(3)（固定角色表见 role_assignment.cpp）
+    //    ⚠️ 绝不能选到 active 自己：pass_target_safe 只硬校验 passer==1，
+    //       active 轮换到 2/3 时"自己传给自己"会绕过那道校验。
+    int rid = -1;
+    for (int cand : {2, 3}) {
+        if (cand == passer_id || cand == wm.active_id) continue;
+        if (wm.role[cand] == ROLE_ACTIVE || wm.role[cand] == ROLE_GOALIE) continue;
+        rid = cand;
+        break;
+    }
+    if (rid < 0) return c;
+
+    // ④ 横传几何：方向必须**跨门横向**为主，不能是直塞
+    {
+        double ddx = post_x - bx, ddy = post_y - by;
+        const double L = std::hypot(ddx, ddy);
+        if (L < PASS_MIN_DIST || L > 120.0) return c;
+        ddx /= L; ddy /= L;
+        // 朝对方门的纵向分量要小（横传不是直塞），带点向前是允许的
+        if (ddx * ad > 0.55) return c;
+        c.viable = true; c.receiver_id = rid; c.rx = post_x; c.ry = post_y;
+        c.dir_x = ddx; c.dir_y = ddy; c.aim_rot = angle_to(0.0, 0.0, ddx, ddy);
+    }
+
+    // ⑤ 复用现成的安全闸（和普通传球同一套护栏，不新开口子）
+    if (!pass_target_safe(wm, passer_id, c.receiver_id, c.rx, c.ry, true)) { c.viable = false; return c; }
+
+    // ⑥ 质量：门柱位有射门开口就用射门质量，否则给个接近门框的保底分
+    double q = 0.0;
+    {
+        WorldModel tmp = wm;
+        tmp.ball.x = c.rx; tmp.ball.y = c.ry; tmp.ball.vx = 0.0; tmp.ball.vy = 0.0;
+        tmp.in_penalty_exec = false;
+        ShootPlan ps = plan_shoot(tmp, c.receiver_id);
+        if (ps.viable) q = ps.quality;
+        else q = 0.5 * clamp((90.0 - std::fabs(c.ry - 90.0)) / 90.0, 0.0, 1.0);
+    }
+    c.score = std::max(q, kCrossScore);
+    return c;
 }
 
 } // namespace simuro5

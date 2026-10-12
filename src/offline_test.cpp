@@ -444,7 +444,7 @@ static int test_fixed_roles() {
     return 0;
 }
 
-// 传球选点单测：威胁惩罚 / 边界夹取 / 短传优先
+// 传球选点单测：威胁惩罚 / 边界夹取 / 局部候选遵守接球安全区
 static int test_pass() {
     TeamContext ctx{true};               // 蓝队：门在 x=220，攻向左(对方门 x=0)
     WorldModel wm;
@@ -495,8 +495,11 @@ static int test_pass() {
     for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 20; }
     {
         PassPlan p = plan_pass(wm, 0);
-        if (!p.viable || p.receiver_id != 1) {
-            printf("FAIL: 场景③应优先短传A(home[1]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
+        const double expected_center_x = 60.0 - get_param("pass.OFFSET_BASE", 10.1);
+        if (!p.viable || p.receiver_id != 2 || fabs(p.target_x - expected_center_x) > 1e-6 ||
+            fabs(p.target_y - 50.0) > 1e-6) {
+            printf("FAIL: A中心点在对方门区，应沿用目标安全规则选择B中心 (viable=%d recv=%d target=(%.1f,%.1f))\n",
+                   p.viable, p.receiver_id, p.target_x, p.target_y);
             return 1;
         }
     }
@@ -521,15 +524,17 @@ static int test_pass() {
             printf("FAIL: 场景④应联动站位点选ASSIST(home[2]) got viable=%d recv=%d\n", p.viable, p.receiver_id);
             return 1;
         }
-        const double off = simuro5::get_param("pass.OFFSET_BASE", 6.0);
-        if (fabs(p.target_x - (60.0 - off)) > 0.5 || fabs(p.target_y - 70.0) > 0.5) {
-            printf("FAIL: 场景④接应点未基于站位点 (%.1f,%.1f) 期望 x=%.1f（60 - OFFSET_BASE=%.1f）\n",
-                   p.target_x, p.target_y, 60.0 - off, off);
+        const double off = simuro5::get_param("pass.OFFSET_BASE", 10.1);
+        const double anchor_x = 60.0 - off;
+        const double expected_local_x = anchor_x + 15.0; // 蓝队向左进攻，后移点在锚点右侧
+        if (fabs(p.target_x - expected_local_x) > 1e-6 || fabs(p.target_y - 70.0) > 1e-6) {
+            printf("FAIL: 场景④应从站位锚点选择合法局部点 (%.1f,%.1f)，期望 (%.1f,70.0)\n",
+                   p.target_x, p.target_y, expected_local_x);
             return 1;
         }
     }
 
-    printf("pass: OK (威胁惩罚/边界夹取/短传优先/联动站位点)\n");
+    printf("pass: OK (威胁惩罚/边界夹取/目标安全/联动站位点与局部搜索)\n");
     return 0;
 }
 
@@ -690,7 +695,7 @@ static int test_roles_spread() {
     wm.ctx = ctx;
     wm.threat_level = 0.1;               // <=0.3 走进攻分支
     wm.game_state = PM_PlaceKick_Blue;
-    wm.live_play = false;
+    wm.runtime_phase = RuntimePhase::RestartSetup;
 
     auto scatter = [&]() {
         for (int i = 0; i < 5; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 30 + i * 25; }
@@ -1271,7 +1276,7 @@ static int test_active_corner_rescue() {
         wm.ball.x = 110; wm.ball.y = 90;     // 球在中圈，远离角区
         wm.home[1].x = 100; wm.home[1].y = 90; wm.home[1].rot = 0;
         wm.home[1].vl = wm.home[1].vr = 0;
-        wm.game_state = PM_FreeBall_RightBot;    // 平台判了争球
+        wm.game_state = PM_FreeBall_RightBot; wm.runtime_phase = RuntimePhase::RestartSetup;    // 平台判了争球
         run_active(wm, 1);
         if (fabs(wm.home[1].vl) > 1e-9 || fabs(wm.home[1].vr) > 1e-9) {
             printf("FAIL: 死球/重启期应停住不推 got vl=%.1f vr=%.1f\n",
@@ -1280,6 +1285,7 @@ static int test_active_corner_rescue() {
         }
     }
     wm.game_state = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
     wm.ball.x = 60; wm.ball.y = 90;
     wm.home[1].x = 60; wm.home[1].y = 60;
     wm.corner_ball_frames = 0;
@@ -2117,6 +2123,88 @@ static int test_goalie_clear_push() {
     return 0;
 }
 
+// 门前横移：慢球在门口横着走时，门将必须朝球的 y 移动、最终站在球与自家门之间。
+//   实测（sim_trace --gk-probe）：门前慢横移命中 gk_rule_clear，目标 y 被夹到门框两端
+//   (72.5/107.5)，球 y=80 时门将目标 107.5 —— 背对球走，且 x 还朝门口压 19cm。
+static int test_goalie_cross_track() {
+    WorldModel wm;
+    // 返回：40 帧后门将到球的横向距离（越小=越贴住球的横移线）
+    auto gap = [&](double knob) {
+        set_param("roles.kGkTkCross", knob);
+        gk_test_field(wm);
+        const double y0 = 76.0;                // 留出余量，40 帧横移后仍在门框内
+        wm.ball.x = 194.0; wm.ball.y = y0;     // 门前 26cm（> kGkLastDitch=22，不被"闸零"接管）
+        wm.ball.vx = 0.05; wm.ball.vy = 0.40;  // 慢横移（>0.5cm/帧，躲开"门球点慢爬"判定）
+        wm.home[0].x = 209.0; wm.home[0].y = 88.0; wm.home[0].rot = -90.0;
+        for (int f = 0; f < 40; ++f) {
+            run_goalie(wm, 0);
+            RobotState &g = wm.home[0];
+            double rad = g.rot * SIMURO5_PI / 180.0;
+            double trust = 1.12856 * (1.0 / 40.0);          // kSpeed * dt（与 sim 口径一致）
+            double v = 0.5 * (g.vl + g.vr);
+            g.x += v * std::cos(rad) * trust;
+            g.y += v * std::sin(rad) * trust;
+            wm.ball.x += wm.ball.vx; wm.ball.y += wm.ball.vy;
+        }
+        return std::fabs(wm.home[0].y - wm.ball.y);
+    };
+    double on = gap(1.0), off = gap(0.0);
+    set_param("roles.kGkTkCross", 1.0);
+    if (!(on < off - 0.5)) {
+        printf("FAIL: 门前横移时门将没贴住球的横移线 新间距=%.1fcm 旧=%.1fcm（应更小）\n",
+               on, off);
+        return 1;
+    }
+    printf("goalie cross track: OK (门前横移贴住球线 新间距=%.1fcm 旧=%.1fcm)\n", on, off);
+    return 0;
+}
+
+// 门将横移到位速度 —— 同时守住「换新驱动律更慢」这个负面结论（2026-10-10）。
+//   场景：慢球朝门、预测进门点 y≈78（离门中心 12cm），门将起始在门中心 y=90、朝场内 rot=180
+//   ⇒ 往 y 走是**纯横移**，必须先转 90°（这才对应真机的横移）。
+// 实测结论：**把定位路径换成新驱动律反而更慢** ——
+//     旧律 5 帧到 5cm、40 帧后剩 5.6cm ； 新律 40 帧都没到、剩 10.9cm。
+//   原因是新律的横向阻尼 `motion.kLatDamp` 在目标正侧方时把油门减半：
+//   `docs/06:4333` 那个用例是"在侧方 6.6cm 处碰球"（转向比平移重要 ⇒ 新律赢），
+//   而门将定位是"横移十几厘米重新站位"（油门减半就是纯损失）。两个场景不能混用结论。
+//   ⇒ `roles.kGkNewDrive` 默认 0；本用例守住"默认口径能在 40 帧内横移到 5cm"这个能力。
+static int test_gk_lateral_transit() {
+    auto run = [](double knob) {
+        WorldModel wm;
+        set_param("roles.kGkNewDrive", knob);
+        gk_test_field(wm);
+        wm.ball.x = 200.0; wm.ball.y = 78.0;
+        wm.ball.vx = 0.35; wm.ball.vy = 0.0;          // 朝门、慢，预测进门点就在 y≈78
+        wm.home[0].x = 212.0; wm.home[0].y = 90.0; wm.home[0].rot = 180.0;   // 朝场内 ⇒ 往 y 走是纯横移
+        int hit = -1;
+        for (int f = 0; f < 40; ++f) {
+            run_goalie(wm, 0);
+            RobotState &g = wm.home[0];
+            double v = 0.5 * (g.vl + g.vr) * 0.025;
+            double w = (g.vr - g.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+            g.rot = normalize_angle(g.rot + w);
+            g.x += v * std::cos(g.rot * SIMURO5_PI / 180.0);
+            g.y += v * std::sin(g.rot * SIMURO5_PI / 180.0);
+            wm.ball.x += wm.ball.vx; wm.ball.y += wm.ball.vy;
+            if (hit < 0 && std::fabs(g.y - wm.ball.y) < 5.0) hit = f;
+        }
+        return std::make_pair(hit, std::fabs(wm.home[0].y - wm.ball.y));
+    };
+    std::pair<int, double> on = run(1.0), off = run(0.0);
+    set_param("roles.kGkNewDrive", 0.0);              // 默认口径
+    printf("gk lateral transit: 默认(旧律) %d 帧到 5cm / 40 帧后剩 %.1fcm ； 新律 %d 帧 / %.1fcm\n",
+           off.first, off.second, on.first, on.second);
+    if (off.first < 0 || off.second > 8.0) {
+        printf("FAIL: 默认口径 40 帧内没能横移到 5cm（%d 帧 / 剩 %.1fcm）\n", off.first, off.second);
+        return 1;
+    }
+    if (on.first >= 0 && on.second < off.second - 0.3) {
+        printf("NOTE: 新驱动律现在更快了（新 %.1fcm vs 旧 %.1fcm）——可以重新考虑 kGkNewDrive=1\n",
+               on.second, off.second);
+    }
+    return 0;
+}
+
 // 贴门线静止球「直线推出」：门球往侧面空当推，被抢时直线远离己门
 static int test_goalie_straight_clear() {
     WorldModel wm;
@@ -2310,10 +2398,47 @@ static int test_gk_on_line_no_push() {
 }
 
 // 对方门口盘带：门将上前封角度，而非退锁门线
+static int test_goalie_opponent_lock_uses_possession() {
+    auto scene = [](Possession possession) {
+        WorldModel wm;
+        wm.ctx = TeamContext{true};
+        wm.ball.valid = true;
+        wm.possession = possession;
+        wm.whos_ball = possession == Possession::Opponent ? 0 : 2;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.home[i].x = 150; wm.home[i].y = 90;
+            wm.opp[i].x = 100; wm.opp[i].y = 90;
+            wm.role[i] = ROLE_PASSIVE;
+        }
+        wm.role[0] = ROLE_GOALIE;
+        wm.ball.x = 192.0; wm.ball.y = 89.7;
+        wm.opp[0].x = 194.0; wm.opp[0].y = 89.7;
+        wm.home[0].x = 207.0; wm.home[0].y = 89.7; wm.home[0].rot = 180.0;
+        return wm;
+    };
+
+    WorldModel loose = scene(Possession::Loose);
+    run_goalie(loose, 0);
+    if (loose.goalie_opp_hold != 0) {
+        printf("FAIL: goalkeeper inferred Opponent from nearby geometry when Possession was Loose\n");
+        return 1;
+    }
+
+    WorldModel opponent = scene(Possession::Opponent);
+    run_goalie(opponent, 0);
+    if (opponent.goalie_opp_hold != 3) {
+        printf("FAIL: goalkeeper did not retain its three-frame hold from Opponent possession\n");
+        return 1;
+    }
+    printf("goalie opponent lock uses Possession: OK (Loose ignored / Opponent retains hold)\n");
+    return 0;
+}
+
 static int test_goalie_challenge() {
     WorldModel wm;
     wm.ctx = TeamContext{true};                    // 蓝队：己方门线 x=220
     wm.ball.valid = true;
+    wm.possession = Possession::Opponent;
     for (int i = 0; i < 5; ++i) {
         wm.home[i].x = 150; wm.home[i].y = 90; wm.opp[i].x = 100; wm.opp[i].y = 90;
         wm.role[i] = ROLE_PASSIVE;
@@ -2532,8 +2657,11 @@ static int test_goalie_side_step() {
         printf("FAIL: 目标点越过了球（会自己把球顶进门）tx=%.1f 球x=%.1f\n", tx, wm.ball.x);
         return 1;
     }
-    if (fabs(ty - 106.0) > 0.5 && fabs(ty - 74.0) > 0.5) {
-        printf("FAIL: 侧向让开目标 y 应贴到 106/74 边界，实际 %.1f\n", ty);
+    // 合同 = 「夹到门将 y 带的边界」，不是写死 106/74 —— y 带 2026-10-10 已放宽成旋钮
+    // （`roles.kGkYLo/kGkYHi`，74/106 → 70/110，真机 55% 的失球从离门柱 12cm 内进）。
+    const double gk_ylo = get_param("roles.kGkYLo", 70.0), gk_yhi = get_param("roles.kGkYHi", 110.0);
+    if (fabs(ty - gk_yhi) > 0.5 && fabs(ty - gk_ylo) > 0.5) {
+        printf("FAIL: 侧向让开目标 y 应贴到门将 y 带边界(%.0f/%.0f)，实际 %.1f\n", gk_yhi, gk_ylo, ty);
         return 1;
     }
     wm.home[0].y = 135;   // 侧向已让开 40cm ≥ kGkSideClear(35)
@@ -2795,6 +2923,1172 @@ static WorldModel coop_task_scene() {
         return wm;
 }
 
+// 普通 PassPlan 评分夹具：两个中心点对称且都在现有传球距离内。
+static WorldModel ordinary_scoring_scene() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    wm.ball.x = 185.0; wm.ball.y = 90.0;
+    wm.home[0].x = 200.0; wm.home[0].y = 10.0;
+    wm.home[1].x = 185.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0;
+    wm.home[4].x = 20.0; wm.home[4].y = 160.0;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    const double offset = get_param("pass.OFFSET_BASE", 10.1);
+    wm.assist_x = 120.0 + offset; wm.assist_y = 80.0;
+    wm.mid_x = 120.0 + offset; wm.mid_y = 100.0;
+    wm.passive_x = 20.0; wm.passive_y = 160.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 220.0; wm.opp[i].y = 20.0 + 35.0 * i;
+    }
+    return wm;
+}
+
+// 同等中心候选下，接球人离自身中心越近，普通计划越应选中他。
+static int ordinary_pass_prefers_lower_receiver_travel() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 130.0; // 候选 2 距中心 50cm
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0; // 候选 3 已在中心
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3) {
+        printf("FAIL: 普通传球应选移动成本更低的接球人3 got viable=%d recv=%d\n",
+               (int)plan.viable, plan.receiver_id); return 1;
+    }
+    printf("ordinary pass prefers lower receiver travel: OK\n");
+    return 0;
+}
+
+// 两个中心点其他原有评分因素相同，接球人相对最近对手占点更有利者胜出。
+static int ordinary_pass_prefers_receiver_owned_target() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 100.0;
+    wm.opp[0].x = 120.0; wm.opp[0].y = 35.0; // 对点 2 为 45cm，对点 3 为 65cm
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3) {
+        printf("FAIL: 普通传球应选己方相对占点更有利的接球人3 got viable=%d recv=%d\n",
+               (int)plan.viable, plan.receiver_id); return 1;
+    }
+    printf("ordinary pass prefers receiver-owned target: OK\n");
+    return 0;
+}
+
+// 高 ownership 分不能越过原有线路硬筛选。
+static int ordinary_pass_scoring_does_not_relax_hard_safety() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;  // 被挡候选的移动成本为 0
+    wm.home[3].x = 120.0; wm.home[3].y = 140.0; // 安全候选仍明显更远，但不触发 OpponentFirst
+    wm.opp[0].x = 152.5; wm.opp[0].y = 85.0;   // 挡住 2 的线路，离其锁点仍约 33cm
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 3 || fabs(plan.target_y - 100.0) > 1e-6) {
+        printf("FAIL: 高 ownership 分不得放行被挡线路 got viable=%d recv=%d target=(%.2f,%.2f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass scoring keeps hard safety: OK\n");
+    return 0;
+}
+
+// 评分只改变接球人排序，不得把角色中心改成局部搜索点。
+static int ordinary_pass_scoring_keeps_anchor_target() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.home[2].x = 120.0; wm.home[2].y = 80.0;
+    wm.home[3].x = 120.0; wm.home[3].y = 150.0;
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 80.0) > 1e-6) {
+        printf("FAIL: 评分后仍须锁定角色锚点中心(120,80) got viable=%d recv=%d target=(%.2f,%.2f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass scoring keeps anchor target: OK\n");
+    return 0;
+}
+
+// 普通中心计划通过现有 Admission 安全检查后才建立 Ordinary 任务。
+static int test_ordinary_pass_admission() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running; wm.possession = Possession::Ours;
+    wm.ball.valid = true; wm.ball.x = 70.0; wm.ball.y = 90.0;
+    wm.we_have_ball = true; wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180.0; wm.home[i].y = 30.0 + 25.0 * i;
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+    }
+    wm.home[0].x = 210.0; wm.home[0].y = 90.0;
+    wm.home[1].x = 75.0; wm.home[1].y = 90.0; wm.home[1].rot = 0.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 90.0;
+    wm.assist_x = 120.0; wm.assist_y = 90.0;
+    wm.mid_x = 180.0; wm.mid_y = 150.0;
+    wm.passive_x = 180.0; wm.passive_y = 40.0;
+    wm.opp[0].x = 50.0; wm.opp[0].y = 90.0;
+    PassPlan planned = plan_pass(wm, 1);
+    if (!planned.viable) { printf("FAIL: ordinary admission fixture lacks center candidate\n"); return 1; }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.passer_id != 1 || wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        wm.coop_pass_task.rx != planned.target_x || wm.coop_pass_task.ry != planned.target_y) {
+        printf("FAIL: safe ordinary candidate did not pass existing Admission unchanged active=%d kind=%d\n",
+               (int)wm.coop_pass_task.active, (int)wm.coop_pass_task.kind); return 1;
+    }
+    printf("ordinary pass admission: OK (safe center candidate creates locked ordinary task)\n");
+    return 0;
+}
+
+static WorldModel ordinary_local_search_scene() {
+    WorldModel wm = ordinary_scoring_scene();
+    wm.ball.x = 160.0; wm.ball.y = 90.0;
+    wm.home[1].x = 160.0; wm.home[1].y = 90.0;
+    wm.home[2].x = 120.0; wm.home[2].y = 95.0;
+    wm.home[3].x = 20.0; wm.home[3].y = 150.0;
+    wm.home[4].x = 20.0; wm.home[4].y = 20.0;
+    wm.mid_x = 20.0; wm.mid_y = 150.0;
+    wm.passive_x = 20.0; wm.passive_y = 20.0;
+    wm.opp[0].x = 138.0; wm.opp[0].y = 84.5; // 中心线和中心点不安全，+15cm 横移可清开
+    return wm;
+}
+
+static int ordinary_pass_local_search_keeps_center_candidate() {
+    WorldModel wm = ordinary_local_search_scene();
+    const double offset = get_param("pass.OFFSET_BASE", 10.1);
+    wm.assist_x = 150.0 + offset; wm.assist_y = 80.0;
+    wm.home[2].x = 150.0; wm.home[2].y = 80.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 220.0; wm.opp[i].y = 20.0 + 35.0 * i;
+    }
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 150.0) > 1e-6 || fabs(plan.target_y - 80.0) > 1e-6) {
+        printf("FAIL: best center candidate was not retained (viable=%d id=%d target=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search keeps center candidate: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_finds_safer_nearby_point() {
+    WorldModel wm = ordinary_local_search_scene();
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 95.0) > 1e-6) {
+        printf("FAIL: blocked center should be rescued by safe nearby point (viable=%d id=%d target=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search finds safer nearby point: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_stays_near_anchor() {
+    WorldModel wm = ordinary_local_search_scene();
+    PassPlan plan = plan_pass(wm, 1);
+    const double dx = plan.target_x - 120.0, dy = plan.target_y - 80.0;
+    const bool template_point =
+        (fabs(dx) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx + 15.0) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx - 15.0) < 1e-6 && fabs(dy) < 1e-6) ||
+        (fabs(dx) < 1e-6 && fabs(dy - 15.0) < 1e-6) ||
+        (fabs(dx) < 1e-6 && fabs(dy + 15.0) < 1e-6);
+    if (!plan.viable || plan.receiver_id != 2 || !template_point || hypot(dx, dy) > 15.0 + 1e-6) {
+        printf("FAIL: local target escaped five-point template (viable=%d id=%d delta=%.1f,%.1f)\n",
+               (int)plan.viable, plan.receiver_id, dx, dy); return 1;
+    }
+    printf("ordinary pass local search stays near anchor: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_respects_hard_safety() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.opp[0].x = wm.home[1].x; wm.opp[0].y = wm.home[1].y; // 每条候选线路都从被占据的 passer 点出发
+    PassPlan plan = plan_pass(wm, 1);
+    if (plan.viable) {
+        printf("FAIL: local search forced a pass despite every candidate line being blocked target=(%.1f,%.1f)\n",
+               plan.target_x, plan.target_y); return 1;
+    }
+    printf("ordinary pass local search respects hard safety: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_target_is_locked_after_task_creation() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.vy = 4.0; wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    PassPlan planned = plan_pass(wm, 1);
+    if (!planned.viable || planned.receiver_id != 2 || fabs(planned.target_y - 95.0) > 1e-6) {
+        printf("FAIL: local target lock fixture did not select nearby point\n"); return 1;
+    }
+    run_active(wm, 1);
+    const double locked_x = wm.coop_pass_task.rx, locked_y = wm.coop_pass_task.ry;
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        fabs(locked_x - planned.target_x) > 1e-6 || fabs(locked_y - planned.target_y) > 1e-6) {
+        printf("FAIL: local target was not published as locked Ordinary task\n"); return 1;
+    }
+    wm.assist_x = 60.0; wm.assist_y = 145.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != planned.receiver_id ||
+        fabs(wm.coop_pass_task.rx - locked_x) > 1e-6 || fabs(wm.coop_pass_task.ry - locked_y) > 1e-6) {
+        printf("FAIL: role anchor change moved the created local target\n"); return 1;
+    }
+    printf("ordinary pass local target locks after task creation: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_local_search_does_not_change_coop_pass() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.ball.valid = true;
+    wm.ball.x = 90.0; wm.ball.y = 90.0;
+    wm.assist_x = 60.0; wm.assist_y = 65.0;
+    wm.mid_x = 90.0; wm.mid_y = 120.0;
+    wm.passive_x = 150.0; wm.passive_y = 90.0;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 150.0; wm.home[i].y = 90.0;
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 40.0 * i;
+    }
+    CoopPass plan = plan_coop_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 || fabs(plan.rx - 60.0) > 1e-9 ||
+        fabs(plan.ry - 65.0) > 1e-9 || fabs(plan.score - 0.493728272727) > 1e-9 ||
+        fabs(plan.dir_x + 0.768221279597) > 1e-9 || fabs(plan.dir_y + 0.640184399664) > 1e-9) {
+        printf("FAIL: CoopPass changed from P2.1 baseline (viable=%d recv=%d target=%.6f,%.6f score=%.12f dir=%.12f,%.12f)\n",
+               (int)plan.viable, plan.receiver_id, plan.rx, plan.ry, plan.score, plan.dir_x, plan.dir_y);
+        return 1;
+    }
+    printf("ordinary pass local search leaves CoopPass unchanged: OK\n");
+    return 0;
+}
+
+static WorldModel ordinary_dynamic_scene(double receiver_x, double receiver_y,
+                                         double opp_x, double opp_y,
+                                         double ball_x = 70.0, double ball_y = 90.0) {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.valid = true; wm.ball.x = ball_x; wm.ball.y = ball_y;
+    wm.ball.vx = 0.0; wm.ball.vy = 4.0; // 避免触发既有的自家门前慢球传球禁令
+    wm.home[0].x = 210.0; wm.home[0].y = 90.0;
+    wm.home[1].x = 75.0; wm.home[1].y = 90.0;
+    wm.home[2].x = receiver_x; wm.home[2].y = receiver_y;
+    wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+    wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    wm.assist_x = 120.0; wm.assist_y = 90.0; // 普通计划中心为 (109.9,90)
+    wm.mid_x = 180.0; wm.mid_y = 150.0;
+    wm.passive_x = 180.0; wm.passive_y = 40.0;
+    wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.opp_vel_ready = false;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+        wm.opp_vx[i] = wm.opp_vy[i] = 0.0;
+    }
+    wm.opp[0].x = opp_x; wm.opp[0].y = opp_y;
+    return wm;
+}
+
+static WorldModel ordinary_prep_scene(double receiver_offset = 0.0) {
+    WorldModel wm = ordinary_dynamic_scene(90.0 + receiver_offset, 90.0,
+                                           220.0, 10.0, 130.0, 90.0);
+    wm.home[2].x = 90.0 + receiver_offset; wm.home[2].y = 90.0;
+    wm.assist_x = 90.0; wm.assist_y = 90.0;
+    wm.coop_pass_task = {};
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.kind = PassTaskKind::Ordinary;
+    task.phase = CoopPassPhase::Preparing; task.passer_id = 1; task.receiver_id = 2;
+    task.rx = 90.0; task.ry = 90.0; task.frames_left = 80;
+    const double pass_len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    wm.home[1].x = wm.ball.x - (task.rx - wm.ball.x) / pass_len * 35.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = 180.0;
+    return wm;
+}
+
+static bool same_drive_command(const RobotState &a, const RobotState &b) {
+    return fabs(a.vl - b.vl) <= 1e-8 && fabs(a.vr - b.vr) <= 1e-8;
+}
+
+static int ordinary_passer_moves_behind_ball_before_push() {
+    WorldModel wm = ordinary_prep_scene();
+    const double rx = wm.coop_pass_task.rx, ry = wm.coop_pass_task.ry;
+    const double pass_len = dist(wm.ball.x, wm.ball.y, rx, ry);
+    wm.home[1].x = wm.ball.x + (rx - wm.ball.x) / pass_len * 18.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = 180.0;
+    const RobotState before = wm.home[1];
+    run_active(wm, 1);
+
+    const auto &task = wm.coop_pass_task;
+    const double len = dist(wm.ball.x, wm.ball.y, rx, ry);
+    const double dx = (rx - wm.ball.x) / len, dy = (ry - wm.ball.y) / len;
+    const double side_x = wm.ball.x - dy * task.ordinary_prep_side * 22.0;
+    const double side_y = wm.ball.y + dx * task.ordinary_prep_side * 22.0;
+    RobotState expected = before;
+    motion::position(expected, side_x, side_y, motion::TM_PASS);
+    if (!task.active || task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepSide ||
+        task.ordinary_prep_side == 0 || task.observing_push ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: front-side passer must take the safe side approach before Ordinary Push\n"); return 1;
+    }
+    wm.home[1].x = side_x; wm.home[1].y = side_y;
+    run_active(wm, 1);
+    if (wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: side waypoint must advance to the ball-behind point before Align/Push\n"); return 1;
+    }
+    RobotState at_side = wm.home[1];
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_x = wm.ball.x - dx * prep_dist;
+    const double prep_y = wm.ball.y - dy * prep_dist;
+    motion::position(at_side, prep_x, prep_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push || !same_drive_command(wm.home[1], at_side)) {
+        printf("FAIL: small side-position noise must not re-enter the side waypoint loop\n"); return 1;
+    }
+    printf("ordinary passer moves behind ball before push: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_reaches_area_before_align() {
+    WorldModel wm = ordinary_prep_scene();
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_tol = get_param("roles.kPrepPosTol", 4.01318);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    const double prep_y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * 10.0;
+    wm.home[1].y = wm.ball.y;
+    wm.home[1].rot = 90.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::GoPrepPoint ||
+        wm.coop_pass_task.observing_push || dist(wm.home[1].x, wm.home[1].y, prep_x, prep_y) <= prep_tol) {
+        printf("FAIL: being close to the ball must not skip the locked ball-behind prep point\n"); return 1;
+    }
+
+    wm.home[1].x = prep_x; wm.home[1].y = prep_y; wm.home[1].rot = 90.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Align ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: Align must begin only after reaching the prep area, with no early Push\n"); return 1;
+    }
+    printf("ordinary prep reaches area before align: OK\n");
+    return 0;
+}
+
+static int ordinary_passer_accepts_reasonable_alignment() {
+    WorldModel wm = ordinary_prep_scene();
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Align;
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    wm.home[1].y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    wm.home[1].rot = aim + 10.0;
+    const RobotState before = wm.home[1];
+    RobotState expected = before;
+    const double dx = (wm.coop_pass_task.rx - wm.ball.x) /
+                      dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double dy = (wm.coop_pass_task.ry - wm.ball.y) /
+                      dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    motion::position(expected, wm.ball.x + dx * 20.0, wm.ball.y + dy * 20.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!pass_receiver_ready(wm) || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: a passer within the existing alignment tolerance must proceed without exact-angle waiting\n"); return 1;
+    }
+    printf("ordinary passer accepts reasonable alignment: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_avoids_alignment_oscillation() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double prep_tol = get_param("roles.kPrepPosTol", 4.01318);
+    const double ang_tol = get_param("roles.kPrepAngTol", 13.1809);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    const double prep_y = wm.ball.y - (wm.coop_pass_task.ry - wm.ball.y) / len * prep_dist;
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Align;
+    const double offsets[] = {prep_tol - 0.1, prep_tol + 0.1, prep_tol - 0.05,
+                              prep_tol + 0.05, prep_tol - 0.2};
+    for (int frame = 0; frame < 5; ++frame) {
+        wm.home[1].x = prep_x + offsets[frame]; wm.home[1].y = prep_y;
+        wm.home[1].rot = aim + ang_tol + 15.0;
+        run_active(wm, 1);
+        RobotState expected = wm.home[1];
+        motion::position_aligned(expected, expected.x, expected.y, aim, prep_tol, ang_tol);
+        if (!wm.coop_pass_task.active ||
+            wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Align ||
+            wm.coop_pass_task.observing_push || !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: small prep-position noise must not switch Align back to GoPrep or Push\n"); return 1;
+        }
+    }
+    printf("ordinary prep avoids alignment oscillation: OK\n");
+    return 0;
+}
+
+static int ordinary_passer_prepares_while_receiver_moves() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    WorldModel p23 = ordinary_prep_scene(55.0);
+    const double prep_dist = get_param("roles.kPrepDist", 23.5578);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double prep_x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len * prep_dist;
+    int preparing_frames = 0, align_frames = 0, prepared_wait_frames = 0;
+    int p23_wait_frames = 0, p23_first_push_frame = 0;
+    const double receiver_offsets[] = {55.0, 50.0, 45.0, 40.0};
+    const double aim = angle_to(wm.ball.x, wm.ball.y,
+                                wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    const double pass_dx = (wm.coop_pass_task.rx - wm.ball.x) / len;
+    const double pass_dy = (wm.coop_pass_task.ry - wm.ball.y) / len;
+    wm.home[1].x = wm.ball.x + pass_dx * 18.0;
+    wm.home[1].y = wm.ball.y; wm.home[1].rot = aim;
+    p23.home[1] = wm.home[1];
+    for (int frame = 0; frame < 4; ++frame) {
+        wm.home[2].x = wm.coop_pass_task.rx + receiver_offsets[frame];
+        wm.home[2].y = wm.coop_pass_task.ry;
+        p23.home[2].x = wm.home[2].x; p23.home[2].y = wm.home[2].y;
+        if (frame == 1) {
+            const double nx = -pass_dy, ny = pass_dx;
+            wm.home[1].x = wm.ball.x + nx * wm.coop_pass_task.ordinary_prep_side * 22.0;
+            wm.home[1].y = wm.ball.y + ny * wm.coop_pass_task.ordinary_prep_side * 22.0;
+        }
+        if (frame == 2) {
+            wm.home[1].x = prep_x; wm.home[1].y = wm.ball.y; wm.home[1].rot = aim + 20.0;
+        }
+        if (frame == 3) wm.home[1].rot = aim + 10.0;
+        if (pass_receiver_ready(wm)) {
+            printf("FAIL: receiver movement fixture unexpectedly became ready at offset %.1f\n",
+                   receiver_offsets[frame]); return 1;
+        }
+        if (!pass_receiver_ready(p23)) {
+            motion::stop(p23.home[1]);
+            ++p23_wait_frames;
+        } else {
+            const double p23_len = dist(p23.ball.x, p23.ball.y,
+                                        p23.coop_pass_task.rx, p23.coop_pass_task.ry);
+            motion::position(p23.home[1], p23.ball.x +
+                             (p23.coop_pass_task.rx - p23.ball.x) / p23_len * 20.0,
+                             p23.ball.y + (p23.coop_pass_task.ry - p23.ball.y) / p23_len * 20.0,
+                             motion::TM_PASS);
+            p23_first_push_frame = frame + 1;
+        }
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.observing_push) {
+            printf("FAIL: Ordinary pushed before ReceiverReady while the receiver was travelling\n"); return 1;
+        }
+        if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepSide ||
+            wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::GoPrepPoint) ++preparing_frames;
+        else if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::Align) ++align_frames;
+        else if (wm.coop_pass_task.ordinary_prep_phase == OrdinaryPassPrepPhase::Prepared) ++prepared_wait_frames;
+    }
+    if (preparing_frames == 0 || align_frames == 0 || prepared_wait_frames == 0) {
+        printf("FAIL: passer did not prepare and hold in parallel with receiver travel\n"); return 1;
+    }
+    const auto &task = wm.coop_pass_task;
+    const double push_len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    RobotState expected = wm.home[1];
+    motion::position(expected, wm.ball.x + (task.rx - wm.ball.x) / push_len * 20.0,
+                     wm.ball.y + (task.ry - wm.ball.y) / push_len * 20.0, motion::TM_PASS);
+    wm.home[2].x = task.rx; wm.home[2].y = task.ry;
+    p23.home[2].x = task.rx; p23.home[2].y = task.ry;
+    if (pass_receiver_ready(p23)) {
+        const double p23_behind = (p23.ball.x - p23.home[1].x) * pass_dx +
+                                  (p23.ball.y - p23.home[1].y) * pass_dy;
+        motion::position(p23.home[1], p23.ball.x +
+                         (p23.coop_pass_task.rx - p23.ball.x) / push_len * 20.0,
+                         p23.ball.y + (p23.coop_pass_task.ry - p23.ball.y) / push_len * 20.0,
+                         motion::TM_PASS);
+        if (p23_behind <= 0.0) p23_first_push_frame = 5;
+    }
+    run_active(wm, 1);
+    if (!pass_receiver_ready(wm) || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected) ||
+        p23_wait_frames != 4 || p23_first_push_frame != 5) {
+        printf("FAIL: prepared passer did not Push as soon as ReceiverReady also became true\n"); return 1;
+    }
+    printf("ordinary passer prepares while receiver moves: OK (P2.3 reference wait=%d/push=%d; P2.4 prep=%d/align=%d/hold=%d/push=5)\n",
+           p23_wait_frames, p23_first_push_frame,
+           preparing_frames, align_frames, prepared_wait_frames);
+    return 0;
+}
+
+static int ordinary_prep_keeps_locked_pass_target() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const int receiver = wm.coop_pass_task.receiver_id;
+    const double locked_x = wm.coop_pass_task.rx, locked_y = wm.coop_pass_task.ry;
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len *
+                   get_param("roles.kPrepDist", 23.5578);
+    wm.home[1].y = wm.ball.y;
+    run_active(wm, 1);
+    wm.assist_x = 105.0; wm.assist_y = 40.0;
+    wm.mid_x = 55.0; wm.mid_y = 160.0;
+    wm.home[2].x = locked_x + 55.0; wm.home[2].y = locked_y + 5.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.receiver_id != receiver ||
+        wm.coop_pass_task.rx != locked_x || wm.coop_pass_task.ry != locked_y) {
+        printf("FAIL: Ordinary preparation changed the locked receiver or task target\n"); return 1;
+    }
+    printf("ordinary prep keeps locked pass target: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_respects_existing_safety_cancel() {
+    WorldModel wm = ordinary_prep_scene(55.0);
+    const double len = dist(wm.ball.x, wm.ball.y, wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    wm.home[1].x = wm.ball.x - (wm.coop_pass_task.rx - wm.ball.x) / len *
+                   get_param("roles.kPrepDist", 23.5578);
+    wm.home[1].y = wm.ball.y;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active) {
+        printf("FAIL: safe Ordinary task was not active before interruption; outcomes:");
+        for (int i = 0; i < (int)CoopOutcome::Count; ++i)
+            if (wm.coop_stats.outcomes[i] != 0) printf(" %s=%lu", coop_outcome_name((CoopOutcome)i), wm.coop_stats.outcomes[i]);
+        printf("\n"); return 1;
+    }
+    wm.runtime_phase = RuntimePhase::RestartSetup;
+    run_active(wm, 1);
+    if (wm.coop_pass_task.active ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] == 0) {
+        printf("FAIL: P1 phase interruption must still cancel an Ordinary task during preparation\n"); return 1;
+    }
+    printf("ordinary prep respects existing safety cancel: OK\n");
+    return 0;
+}
+
+static int ordinary_prep_does_not_change_coop_or_shooting() {
+    {
+        WorldModel wm = ordinary_prep_scene(55.0);
+        wm.coop_pass_task.kind = PassTaskKind::Coop;
+        wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::GoPrepSide;
+        wm.coop_pass_task.ordinary_prep_side = 0;
+        const auto original_phase = wm.coop_pass_task.ordinary_prep_phase;
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Coop ||
+            wm.coop_pass_task.ordinary_prep_phase != original_phase ||
+            wm.coop_pass_task.ordinary_prep_side != 0) {
+            printf("FAIL: Ordinary prep state leaked into CoopPass\n"); return 1;
+        }
+    }
+    {
+        WorldModel wm;
+        wm.ctx = TeamContext{true}; wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.runtime_phase = RuntimePhase::Running; wm.possession = Possession::Ours;
+        wm.we_have_ball = true; wm.ball.valid = true;
+        wm.ball.x = 60.0; wm.ball.y = 90.0; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
+        wm.home[1].x = 68.0; wm.home[1].y = 90.0; wm.home[1].rot = 180.0;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm.opp[i].x = 200.0; wm.opp[i].y = 20.0 + 30.0 * i;
+        }
+        const ShootPlan shot = plan_shoot(wm, 1);
+        if (!shot.viable) { printf("FAIL: unaffected-shot fixture is not viable\n"); return 1; }
+        RobotState expected = wm.home[1];
+        motion::position(expected, wm.ball.x + shot.dir_x * 20.0,
+                         wm.ball.y + shot.dir_y * 20.0, motion::TM_PASS);
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: Ordinary prep changed the existing shooting action\n"); return 1;
+        }
+    }
+    printf("ordinary prep leaves CoopPass and shooting unchanged: OK\n");
+    return 0;
+}
+
+static WorldModel ordinary_push_ready_scene() {
+    WorldModel wm = ordinary_prep_scene();
+    wm.coop_pass_task.ordinary_prep_phase = OrdinaryPassPrepPhase::Prepared;
+    wm.home[1].x = 138.0; wm.home[1].y = 90.0; wm.home[1].rot = 180.0;
+    return wm;
+}
+
+static WorldModel ordinary_push_committed_scene() {
+    WorldModel wm = ordinary_push_ready_scene();
+    run_active(wm, 1);
+    return wm;
+}
+
+static int ordinary_push_locks_target_on_first_commit() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.home[2].x = 145.0;
+    if (pass_receiver_ready(wm)) { printf("FAIL: Push lock WAIT fixture is ready\n"); return 1; }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.observing_push) {
+        printf("FAIL: Ordinary Push committed before ReceiverReady\n"); return 1;
+    }
+    wm.home[2].x = 90.0;
+    RobotState expected = wm.home[1];
+    motion::position(expected, 110.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    const auto &task = wm.coop_pass_task;
+    if (!task.active || task.phase != CoopPassPhase::Preparing || !task.push_target_locked ||
+        !task.observing_push || task.push_start_ball_x != 130.0 || task.push_start_ball_y != 90.0 ||
+        fabs(task.push_start_dir_x + 1.0) > 1e-9 || fabs(task.push_start_dir_y) > 1e-9 ||
+        fabs(task.locked_push_target_x - 110.0) > 1e-9 ||
+        fabs(task.locked_push_target_y - 90.0) > 1e-9 ||
+        wm.coop_stats.released != 0 || !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: first legal Ordinary Push did not lock ball + direction*20cm separately from Release\n"); return 1;
+    }
+    printf("ordinary push locks target on first commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_commit_and_observation_are_separate() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.home[1].x = wm.ball.x + get_param("roles.kPrepDist", 23.5578);
+    run_active(wm, 1);
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.observing_push || wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+        wm.coop_stats.released != 0) {
+        printf("FAIL: first Push command, commitment, and Release observation were conflated\n"); return 1;
+    }
+    wm.home[1].x = 138.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        !wm.coop_pass_task.observing_push || wm.coop_pass_task.locked_push_target_x != push_x ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0) {
+        printf("FAIL: approaching the ball did not open observation without faking Release\n"); return 1;
+    }
+    printf("ordinary push commitment and observation are separate: OK\n");
+    return 0;
+}
+
+static int ordinary_push_target_remains_fixed_across_frames() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: fixed-target fixture did not commit\n"); return 1; }
+    const double fixed_x = wm.coop_pass_task.locked_push_target_x;
+    const double fixed_y = wm.coop_pass_task.locked_push_target_y;
+    int p24_target_updates = 0, p25_target_updates = 0;
+    double last_p24_x = wm.ball.x - 20.0, last_p25_x = fixed_x;
+    for (double ball_x : {129.0, 128.0, 127.0}) {
+        wm.ball.x = ball_x; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+        RobotState expected = wm.home[1];
+        motion::position(expected, fixed_x, fixed_y, motion::TM_PASS);
+        run_active(wm, 1);
+        if (fabs((ball_x - 20.0) - last_p24_x) > 1e-9) ++p24_target_updates;
+        if (fabs(wm.coop_pass_task.locked_push_target_x - last_p25_x) > 1e-9) ++p25_target_updates;
+        last_p24_x = ball_x - 20.0;
+        last_p25_x = wm.coop_pass_task.locked_push_target_x;
+        if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+            wm.coop_pass_task.locked_push_target_x != fixed_x ||
+            wm.coop_pass_task.locked_push_target_y != fixed_y ||
+            !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: committed Push waypoint drifted with the ball\n"); return 1;
+        }
+    }
+    if (p24_target_updates != 3 || p25_target_updates != 0) {
+        printf("FAIL: scripted target update count P2.4=%d P2.5=%d\n", p24_target_updates, p25_target_updates);
+        return 1;
+    }
+    printf("ordinary push target remains fixed across frames: OK (P2.4 updates=%d, P2.5 updates=%d)\n",
+           p24_target_updates, p25_target_updates);
+    return 0;
+}
+
+static int ordinary_push_does_not_recheck_receiver_ready_after_commit() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[2].x = 145.0;
+    if (pass_receiver_ready(wm)) { printf("FAIL: ReceiverReady fluctuation fixture stayed ready\n"); return 1; }
+    RobotState expected = wm.home[1];
+    motion::position(expected, push_x, push_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: committed Ordinary Push waited for ReceiverReady again\n"); return 1;
+    }
+    printf("ordinary push does not recheck receiver ready after commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_does_not_return_to_align_after_commit() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[1].x += 0.5; wm.home[1].rot += 20.0;
+    RobotState expected = wm.home[1];
+    motion::position(expected, push_x, push_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.ordinary_prep_phase != OrdinaryPassPrepPhase::Prepared ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: committed Ordinary Push returned to Align after small pose noise\n"); return 1;
+    }
+    printf("ordinary push does not return to align after commit: OK\n");
+    return 0;
+}
+
+static int ordinary_push_keeps_receiver_target_locked() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.assist_x = 55.0; wm.assist_y = 145.0;
+    wm.home[2].x = 95.0; wm.home[2].y = 92.0;
+    wm.ball.x = 129.0; wm.ball.vx = 0.0;
+    run_active(wm, 1);
+    const auto &task = wm.coop_pass_task;
+    if (!task.active || !task.push_target_locked || task.receiver_id != 2 ||
+        task.rx != 90.0 || task.ry != 90.0 ||
+        task.locked_push_target_x != push_x || task.locked_push_target_y != push_y ||
+        task.locked_push_target_x == task.rx) {
+        printf("FAIL: committed waypoint or locked receiver target changed\n"); return 1;
+    }
+    printf("ordinary push keeps receiver target locked: OK\n");
+    return 0;
+}
+
+static int ordinary_push_requires_real_release_evidence() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked || !wm.coop_pass_task.observing_push) {
+        printf("FAIL: Release-evidence fixture did not start observation\n"); return 1;
+    }
+    wm.home[1].x = 139.0; // 机器人移动，球不动：不能算 Release。
+    RobotState expected = wm.home[1];
+    motion::position(expected, wm.coop_pass_task.locked_push_target_x,
+                     wm.coop_pass_task.locked_push_target_y, motion::TM_PASS);
+    run_active(wm, 1);
+    if (wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        !same_drive_command(wm.home[1], expected) ||
+        (fabs(wm.home[1].vl) < 1e-9 && fabs(wm.home[1].vr) < 1e-9)) {
+        printf("FAIL: with a static ball, controller should still drive toward the committed waypoint\n"); return 1;
+    }
+    wm.ball.x = 125.0; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
+    expected = wm.home[1];
+    motion::position(expected, wm.coop_pass_task.locked_push_target_x,
+                     wm.coop_pass_task.locked_push_target_y, motion::TM_PASS);
+    run_active(wm, 1); // 进展仅 5cm，其余条件可满足，仍不得 Release。
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        !same_drive_command(wm.home[1], expected) ||
+        (fabs(wm.home[1].vl) < 1e-9 && fabs(wm.home[1].vr) < 1e-9)) {
+        printf("FAIL: small ball movement must keep pushing without fabricating Release\n"); return 1;
+    }
+    printf("ordinary push requires real release evidence: OK\n");
+    return 0;
+}
+
+static int ordinary_fixed_push_reaches_release() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    int continuous_push_frames = 1;
+    for (double ball_x : {128.0, 125.0}) {
+        wm.ball.vx = ball_x - wm.ball.x; wm.ball.vy = 0.0; wm.ball.x = ball_x;
+        RobotState expected = wm.home[1];
+        motion::position(expected, push_x, push_y, motion::TM_PASS);
+        run_active(wm, 1);
+        if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+            !same_drive_command(wm.home[1], expected)) {
+            printf("FAIL: fixed Push did not continue before real Release\n"); return 1;
+        }
+        ++continuous_push_frames;
+    }
+    wm.ball.vx = -2.0; wm.ball.x = 123.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving ||
+        wm.coop_pass_task.push_target_locked || wm.coop_stats.released != 1 ||
+        wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+        printf("FAIL: real ball progress/speed/separation did not end committed Push in Receiving\n"); return 1;
+    }
+    printf("ordinary fixed push reaches release: OK (continuous Push=%d frames; real Release=1)\n",
+           continuous_push_frames);
+    return 0;
+}
+
+static int ordinary_push_commitment_respects_safety_cancel() {
+    for (int case_id = 0; case_id < 3; ++case_id) {
+        WorldModel wm = ordinary_push_committed_scene();
+        if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: safety fixture did not commit\n"); return 1; }
+        CoopOutcome expected = CoopOutcome::PhaseInterrupted;
+        if (case_id == 0) wm.runtime_phase = RuntimePhase::RestartSetup;
+        if (case_id == 1) { wm.coop_pass_task.frames_left = 1; expected = CoopOutcome::PrepareTimeout; }
+        if (case_id == 2) { wm.possession = Possession::Opponent; expected = CoopOutcome::Intercepted; }
+        run_active(wm, 1);
+        if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+            wm.coop_stats.outcomes[(int)expected] != 1) {
+            printf("FAIL: committed Push ignored existing safety cancellation case=%d\n", case_id); return 1;
+        }
+    }
+    printf("ordinary push commitment respects safety cancel: OK\n");
+    return 0;
+}
+
+static int ordinary_push_lock_resets_after_task_end() {
+    WorldModel wm = ordinary_push_committed_scene();
+    if (!wm.coop_pass_task.push_target_locked) { printf("FAIL: reset fixture did not commit\n"); return 1; }
+    wm.coop_finish(CoopOutcome::InvalidTarget);
+    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.locked_push_target_x != 0.0 ||
+        wm.coop_pass_task.locked_push_target_y != 0.0) {
+        printf("FAIL: ended task retained committed Push target\n"); return 1;
+    }
+    wm.coop_pass_task = {}; // 与 Ordinary planner 的新建任务初始化一致。
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.kind = PassTaskKind::Ordinary;
+    task.passer_id = 1; task.receiver_id = 2; task.rx = 90.0; task.ry = 110.0;
+    task.frames_left = 80; task.ordinary_prep_phase = OrdinaryPassPrepPhase::Prepared;
+    wm.home[2].x = task.rx; wm.home[2].y = task.ry;
+    const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
+    const double dx = (task.rx - wm.ball.x) / len, dy = (task.ry - wm.ball.y) / len;
+    wm.home[1].x = wm.ball.x - dx * 8.0; wm.home[1].y = wm.ball.y - dy * 8.0;
+    wm.home[1].rot = angle_to(0.0, 0.0, dx, dy);
+    if (task.push_target_locked || task.locked_push_target_x != 0.0) {
+        printf("FAIL: new Ordinary task inherited the old waypoint before Push\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!task.active || !task.push_target_locked ||
+        fabs(task.locked_push_target_x - (130.0 + dx * 20.0)) > 1e-8 ||
+        fabs(task.locked_push_target_y - (90.0 + dy * 20.0)) > 1e-8 ||
+        fabs(task.locked_push_target_y - 90.0) < 1e-8) {
+        printf("FAIL: second Ordinary task reused the first task's Push waypoint\n"); return 1;
+    }
+    printf("ordinary push lock resets after task end: OK\n");
+    return 0;
+}
+
+static int ordinary_push_does_not_change_coop_pass() {
+    WorldModel wm = ordinary_push_ready_scene();
+    wm.coop_pass_task.kind = PassTaskKind::Coop;
+    RobotState expected = wm.home[1];
+    motion::position(expected, 110.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Coop ||
+        wm.coop_pass_task.push_target_locked || !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: Ordinary Push commitment changed CoopPass's initial command\n"); return 1;
+    }
+    wm.ball.x = 129.0; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+    expected = wm.home[1];
+    motion::position(expected, 109.0, 90.0, motion::TM_PASS);
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        !same_drive_command(wm.home[1], expected)) {
+        printf("FAIL: CoopPass was incorrectly given the Ordinary fixed waypoint\n"); return 1;
+    }
+    printf("ordinary push does not change coop pass: OK\n");
+    return 0;
+}
+
+static int ordinary_push_waypoint_stall_keeps_real_release_rule() {
+    WorldModel wm = ordinary_push_committed_scene();
+    const double push_x = wm.coop_pass_task.locked_push_target_x;
+    const double push_y = wm.coop_pass_task.locked_push_target_y;
+    wm.home[1].x = push_x; wm.home[1].y = push_y;
+    wm.ball.vx = wm.ball.vy = 0.0;
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || !wm.coop_pass_task.push_target_locked ||
+        wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+        wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+        printf("FAIL: fixed-waypoint stall must wait for evidence, not fabricate Release\n"); return 1;
+    }
+    int callbacks_after_commit = 1, stationary_push_frames = 1; // 已包含上面的到点确认帧。
+    while (wm.coop_pass_task.active && callbacks_after_commit < 80) {
+        run_active(wm, 1);
+        ++callbacks_after_commit;
+        if (!wm.coop_pass_task.active) break;
+        if (!wm.coop_pass_task.push_target_locked ||
+            wm.coop_pass_task.phase != CoopPassPhase::Preparing || wm.coop_stats.released != 0 ||
+            wm.home[1].vl != 0.0 || wm.home[1].vr != 0.0) {
+            printf("FAIL: static-ball waypoint arrival must remain parked without false Release\n"); return 1;
+        }
+        ++stationary_push_frames;
+    }
+    if (wm.coop_pass_task.active || wm.coop_pass_task.push_target_locked ||
+        wm.coop_stats.released != 0 ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PrepareTimeout] != 1 ||
+        callbacks_after_commit != 79 || stationary_push_frames != 78) {
+        printf("FAIL: expected existing 80-frame task timeout after 78 parked callbacks (callbacks=%d parked=%d)\n",
+               callbacks_after_commit, stationary_push_frames); return 1;
+    }
+    printf("ordinary push waypoint stall keeps real release rule: OK (parked=%d callbacks; timeout callback=%d; no false Release)\n",
+           stationary_push_frames, callbacks_after_commit);
+    return 0;
+}
+
+static bool ordinary_target_is_opponent_first(const WorldModel &source, int receiver_id,
+                                              double target_x, double target_y) {
+    WorldModel probe = source;
+    probe.coop_pass_task = {};
+    probe.coop_pass_task.active = true;
+    probe.coop_pass_task.phase = CoopPassPhase::Preparing;
+    probe.coop_pass_task.kind = PassTaskKind::Ordinary;
+    probe.coop_pass_task.passer_id = 1;
+    probe.coop_pass_task.receiver_id = receiver_id;
+    probe.coop_pass_task.rx = target_x;
+    probe.coop_pass_task.ry = target_y;
+    probe.coop_pass_task.frames_left = 40;
+    return pass_opponent_arrives_first(probe);
+}
+
+static bool ordinary_plan_is_opponent_first(const WorldModel &source, const PassPlan &plan) {
+    return plan.viable && ordinary_target_is_opponent_first(
+        source, plan.receiver_id, plan.target_x, plan.target_y);
+}
+
+struct OrdinaryLocalAudit {
+    int template_points = 0;
+    int static_viable = 0;
+    int opponent_first = 0;
+    int eligible = 0;
+};
+
+// 只用于固定场景审计：复核角色2现有五点模板被旧硬条件和动态证据分别筛掉多少。
+static OrdinaryLocalAudit audit_ordinary_local_template(const WorldModel &wm,
+                                                         double center_x, double center_y) {
+    const double ad = wm.ctx.attack_dir();
+    const double offsets[5][2] = {
+        {0.0, 0.0}, {ad * 15.0, 0.0}, {-ad * 15.0, 0.0}, {0.0, 15.0}, {0.0, -15.0}
+    };
+    OrdinaryLocalAudit audit;
+    CircleObstacle obstacles[PLAYERS_PER_SIDE];
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        obstacles[i] = {wm.opp[i].x, wm.opp[i].y, 8.0};
+    for (int p = 0; p < 5; ++p) {
+        ++audit.template_points;
+        const double tx = center_x + offsets[p][0], ty = center_y + offsets[p][1];
+        const double pass_dist = dist(wm.home[1].x, wm.home[1].y, tx, ty);
+        if (!std::isfinite(pass_dist) || pass_dist <= get_param("pass.PASS_MIN_DIST", 8.0) ||
+            pass_dist >= get_param("pass.PASS_MAX_DIST", 69.4267) ||
+            in_opp_goal_area(wm.ctx, tx, ty) || in_goal_area(wm.ctx, tx, ty) ||
+            in_no_push_zone(tx, ty)) continue;
+        bool safe = true;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            if (dist(tx, ty, wm.opp[i].x, wm.opp[i].y) < 20.0 ||
+                point_to_segment_dist(wm.opp[i].x, wm.opp[i].y,
+                                      wm.home[1].x, wm.home[1].y, tx, ty) <
+                    get_param("pass.BLOCK_THRESHOLD", 7.4329)) safe = false;
+        }
+        if (!safe || !segment_clear_of_circles(wm.ball.x, wm.ball.y, tx, ty,
+                                               obstacles, PLAYERS_PER_SIDE)) continue;
+        ++audit.static_viable;
+        if (ordinary_target_is_opponent_first(wm, 2, tx, ty)) ++audit.opponent_first;
+        else ++audit.eligible;
+    }
+    return audit;
+}
+
+static int ordinary_pass_rejects_clear_opponent_first_at_creation() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 90.0, 110.0, 50.0);
+    wm.opp_vel_ready = true; wm.opp_vy[0] = 8.0;
+    const double center_x = wm.assist_x + wm.ctx.attack_dir() * get_param("pass.OFFSET_BASE", 10.1);
+    WorldModel evidence = wm;
+    evidence.coop_pass_task.active = true; evidence.coop_pass_task.phase = CoopPassPhase::Preparing;
+    evidence.coop_pass_task.receiver_id = 2; evidence.coop_pass_task.rx = center_x;
+    evidence.coop_pass_task.ry = wm.assist_y;
+    const bool clear_evidence = pass_opponent_arrives_first(evidence);
+    const PassPlan plan_with_first_opponent = plan_pass(wm, 1);
+    const bool selected_plan_first = ordinary_plan_is_opponent_first(wm, plan_with_first_opponent);
+    WorldModel clear_lane = wm;
+    clear_lane.opp[0].x = 200.0; clear_lane.opp[0].y = 20.0;
+    clear_lane.opp_vx[0] = clear_lane.opp_vy[0] = 0.0;
+    PassPlan clear_lane_plan = plan_pass(clear_lane, 1);
+    const OrdinaryLocalAudit audit = audit_ordinary_local_template(wm, center_x, wm.assist_y);
+    printf("clear-first candidates: static=%d opponent-first=%d; current-plan=%d target=(%.1f,%.1f) first=%d\n",
+           audit.static_viable, audit.opponent_first, (int)plan_with_first_opponent.viable,
+           plan_with_first_opponent.target_x, plan_with_first_opponent.target_y, (int)selected_plan_first);
+    run_active(clear_lane, 1);
+    run_active(wm, 1);
+    printf("clear-first task outcome: no-risk-task=%d clear-risk-task=%d\n",
+           (int)clear_lane.coop_pass_task.active, (int)wm.coop_pass_task.active);
+    if (!clear_lane.coop_pass_task.active || clear_lane.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        !clear_lane_plan.viable || !clear_evidence || audit.static_viable <= 0 ||
+        audit.opponent_first != audit.static_viable || wm.coop_pass_task.active || plan_with_first_opponent.viable) {
+        printf("FAIL: clear OpponentFirst must be rejected before Ordinary task creation\n"); return 1;
+    }
+    printf("ordinary pass rejects clear opponent-first at creation: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_accepts_close_arrival_race() {
+    WorldModel wm = ordinary_dynamic_scene(150.0, 90.0, 120.0, 50.0);
+    PassPlan baseline = plan_pass(wm, 1);
+    WorldModel evidence = wm;
+    evidence.coop_pass_task.active = true;
+    evidence.coop_pass_task.phase = CoopPassPhase::Preparing;
+    evidence.coop_pass_task.passer_id = 1; evidence.coop_pass_task.receiver_id = 2;
+    evidence.coop_pass_task.rx = baseline.target_x; evidence.coop_pass_task.ry = baseline.target_y;
+    const double receiver_eta = dist(wm.home[2].x, wm.home[2].y, baseline.target_x, baseline.target_y) / 2.0;
+    double nearest_opp = 1e9;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+        nearest_opp = std::min(nearest_opp, dist(wm.opp[i].x, wm.opp[i].y, baseline.target_x, baseline.target_y));
+    const double opponent_eta = 3.0 + nearest_opp / 2.0;
+    if (!baseline.viable || pass_opponent_arrives_first(evidence) ||
+        receiver_eta <= opponent_eta || receiver_eta - opponent_eta >= 3.0) {
+        printf("FAIL: close race should remain within the existing 3-frame cushion (receiver=%.1f opponent=%.1f)\n",
+               receiver_eta, opponent_eta); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary) {
+        printf("FAIL: close arrival race lost the Ordinary task opportunity\n"); return 1;
+    }
+    printf("ordinary pass accepts close arrival race: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_tries_alternative_safe_local_point() {
+    WorldModel wm = ordinary_dynamic_scene(135.0, 90.0, 95.0, 65.0);
+    wm.assist_x = 120.1; wm.assist_y = 90.0; // 中心 (110,90)，前移候选 (95,90)
+    PassPlan plan = plan_pass(wm, 1);
+    const bool selected_first = ordinary_plan_is_opponent_first(wm, plan);
+    const bool old_best_is_first = ordinary_target_is_opponent_first(wm, 2, 95.0, 90.0);
+    const OrdinaryLocalAudit audit = audit_ordinary_local_template(wm, 110.0, 90.0);
+    run_active(wm, 1);
+    printf("ordinary local alternative: static=%d opponent-first=%d eligible=%d; old-best=(95,90) first=%d; selected=(%.1f,%.1f) first=%d task=%d@%.1f,%.1f\n",
+           audit.static_viable, audit.opponent_first, audit.eligible, (int)old_best_is_first,
+           plan.target_x, plan.target_y, (int)selected_first, (int)wm.coop_pass_task.active,
+           wm.coop_pass_task.rx, wm.coop_pass_task.ry);
+    if (!old_best_is_first || !plan.viable || plan.receiver_id != 2 || selected_first ||
+        (fabs(plan.target_x - 95.0) < 1e-6 && fabs(plan.target_y - 90.0) < 1e-6) ||
+        audit.static_viable < 2 || audit.opponent_first < 1 || audit.eligible < 1) {
+        printf("FAIL: planner did not substitute a safe local candidate\n"); return 1;
+    }
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        wm.coop_pass_task.receiver_id != plan.receiver_id ||
+        fabs(wm.coop_pass_task.rx - plan.target_x) > 1e-6 ||
+        fabs(wm.coop_pass_task.ry - plan.target_y) > 1e-6) {
+        printf("FAIL: alternative safe local point was not locked into the task\n"); return 1;
+    }
+    printf("ordinary pass tries alternative safe local point: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_does_not_block_receiver_travel() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 90.0, 220.0, 90.0);
+    PassPlan plan = plan_pass(wm, 1);
+    run_active(wm, 1);
+    if (!plan.viable || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.kind != PassTaskKind::Ordinary || pass_receiver_ready(wm)) {
+        printf("FAIL: receiver travel/readiness must remain a post-creation preparation state\n"); return 1;
+    }
+    printf("ordinary pass does not block receiver travel: OK\n");
+    return 0;
+}
+
+static int preparing_pass_still_cancels_on_new_opponent_first() {
+    WorldModel wm = ordinary_dynamic_scene(160.0, 80.0, 120.0, 45.0);
+    auto &task = wm.coop_pass_task;
+    task.active = true; task.phase = CoopPassPhase::Preparing; task.kind = PassTaskKind::Ordinary;
+    task.passer_id = 1; task.receiver_id = 2; task.rx = 120.0; task.ry = 80.0; task.frames_left = 40;
+    if (pass_opponent_arrives_first(wm)) { printf("FAIL: initial stable opponent state should not cancel\n"); return 1; }
+    wm.opp_vel_ready = true; wm.opp_vy[0] = 8.0;
+    if (!pass_opponent_arrives_first(wm)) { printf("FAIL: updated approach evidence should trigger the existing OpponentFirst check\n"); return 1; }
+    cancel_unsafe_coop_pass(wm);
+    if (wm.coop_pass_task.active || wm.coop_stats.outcomes[(int)CoopOutcome::OpponentFirst] != 1) {
+        printf("FAIL: Preparing task no longer cancels after new OpponentFirst evidence\n"); return 1;
+    }
+    printf("preparing pass still cancels on new opponent first: OK\n");
+    return 0;
+}
+
+static int ordinary_pass_does_not_tighten_existing_hard_gates() {
+    WorldModel wm = ordinary_local_search_scene();
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.possession = Possession::Ours; wm.we_have_ball = true;
+    wm.ball.vy = 4.0;
+    wm.threat_level = 0.1; wm.shoot_push_count = 10;
+    wm.mid_x = 0.0; wm.mid_y = 0.0;
+    wm.passive_x = 0.0; wm.passive_y = 180.0;
+    PassPlan plan = plan_pass(wm, 1);
+    if (!plan.viable || plan.receiver_id != 2 ||
+        fabs(plan.target_x - 120.0) > 1e-6 || fabs(plan.target_y - 95.0) > 1e-6) {
+        printf("FAIL: existing safe 15cm local rescue was changed by OpponentFirst gating\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        fabs(wm.coop_pass_task.rx - plan.target_x) > 1e-6 ||
+        fabs(wm.coop_pass_task.ry - plan.target_y) > 1e-6) {
+        printf("FAIL: existing distance/line/target admission no longer creates this safe task\n"); return 1;
+    }
+    printf("ordinary pass does not tighten existing hard gates: OK\n");
+    return 0;
+}
+
+static WorldModel possession_pass_scene() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.ball.valid = true; wm.ball.x = 75; wm.ball.y = 150;
+    wm.threat_level = 0.1;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 175; wm.home[i].y = 20 + 30 * i;
+        wm.opp[i].x = 205; wm.opp[i].y = 20 + 30 * i;
+        wm.role[i] = i == 0 ? ROLE_GOALIE : ROLE_ASSIST;
+    }
+    wm.home[1].x = 100; wm.home[1].y = 150; wm.role[1] = ROLE_ACTIVE;
+    wm.home[2].x = 140; wm.home[2].y = 150;
+    Situation sit = SituationModule().analyze(wm);
+    wm.possession = sit.possession; wm.we_have_ball = sit.we_have_ball;
+    wm.coop_pass_task.active = true;
+    wm.coop_pass_task.passer_id = 1; wm.coop_pass_task.receiver_id = 2;
+    wm.coop_pass_task.rx = 90; wm.coop_pass_task.ry = 150;
+    wm.coop_pass_task.frames_left = 40;
+    wm.coop_pass_task.phase = CoopPassPhase::Receiving;
+    return wm;
+}
+
+static int pass_is_not_cancelled_by_stale_whos_ball() {
+    WorldModel wm = possession_pass_scene();
+    wm.whos_ball = 2;
+    if (wm.possession != Possession::Loose) {
+        printf("FAIL: stale-whos fixture should be spatially Loose, got possession=%d\n",
+               (int)wm.possession); return 1;
+    }
+    cancel_unsafe_coop_pass(wm);
+    if (!wm.coop_pass_task.active) {
+        printf("FAIL: safe in-play pass was cancelled only by stale whos_ball\n"); return 1;
+    }
+    printf("pass is not cancelled by stale whos_ball: OK\n");
+    return 0;
+}
+
+static int confirmed_opponent_control_can_cancel_pass() {
+    WorldModel wm = possession_pass_scene();
+    wm.opp[0].x = 90; wm.opp[0].y = 150;  // 15cm: explicit control, outside old 12cm safety radius
+    Situation sit = SituationModule().analyze(wm);
+    wm.possession = sit.possession; wm.we_have_ball = sit.we_have_ball;
+    if (wm.possession != Possession::Opponent) {
+        printf("FAIL: opponent-control fixture did not classify Opponent\n"); return 1;
+    }
+    cancel_unsafe_coop_pass(wm);
+    if (wm.coop_pass_task.active || wm.coop_stats.outcomes[(int)CoopOutcome::Intercepted] != 1) {
+        printf("FAIL: confirmed opponent possession did not cancel pass as intercepted\n"); return 1;
+    }
+    printf("confirmed opponent control can cancel pass: OK\n");
+    return 0;
+}
+
+static int receive_confirmation_uses_live_possession_evidence() {
+    WorldModel wm = possession_pass_scene();
+    wm.home[2].x = wm.ball.x; wm.home[2].y = wm.ball.y;
+    wm.home[1].x = 130; wm.home[1].y = 150;
+    Situation sit = SituationModule().analyze(wm);
+    wm.possession = sit.possession; wm.we_have_ball = sit.we_have_ball;
+    wm.whos_ball = 2;
+    if (wm.possession != Possession::Ours) {
+        printf("FAIL: stable receiver geometry did not produce live our possession\n"); return 1;
+    }
+    run_active(wm, 1);
+    run_active(wm, 1);
+    if (wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Received ||
+        !wm.coop_ball_control.active || wm.coop_ball_control.receiver_id != 2 ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::Success] != 1) {
+        printf("FAIL: stable receiver control was not confirmed under stale opponent whos_ball\n"); return 1;
+    }
+    printf("receive confirmation uses live possession evidence: OK\n");
+    return 0;
+}
+
 static int test_coop_pass_task() {
     auto scene = coop_task_scene;
     auto same_wheels = [](const RobotState &a, const RobotState &b) {
@@ -2872,8 +4166,8 @@ static int test_coop_pass_task() {
     for (int reason = 0; reason < 9; ++reason) {
         WorldModel wm = scene(); run_active(wm, 1);
         if (!wm.coop_pass_task.active) { printf("FAIL: coop cancel fixture\n"); return 1; }
-        if (reason == 0) wm.game_state = PM_PlaceKick_Blue;
-        if (reason == 1) { wm.whos_ball = 2; wm.we_have_ball = false; wm.opp[0] = wm.home[1]; wm.opp[0].x = wm.ball.x; wm.opp[0].y = wm.ball.y; wm.home[1].x = 120; }
+        if (reason == 0) wm.runtime_phase = RuntimePhase::RestartSetup;
+        if (reason == 1) { wm.whos_ball = 2; wm.possession = Possession::Opponent; wm.we_have_ball = false; wm.opp[0] = wm.home[1]; wm.opp[0].x = wm.ball.x; wm.opp[0].y = wm.ball.y; wm.home[1].x = 120; }
         if (reason == 2) wm.threat_level = 0.6;
         if (reason == 3) wm.in_penalty_exec = true;
         if (reason == 4) { wm.ball.x = 5; wm.ball.y = 5; }
@@ -2883,7 +4177,7 @@ static int test_coop_pass_task() {
         if (reason == 8) { wm.opp[2].x = 65; wm.opp[2].y = 120; }
         run_active(wm, 1);
         if (wm.coop_pass_task.active) { printf("FAIL: coop task not cancelled reason=%d\n", reason); return 1; }
-        const CoopOutcome expected[] = {CoopOutcome::GameState, CoopOutcome::Intercepted,
+        const CoopOutcome expected[] = {CoopOutcome::PhaseInterrupted, CoopOutcome::Intercepted,
             CoopOutcome::HighThreat, CoopOutcome::Penalty, CoopOutcome::Corner,
             CoopOutcome::GoalDiscipline, CoopOutcome::ReceiverMarked,
             CoopOutcome::EmergencyDefense, CoopOutcome::LaneBlocked};
@@ -3077,7 +4371,7 @@ static int test_coop_lifecycle() {
             if (danger == 0) interrupted.threat_level = 0.6;
             if (danger == 1) interrupted.in_penalty_exec = true;
             if (danger == 2) interrupted.ga_cooldown[receiver] = 5;
-            if (danger == 3) { interrupted.opp[2].x = 55; interrupted.opp[2].y = 90; interrupted.home[receiver].x = 85; interrupted.whos_ball = 2; }
+            if (danger == 3) { interrupted.opp[2].x = 55; interrupted.opp[2].y = 90; interrupted.home[receiver].x = 85; interrupted.whos_ball = 2; interrupted.possession = Possession::Opponent; }
             frame(interrupted, 55, 90);
             if (interrupted.coop_ball_control.active) { printf("FAIL: coop receiver ignores safety=%d\n", danger); return 1; }
         }
@@ -3093,7 +4387,7 @@ static int test_coop_lifecycle() {
         if (wm.coop_ball_control.active) { printf("FAIL: coop owner persists after losing ball\n"); return 1; }
         for (int cause = 0; cause < 3; ++cause) {
             WorldModel cancelled = flight;
-            if (cause == 0) { cancelled.opp[2].x = cancelled.ball.x; cancelled.opp[2].y = cancelled.ball.y; cancelled.whos_ball = 2; }
+            if (cause == 0) { cancelled.opp[2].x = cancelled.ball.x; cancelled.opp[2].y = cancelled.ball.y; cancelled.whos_ball = 2; cancelled.possession = Possession::Opponent; }
             if (cause == 1) cancelled.threat_level = 0.6;
             if (cause == 2) cancelled.coop_pass_task.frames_left = 1;
             frame(cancelled, cancelled.ball.x, cancelled.ball.y);
@@ -3133,15 +4427,16 @@ static int test_coop_lifecycle() {
 static int test_ordinary_pass_task() {
     WorldModel wm = coop_task_scene();
     wm.role[1] = ROLE_ACTIVE; wm.role[2] = ROLE_ASSIST;
+    wm.home[0].x = 200.0; wm.home[0].y = 10.0; // 门将留在现有传球距离外，避免干扰接球生命周期夹具
     wm.assist_x = 55; wm.assist_y = 90;
     PassPlan pp = plan_pass(wm, 1);
-    if (!pp.viable || pp.receiver_id < 2) { printf("FAIL: ordinary PassPlan fixture\n"); return 1; }
+    if (!pp.viable || pp.receiver_id < 2) { printf("FAIL: ordinary PassPlan fixture viable=%d recv=%d target=(%.2f,%.2f)\n", (int)pp.viable, pp.receiver_id, pp.target_x, pp.target_y); return 1; }
     wm.assist_x = 130; wm.assist_y = 150;
     auto &task = wm.coop_pass_task;
     task = {};
     task.active = true; task.passer_id = 1; task.receiver_id = pp.receiver_id;
     task.rx = pp.target_x; task.ry = pp.target_y; task.frames_left = 20;
-    task.game_state = wm.game_state; task.kind = PassTaskKind::Ordinary;
+    task.kind = PassTaskKind::Ordinary;
     task.observing_push = true; task.push_ball_x = wm.ball.x; task.push_ball_y = wm.ball.y;
     const double len = dist(wm.ball.x, wm.ball.y, task.rx, task.ry);
     task.push_dir_x = (task.rx - wm.ball.x) / len; task.push_dir_y = (task.ry - wm.ball.y) / len;
@@ -3176,7 +4471,7 @@ static int test_ordinary_pass_task() {
     return 0;
 }
 
-// 普通 PassPlan 与 CoopPass 共用同一 readiness gate：未到位只等，不改锁点
+// ReceiverReady 只门控出球：Ordinary 可并行准备，CoopPass 保持原先等待行为。
 static int test_pass_readiness_gate() {
     auto stopped = [](const RobotState &r) { return r.vl == 0.0 && r.vr == 0.0; };
 
@@ -3204,7 +4499,7 @@ static int test_pass_readiness_gate() {
         task = {};
         task.active = true; task.passer_id = 1; task.receiver_id = 2;
         task.rx = 55; task.ry = 90; task.frames_left = 20;
-        task.game_state = wm.game_state; task.kind = kind;
+        task.kind = kind;
         const int receiver = task.receiver_id;
         const double locked_x = task.rx, locked_y = task.ry;
 
@@ -3215,11 +4510,23 @@ static int test_pass_readiness_gate() {
         set_param("roles.kRecvNoReverse", 0.0);
         RobotState expected_receiver = wm.home[receiver];
         motion::position(expected_receiver, locked_x, locked_y);
+        RobotState expected_passer = wm.home[1];
+        if (kind == PassTaskKind::Ordinary) {
+            const double len = dist(wm.ball.x, wm.ball.y, locked_x, locked_y);
+            const double prep_x = wm.ball.x - (locked_x - wm.ball.x) / len *
+                                  get_param("roles.kPrepDist", 23.5578);
+            const double prep_y = wm.ball.y - (locked_y - wm.ball.y) / len *
+                                  get_param("roles.kPrepDist", 23.5578);
+            motion::position(expected_passer, prep_x, prep_y, motion::TM_PASS);
+        }
         run_active(wm, 1);
         run_assist(wm, receiver);
         const bool wait_ok = task.active && task.receiver_id == receiver &&
                              task.rx == locked_x && task.ry == locked_y &&
-                             !task.observing_push && stopped(wm.home[1]) &&
+                             !task.observing_push &&
+                             (kind == PassTaskKind::Ordinary
+                                  ? same_drive_command(wm.home[1], expected_passer)
+                                  : stopped(wm.home[1])) &&
                              fabs(wm.home[receiver].vl - expected_receiver.vl) <= 1e-8 &&
                              fabs(wm.home[receiver].vr - expected_receiver.vr) <= 1e-8;
         reset_params();
@@ -3232,9 +4539,26 @@ static int test_pass_readiness_gate() {
         if (!pass_receiver_ready(wm)) {
             printf("FAIL: pass readiness arrived receiver rejected kind=%d\n", (int)kind); return 1;
         }
+        RobotState expected_push = wm.home[1];
+        if (kind == PassTaskKind::Ordinary) {
+            const double len = dist(wm.ball.x, wm.ball.y, locked_x, locked_y);
+            const double dx = (locked_x - wm.ball.x) / len;
+            const double dy = (locked_y - wm.ball.y) / len;
+            wm.home[1].x = wm.ball.x - dx * get_param("roles.kPrepDist", 23.5578);
+            wm.home[1].y = wm.ball.y - dy * get_param("roles.kPrepDist", 23.5578);
+            wm.home[1].rot = angle_to(0.0, 0.0, dx, dy);
+            expected_push = wm.home[1];
+            motion::position(expected_push, wm.ball.x + dx * 20.0,
+                             wm.ball.y + dy * 20.0, motion::TM_PASS);
+        }
         run_active(wm, 1);
-        if (!task.active || !task.observing_push) {
-            printf("FAIL: pass readiness READY did not release kind=%d\n", (int)kind); return 1;
+        const bool ready_ok = task.active &&
+            (kind == PassTaskKind::Ordinary
+                 ? task.ordinary_prep_phase == OrdinaryPassPrepPhase::Prepared &&
+                   same_drive_command(wm.home[1], expected_push)
+                 : task.observing_push);
+        if (!ready_ok) {
+            printf("FAIL: pass readiness READY did not release/prep kind=%d\n", (int)kind); return 1;
         }
     }
 
@@ -3242,7 +4566,7 @@ static int test_pass_readiness_gate() {
     auto &task = danger.coop_pass_task;
     task.active = true; task.passer_id = 1; task.receiver_id = 2;
     task.rx = 55; task.ry = 90; task.frames_left = 20;
-    task.game_state = danger.game_state; task.kind = PassTaskKind::Coop;
+    task.kind = PassTaskKind::Coop;
     danger.threat_level = 0.6;
     run_active(danger, 1);
     if (task.active || danger.coop_stats.outcomes[(int)CoopOutcome::HighThreat] != 1) {
@@ -3261,7 +4585,7 @@ static int test_receiver_meet_ball() {
         task = {};
         task.active = true; task.passer_id = 1; task.receiver_id = 2;
         task.rx = 55; task.ry = 90; task.frames_left = 20;
-        task.game_state = wm.game_state; task.kind = PassTaskKind::Coop;
+        task.kind = PassTaskKind::Coop;
         task.phase = phase;
         for (int i = 0; i < PLAYERS_PER_SIDE; ++i) { wm.opp[i].x = 200; wm.opp[i].y = 15 + 35 * i; }
         wm.ball.x = ball_x; wm.ball.y = 90; wm.ball.vx = ball_vx; wm.ball.vy = 0.0;
@@ -3356,7 +4680,7 @@ static int test_pass_opponent_first_cancel() {
         auto &task = wm.coop_pass_task;
         task.active = true; task.passer_id = 1; task.receiver_id = 2;
         task.rx = 120; task.ry = 90; task.frames_left = 40;
-        task.game_state = wm.game_state; task.kind = kind;
+        task.kind = kind;
         wm.opp[0].x = 120; wm.opp[0].y = 120; // 离锁点 30cm，且不挡球到锁点的线路。
         wm.opp_vel_ready = true;
         return wm;
@@ -3445,7 +4769,7 @@ static int test_pass_receive_control() {
         auto &task = wm.coop_pass_task;
         task.active = true; task.passer_id = 1; task.receiver_id = 2;
         task.rx = 100; task.ry = 90; task.frames_left = 40;
-        task.game_state = wm.game_state; task.kind = kind; task.phase = phase;
+        task.kind = kind; task.phase = phase;
         task.push_dir_x = 1.0; task.push_dir_y = 0.0;
         return wm;
     };
@@ -3924,6 +5248,96 @@ static int test_goalie_line_cover() {
     return 0;
 }
 
+// 重启抢球：重新开球时必须"直着穿球"，不许原地转/左右挪（2026-10-11）
+//   取证（sim_trace --target-csv）：复位帧球边 7.5cm 的那台拿的是抢球角色、目标=球心；
+//   主攻在 49cm 外，7 帧后才换过来，这 0.18s 球已被推走 21cm。
+static int test_restart_charge() {
+    // 该规则默认关（sim A/B 更差，见 roles.cpp），用例必须自己打开；跑完还原
+    const double save_on = get_param("roles.kRestartCharge", 0.0);
+    ::simuro5::set_param("roles.kRestartCharge", 1.0);
+    auto setup = [](WorldModel &wm) {
+        wm.ctx = TeamContext{true};                 // 蓝队：守 x=220，攻向 x=0
+        wm.game_state = PM_PlayOn;
+        wm.runtime_phase = RuntimePhase::RestartSetup;                       // 球还钉在重启摆放点
+        wm.ball.valid = wm.ball_pred.valid = true;
+        wm.ball.x = wm.ball_pred.x = 110; wm.ball.y = wm.ball_pred.y = 90;
+        wm.ball.vx = wm.ball.vy = 0;
+        for (int i = 0; i < 5; ++i) {
+            wm.home[i].x = 200; wm.home[i].y = 20 + i * 30; wm.home[i].rot = 180;
+            wm.opp[i].x = 20;   wm.opp[i].y = 20 + i * 30;
+            wm.role[i] = ROLE_PASSIVE;
+        }
+        wm.role[0] = ROLE_GOALIE; wm.home[0].x = 214; wm.home[0].y = 90;
+    };
+    WorldModel wm;
+    // ① 球后最近(7cm)的那台必须接管，且目标在"球的正后方延长线"上（= 穿过球），命令是直冲
+    setup(wm);
+    wm.home[4].x = 117; wm.home[4].y = 90; wm.home[4].rot = 180;
+    if (!restart_charge(wm, 4)) { printf("FAIL: 重启时球后 7cm 的队员应接管抢球\n"); return 1; }
+    const RobotState &r = wm.home[4];
+    double want_x = 110 + (110 - 117) / 7.0 * 30.0;          // 沿"我→球"方向再往前 30cm
+    if (fabs(r.tgt_x - want_x) > 0.5 || fabs(r.tgt_y - 90.0) > 0.5) {
+        printf("FAIL: 穿球目标点应为 (%.1f,90)，实际 (%.1f,%.1f)\n", want_x, r.tgt_x, r.tgt_y);
+        return 1;
+    }
+    if (r.vl + r.vr < 80.0 || fabs(r.vl - r.vr) > 30.0) {
+        printf("FAIL: 重启抢球应直线冲球 (vl=%.1f vr=%.1f)\n", r.vl, r.vr); return 1;
+    }
+    // ② 球在正侧方 90°：旧路径这一档前进分量硬性为 0（原地转）；新规则必须先接管，
+    //    且目标点在球的另一侧（穿球）；机头一旦对准该方向就必须是直冲
+    setup(wm);
+    wm.home[4].x = 110; wm.home[4].y = 105; wm.home[4].rot = -90.0;   // 正侧方 15cm、机头朝球
+    if (!restart_charge(wm, 4)) { printf("FAIL: 球在正侧方也应接管（否则就是原地转）\n"); return 1; }
+    if (wm.home[4].vl + wm.home[4].vr < 60.0) {
+        printf("FAIL: 机头对着球时应直线冲穿 (vl=%.1f vr=%.1f)\n", wm.home[4].vl, wm.home[4].vr);
+        return 1;
+    }
+    {   // 目标必须落在"球的另一侧"：球在 我→目标 这条线段中间
+        const double ux = 110.0 - wm.home[4].x, uy = 90.0 - wm.home[4].y;
+        const double vx = wm.home[4].tgt_x - 110.0, vy = wm.home[4].tgt_y - 90.0;
+        if (ux * vx + uy * vy <= 0.0) {
+            printf("FAIL: 目标点应在球的另一侧（穿球）实际 (%.1f,%.1f)\n",
+                   wm.home[4].tgt_x, wm.home[4].tgt_y);
+            return 1;
+        }
+    }
+    // ③ 球在推进方向的"前面"（人已在对方门侧）→ 绝不接管（否则把球顶向自家门）
+    setup(wm);
+    wm.home[4].x = 100; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 人已在球的门侧时不许接管（会把球顶向自家门）\n"); return 1; }
+    // ④ 离球太远 → 不接管
+    setup(wm);
+    wm.home[4].x = 185; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 离球 75cm 的不该接管\n"); return 1; }
+    // ⑤ 对方开球 → 不许去抢（定位球犯规）
+    setup(wm);
+    wm.game_state = PM_PlaceKick_Yellow;
+    wm.home[4].x = 117; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 对方开球时不该去抢\n"); return 1; }
+    // ⑥ 球在自家门区（我方门球）→ 交给门将，场上队员不进
+    setup(wm);
+    wm.ball.x = wm.ball_pred.x = 205; wm.ball.y = wm.ball_pred.y = 78;
+    wm.home[4].x = 195; wm.home[4].y = 78;
+    if (restart_charge(wm, 4)) { printf("FAIL: 球在自家门区应交给门将\n"); return 1; }
+    // ⑦ 球在滚（活球）→ 交回原逻辑
+    setup(wm);
+    wm.runtime_phase = RuntimePhase::Running; wm.ball.vx = 3.0;
+    wm.home[4].x = 117; wm.home[4].y = 90;
+    if (restart_charge(wm, 4)) { printf("FAIL: 球在滚时不该接管\n"); return 1; }
+    // ⑧ 黄队镜像：攻向 +x，人须在球的 -x 侧，目标须落在 +x 侧
+    setup(wm);
+    wm.ctx = TeamContext{false};
+    wm.home[4].x = 103; wm.home[4].y = 90;
+    if (!restart_charge(wm, 4)) { printf("FAIL: 黄队镜像应接管\n"); return 1; }
+    if (wm.home[4].tgt_x <= 110.0) {
+        printf("FAIL: 黄队穿球目标应在球的 +x 侧，实际 %.1f\n", wm.home[4].tgt_x); return 1;
+    }
+    printf("restart charge: OK (重启直穿球/侧方也推出去/门侧不接管/太远不管/对方开球不抢/"
+           "门区交门将/活球不管/黄队镜像)\n");
+    ::simuro5::set_param("roles.kRestartCharge", save_on);
+    return 0;
+}
+
 // 争抢直冲：对手贴球、主攻在球侧上方 → 直接朝球冲，不绕球后
 static int test_contest_charge() {
     TeamContext ctx{true};               // 蓝队：攻向 x=0
@@ -3998,6 +5412,163 @@ static int test_gk_goal_kick_reach() {
     return 0;
 }
 
+// 重新开球必须作废"发球承诺"（2026-10-11 二次修复；用户投诉"门将每次发球都往旁边冲"）
+//   真机取证（replay_trace 回放 20261011144043 帧 4655~4754）：平台把球摆回门球点那一帧，
+//   `goalie_serve_phase` 还是上一轮留下的 1 → 门将在"人还在门口 (214.8,89.9)、离球 y 方向 12.2cm"
+//   的状态下直接进承诺期 → 满速冲向穿球目标 (163.1,74.0)。这条直线在球的 x=205.2 处高 **9.2cm**，
+//   根本没过球心 → 只是擦着球边过去（最近 6.5cm，球被蹭到 0.13cm/帧 = 5cm/s）→ 冲过头
+//   → `ball_behind` 判"球已在我身后" → 全速倒车（vl=-150 vr=-126）→ 门将 x 在 [192.4,224.1]
+//   之间来回冲、球 89 帧几乎不动。
+// 本测试用同一起始位，唯一差别是"这一帧球有没有被平台重新摆过"。
+struct GkServeProbe { int hit; double across; double trail; int phase0; };
+
+static GkServeProbe gk_serve_probe(double reset) {
+    const double save = get_param("roles.kGkRestartReset", 1.0);
+    // ⚠️ 2026-10-12：回滚臂必须把**同一路径上后来新增的旋钮一起关掉**，否则它就不再是回滚臂。
+    //   第 76 轮的 kGkAimBall（默认开：承诺期推球方向由"固定出球方向"改成"门将→球心"）
+    //   自己就能治好"擦球边"，于是"只关 kGkRestartReset"的这一臂照样能把球推出去、
+    //   门将横向里程也只有 16cm —— 用户报的故障复现不出来，这条断言就变成恒假，
+    //   测试失去意义（这正是它 2026-10-12 变红的原因，跟真机几何无关）。
+    //   => 回滚臂 = 连 kGkAimBall 一起关，才等于真正的"退回第 75 轮交付版"。
+    const double saveAim = get_param("roles.kGkAimBall", 1.0);
+    const double saveTele = get_param("roles.kGkTeleportReset", 1.0);
+    ::simuro5::set_param("roles.kGkRestartReset", reset);
+    if (reset <= 0.5) ::simuro5::set_param("roles.kGkAimBall", 0.0);
+    ::simuro5::set_param("roles.kGkTeleportReset", 0.0);   // 本测试只问"重新摆球"这一条信号
+    WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
+    wm.ball.valid = wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 205.2; wm.ball.y = wm.ball_pred.y = 77.7;    // 真机门球摆点
+    wm.ball_last.x = 203.7; wm.ball_last.y = 37.0; wm.ball_last.valid = true;  // 上一帧球位：单帧瞬移 40.8cm
+    for (int i = 0; i < 5; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 20 + i * 30;
+        wm.opp[i].x = 60;   wm.opp[i].y = 20 + i * 30;
+        wm.role[i] = ROLE_PASSIVE;
+    }
+    wm.role[0] = ROLE_GOALIE;
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
+    wm.goalie_serve_phase = 1;                       // 上一轮门球留下的承诺
+    GkServeProbe out{-1, 0.0, 0.0, -1};
+    double py = wm.home[0].y;
+    for (int f = 0; f < 200; ++f) {
+        run_goalie(wm, 0);
+        if (f == 0) out.phase0 = wm.goalie_serve_phase;
+        RobotState &r = wm.home[0];
+        double v = 0.5 * (r.vl + r.vr) * 0.025, w = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        out.trail += std::fabs(r.y - py); py = r.y;
+        double ex = wm.ball.x - r.x, ey = wm.ball.y - r.y, d = std::hypot(ex, ey);
+        if (d < 7.0 && d > 1e-6) {                   // 碰到 → 球被顶到车身外沿
+            if (out.hit < 0) out.across = std::fabs(wm.ball.y - r.y);   // 第一次接触时的横向偏差
+            wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
+        }
+        wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
+        wm.ball_last = wm.ball;                      // 下一帧起球位连续（只有第 0 帧算"重新摆放"）
+        if (wm.ball.x < 195.0) { out.hit = f; break; }
+    }
+    ::simuro5::set_param("roles.kGkRestartReset", save);
+    ::simuro5::set_param("roles.kGkAimBall", saveAim);
+    ::simuro5::set_param("roles.kGkTeleportReset", saveTele);
+    return out;
+}
+
+static int test_gk_restart_reset_phase() {
+    GkServeProbe on = gk_serve_probe(1.0), off = gk_serve_probe(0.0);
+    printf("gk restart reset: 清零承诺 推出=%2d 帧 擦球横向偏差=%.1fcm 门将横向里程=%.1fcm (首帧 ph=%d)\n",
+           on.hit, on.across, on.trail, on.phase0);
+    printf("gk restart reset: 回滚(粘住) 推出=%2d 帧 擦球横向偏差=%.1fcm 门将横向里程=%.1fcm (首帧 ph=%d)\n",
+           off.hit, off.across, off.trail, off.phase0);
+    if (on.phase0 != 0) { printf("FAIL: 重新摆球那一帧承诺期没清零 ph=%d\n", on.phase0); return 1; }
+    if (off.phase0 != 1) { printf("FAIL: 回滚臂第一帧不该动承诺期 ph=%d\n", off.phase0); return 1; }
+    if (on.hit < 0) { printf("FAIL: 清零承诺后 200 帧没把球推出去\n"); return 1; }
+    if (on.hit > 60) { printf("FAIL: 清零承诺后发球仍拖沓 %d 帧（应 <=60）\n", on.hit); return 1; }
+    if (on.across > off.across) {
+        printf("FAIL: 清零承诺后擦球横向偏差反而更大 %.1f > %.1f cm\n", on.across, off.across); return 1;
+    }
+    if (on.trail > off.trail) {
+        printf("FAIL: 清零承诺后门将横向里程反而更大 %.1f > %.1f cm（就是「往旁边冲」）\n",
+               on.trail, off.trail); return 1;
+    }
+    // 回滚臂必须复现用户报的现象（球推不出去、门将横向磨 60cm），否则这个测试就失去意义了
+    if (off.hit >= 0 || off.trail < 40.0) {
+        printf("FAIL: 回滚臂没复现「球推不出去」的故障（推出=%d 横向里程=%.1f）——"
+               "起始几何变了，请重核真机帧 20261011144043\n", off.hit, off.trail); return 1;
+    }
+    return 0;
+}
+
+// 第 76 轮（2026-10-11 夜）：第 75 轮上机后那场（20261011163823）门球仍要 125 帧
+//   ① 门将斜着赶到后撤点、带着惯性就进承诺期 → 原地转正时滑出 10cm → 推穿擦球边；
+//   ② 重新摆球时球只挪了 13cm（<30 认不出），但门将被平台瞬移 11cm → 承诺期粘着。
+// 本测试的运动学带"惯性"：命令速度一阶滞后（每帧只追上 35%），模拟真机里"切成原地转正后还会滑"。
+struct GkSettleProbe { int hit; double across; int own_goal; int phase0; };
+static GkSettleProbe gk_settle_probe(double aim, double tele, bool teleport_start) {
+    const double s0 = get_param("roles.kGkAimBall", 1.0), t0 = get_param("roles.kGkTeleportReset", 1.0);
+    ::simuro5::set_param("roles.kGkAimBall", aim);
+    ::simuro5::set_param("roles.kGkTeleportReset", tele);
+    WorldModel wm; wm.ctx = TeamContext{true}; wm.game_state = PM_PlayOn;
+    wm.ball.valid = wm.ball_pred.valid = true;
+    wm.ball.x = wm.ball_pred.x = 205.2; wm.ball.y = wm.ball_pred.y = 77.7;   // 真机门球摆点
+    wm.ball_last = wm.ball; wm.ball_last.valid = true;                      // 球位连续：只靠门将信号
+    for (int i = 0; i < 5; ++i) { wm.home[i].x = 150; wm.home[i].y = 20 + i * 30; wm.opp[i].x = 60; wm.opp[i].y = 20 + i * 30; wm.role[i] = ROLE_PASSIVE; }
+    wm.role[0] = ROLE_GOALIE;
+    if (teleport_start) {
+        // 帧 7907→7908：门将上一帧在 (225.6,93.2)，这一帧被摆回门口；承诺期还粘着 1
+        wm.goalie_last_id = 0; wm.goalie_last_x = 225.6; wm.goalie_last_y = 93.2;
+        wm.goalie_serve_phase = 1;
+    }
+    wm.home[0].x = 214.8; wm.home[0].y = 89.9; wm.home[0].rot = -90.0;
+    GkSettleProbe out{-1, 0.0, 0, -1};
+    double v = 0.0, w = 0.0;
+    for (int f = 0; f < 200; ++f) {
+        run_goalie(wm, 0);
+        if (f == 0) out.phase0 = wm.goalie_serve_phase;
+        RobotState &r = wm.home[0];
+        double vc = 0.5 * (r.vl + r.vr) * 0.025, wc = (r.vr - r.vl) / 10.0 * 0.025 * 180.0 / SIMURO5_PI;
+        v += 0.35 * (vc - v); w += 0.6 * (wc - w);                  // 惯性：真车不会一帧停住
+        r.rot = normalize_angle(r.rot + w);
+        r.x += v * std::cos(r.rot * SIMURO5_PI / 180.0); r.y += v * std::sin(r.rot * SIMURO5_PI / 180.0);
+        double ex = wm.ball.x - r.x, ey = wm.ball.y - r.y, d = std::hypot(ex, ey);
+        if (d < 7.0 && d > 1e-6) {
+            if (out.across == 0.0) out.across = std::fabs(wm.ball.y - r.y);
+            wm.ball.x = r.x + ex / d * 7.0; wm.ball.y = r.y + ey / d * 7.0;
+        }
+        wm.ball_pred.x = wm.ball.x; wm.ball_pred.y = wm.ball.y;
+        wm.ball_last = wm.ball;
+        if (wm.ball.x > 219.0) { out.own_goal = 1; break; }
+        if (wm.ball.x < 195.0) { out.hit = f; break; }
+    }
+    ::simuro5::set_param("roles.kGkAimBall", s0);
+    ::simuro5::set_param("roles.kGkTeleportReset", t0);
+    return out;
+}
+
+static int test_gk_serve_settle() {
+    GkSettleProbe on = gk_settle_probe(1.0, 1.0, false), off = gk_settle_probe(0.0, 1.0, false);
+    GkSettleProbe ton = gk_settle_probe(1.0, 1.0, true), toff = gk_settle_probe(1.0, 0.0, true);
+    printf("gk serve settle: 对准球心 推出=%3d 帧 首触横偏=%.1fcm | 回滚(固定方向) 推出=%3d 帧 首触横偏=%.1fcm\n",
+           on.hit, on.across, off.hit, off.across);
+    printf("gk serve settle: 瞬移清零 推出=%3d 帧 首触横偏=%.1fcm ph0=%d | 回滚(承诺粘住) 推出=%3d 帧 首触横偏=%.1fcm ph0=%d\n",
+           ton.hit, ton.across, ton.phase0, toff.hit, toff.across, toff.phase0);
+    if (on.own_goal || ton.own_goal) { printf("FAIL: 门球顶进自家门\n"); return 1; }
+    if (on.hit < 0 || on.hit > 90) { printf("FAIL: 带惯性场景门球 %d 帧（应 0~90）\n", on.hit); return 1; }
+    if (ton.hit < 0 || ton.hit > 90) { printf("FAIL: 门将被瞬移后门球 %d 帧（应 0~90）\n", ton.hit); return 1; }
+    if (off.hit >= 0 && on.hit > off.hit + 10) { printf("FAIL: 对准球心反而更慢 %d > %d+10\n", on.hit, off.hit); return 1; }
+    // ⚠️ 2026-10-12：这条不能拿"帧数"当判据（原来写的是 `ton.hit > toff.hit` 就 FAIL）。
+    //   清零承诺后门将先横摆到"球后准备点"再推穿，帧数上**必然**比"带惯性直接满速冲"慢几帧；
+    //   它买的是**不擦球边**（真机 20261011163823 那场就是擦球边 -> 冲过头 -> 倒车 -> 89 帧球不动）。
+    //   本探针的 hit 只是"球被推出 10cm 用了多少帧"，压根不建模那条失败链，所以它量不出这个改动的价值
+    //   —— 拿它 gate 等于要求"修 bug 必须更快"，方向就错了。
+    //   => 判据换成这条改动**真正负责的两件事**：①承诺期确实被清零；②首触横向偏差不更大。
+    if (ton.phase0 != 0) { printf("FAIL: 门将被瞬移那一帧承诺期没清零 ph=%d\n", ton.phase0); return 1; }
+    if (toff.phase0 != 1) { printf("FAIL: 回滚臂第一帧不该动承诺期 ph=%d\n", toff.phase0); return 1; }
+    if (ton.across > toff.across) {
+        printf("FAIL: 瞬移清零后首触横向偏差反而更大 %.1f > %.1f cm（就是擦球边）\n", ton.across, toff.across);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_zone_mode() {
     auto base = [](WorldModel &wm, double bx, double by) {
         TeamContext ctx{true};               // 蓝队：己方门 x=220，攻向 -x
@@ -4063,13 +5634,286 @@ static int test_opp_box_instant_exit() {
     return 0;
 }
 
-static int test_live_play() {
+static WorldModel runtime_action_scene() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true};
+    wm.ball.valid = true;
+    wm.ball.x = 110.0; wm.ball.y = 90.0;
+    wm.ball.vx = wm.ball.vy = 0.0;
+    wm.ball_pred = wm.ball;
+    wm.we_have_ball = true;
+    wm.threat_level = 0.1;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 150.0; wm.home[i].y = 25.0 + 30.0 * i;
+        wm.opp[i].x = 205.0; wm.opp[i].y = 20.0 + 35.0 * i;
+    }
+    wm.home[1].x = 125.0; wm.home[1].y = 90.0; wm.home[1].rot = 180.0;
+    return wm;
+}
+
+static int test_running_phase_allows_active_action() {
+    WorldModel wm = runtime_action_scene();
+    wm.game_state = PM_FreeBall_LeftBot;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.coop_pass_task.active = true;
+    wm.coop_pass_task.passer_id = 1; wm.coop_pass_task.receiver_id = 2;
+    wm.coop_pass_task.rx = 130.0; wm.coop_pass_task.ry = 90.0;
+    wm.coop_pass_task.frames_left = 20;
+    cancel_unsafe_coop_pass(wm);
+    if (!wm.coop_pass_task.active) {
+        printf("FAIL: internal Running pass entry was blocked by stale raw game state\n");
+        return 1;
+    }
+    wm.coop_pass_task.active = false;
+    run_active(wm, 1);
+    if (std::fabs(wm.home[1].vl) < 1e-9 && std::fabs(wm.home[1].vr) < 1e-9) {
+        printf("FAIL: internal Running was blocked by stale raw game state\n");
+        return 1;
+    }
+    printf("runtime Running allows active action: OK\n");
+    return 0;
+}
+
+static int clear_our_control_reports_our_possession() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
+    wm.ball.valid = true; wm.ball.x = 100; wm.ball.y = 90;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180; wm.home[i].y = 20 + 30 * i;
+        wm.opp[i].x = 10 + 10 * i; wm.opp[i].y = 20 + 30 * i;
+    }
+    wm.home[1].x = 108; wm.home[1].y = 90;
+    Situation sit = SituationModule().analyze(wm);
+    if (sit.possession != Possession::Ours || !sit.we_have_ball) {
+        printf("FAIL: clear own control did not report Ours\n"); return 1;
+    }
+    printf("clear our control reports our possession: OK\n");
+    return 0;
+}
+
+static int clear_opponent_control_reports_opponent_possession() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
+    wm.ball.valid = true; wm.ball.x = 100; wm.ball.y = 90;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 180; wm.home[i].y = 20 + 30 * i;
+        wm.opp[i].x = 10 + 10 * i; wm.opp[i].y = 20 + 30 * i;
+    }
+    wm.opp[0].x = 108; wm.opp[0].y = 90;
+    Situation sit = SituationModule().analyze(wm);
+    if (sit.possession != Possession::Opponent || sit.we_have_ball) {
+        printf("FAIL: clear opponent control did not report Opponent\n"); return 1;
+    }
+    printf("clear opponent control reports opponent possession: OK\n");
+    return 0;
+}
+
+static int loose_ball_is_not_opponent_possession() {
+    WorldModel wm;
+    wm.ctx = TeamContext{true}; wm.runtime_phase = RuntimePhase::Running;
+    wm.ball.valid = true; wm.ball.x = 100; wm.ball.y = 90;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        wm.home[i].x = 150; wm.home[i].y = 20 + 30 * i;
+        wm.opp[i].x = 20; wm.opp[i].y = 20 + 30 * i;
+    }
+    Situation sit = SituationModule().analyze(wm);
+    if (sit.possession != Possession::Loose || sit.we_have_ball) {
+        printf("FAIL: uncontrolled ball was collapsed into opponent possession\n"); return 1;
+    }
+    printf("loose ball is not opponent possession: OK\n");
+    return 0;
+}
+
+static int running_possession_ignores_stale_restart_owner() {
+    WorldModel a, b;
+    for (WorldModel *wm : {&a, &b}) {
+        wm->ctx = TeamContext{true}; wm->runtime_phase = RuntimePhase::Running;
+        wm->game_state = PM_PlayOn; wm->ball.valid = true;
+        wm->ball.x = 100; wm->ball.y = 90; wm->ball_pred = wm->ball;
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+            wm->home[i].x = 175; wm->home[i].y = 20 + 30 * i;
+            wm->opp[i].x = 15 + 10 * i; wm->opp[i].y = 20 + 30 * i;
+            wm->role[i] = i == 0 ? ROLE_GOALIE : (i == 1 ? ROLE_ACTIVE : ROLE_ASSIST);
+        }
+        wm->home[1].x = 108; wm->home[1].y = 90;
+    }
+    a.whos_ball = 1; b.whos_ball = 2;
+    Strategy sa, sb; sa.run(a); sb.run(b);
+    if (a.possession != Possession::Ours || b.possession != Possession::Ours ||
+        a.possession != b.possession || a.we_have_ball != b.we_have_ball ||
+        a.team_state != b.team_state || a.presser_id != b.presser_id || a.active_id != b.active_id) {
+        printf("FAIL: raw whos_ball changed Running possession or tactical state\n"); return 1;
+    }
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        if (a.role[i] != b.role[i] || std::fabs(a.home[i].vl - b.home[i].vl) > 1e-9 ||
+            std::fabs(a.home[i].vr - b.home[i].vr) > 1e-9) {
+            printf("FAIL: raw whos_ball changed Running robot action id=%d\n", i); return 1;
+        }
+    }
+    printf("running possession ignores stale restart owner: OK\n");
+    return 0;
+}
+
+static int test_non_running_phase_blocks_active_touch() {
+    WorldModel wm = runtime_action_scene();
+    wm.game_state = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::RestartSetup;
+    run_active(wm, 1);
+    if (std::fabs(wm.home[1].vl) > 1e-9 || std::fabs(wm.home[1].vr) > 1e-9) {
+        printf("FAIL: raw PlayOn bypassed non-Running active touch gate\n");
+        return 1;
+    }
+    printf("non-Running blocks active touch: OK\n");
+    return 0;
+}
+
+static int test_running_phase_keeps_no_push_guard() {
+    WorldModel wm = runtime_action_scene();
+    wm.game_state = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.ball.x = 26.0; wm.ball.y = 20.0;
+    if (detail::push_allowed_with_guard(wm, true)) {
+        printf("FAIL: Running allowed touch inside no-push zone with guard enabled\n");
+        return 1;
+    }
+    if (!detail::push_allowed_with_guard(wm, false)) {
+        printf("FAIL: production guard-off behavior changed inside no-push zone\n");
+        return 1;
+    }
+
+    wm.ball.x = 110.0; wm.ball.y = 90.0;
+    if (!detail::push_allowed_with_guard(wm, true)) {
+        printf("FAIL: Running blocked touch in legal area with guard enabled\n");
+        return 1;
+    }
+
+    wm.runtime_phase = RuntimePhase::RestartSetup;
+    for (int guard = 0; guard <= 1; ++guard) {
+        for (int in_zone = 0; in_zone <= 1; ++in_zone) {
+            wm.ball.x = in_zone ? 26.0 : 110.0;
+            wm.ball.y = in_zone ? 20.0 : 90.0;
+            if (detail::push_allowed_with_guard(wm, guard != 0)) {
+                printf("FAIL: non-Running phase allowed touch (guard=%d, no-push-zone=%d)\n",
+                       guard, in_zone);
+                return 1;
+            }
+        }
+    }
+
+    printf("runtime Running keeps no-push guard: OK\n");
+    return 0;
+}
+
+static WorldModel restart_touch_scene(int game_state = PM_PlaceKick_Blue) {
+    WorldModel wm = runtime_action_scene();
+    wm.game_state = game_state;
+    wm.runtime_phase = RuntimePhase::RestartSetup;
+    wm.restart_armed = true;
+    RoleAssignment assignment;
+    assignment.assign(wm);  // 重用现有 RestartSetup 固定角色来源
+    return wm;
+}
+
+static int our_restart_executor_can_first_touch() {
+    WorldModel wm = restart_touch_scene();
+    if (wm.active_id != 1 || wm.role[1] != ROLE_ACTIVE ||
+        !detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: our restart executor was denied its first touch\n");
+        return 1;
+    }
+    run_active(wm, 1);
+    if (std::fabs(wm.home[1].vl) < 1e-9 && std::fabs(wm.home[1].vr) < 1e-9) {
+        printf("FAIL: authorized restart executor did not enter the active action path\n");
+        return 1;
+    }
+    printf("our restart executor can first touch: OK\n");
+    return 0;
+}
+
+static int our_restart_non_executor_cannot_touch() {
+    WorldModel wm = restart_touch_scene();
+    if (detail::actor_touch_allowed_with_guard(wm, 2, true)) {
+        printf("FAIL: non-executor received the restart first-touch exception\n");
+        return 1;
+    }
+    run_active(wm, 2);
+    if (std::fabs(wm.home[2].vl) > 1e-9 || std::fabs(wm.home[2].vr) > 1e-9) {
+        printf("FAIL: non-executor entered the active touch path\n");
+        return 1;
+    }
+    printf("our restart non-executor cannot touch: OK\n");
+    return 0;
+}
+
+static int opponent_restart_blocks_all_our_touch() {
+    const int opponent_restarts[] = {
+        PM_PlaceKick_Yellow, PM_PenaltyKick_Yellow,
+        PM_FreeKick_Yellow, PM_GoalKick_Yellow
+    };
+    for (int state : opponent_restarts) {
+        WorldModel wm = restart_touch_scene(state);
+        for (int id = 0; id < PLAYERS_PER_SIDE; ++id) {
+            if (detail::actor_touch_allowed_with_guard(wm, id, false)) {
+                printf("FAIL: opponent restart state %d allowed our robot %d to touch\n", state, id);
+                return 1;
+            }
+        }
+    }
+    printf("opponent restart blocks all our touch: OK\n");
+    return 0;
+}
+
+static int unknown_restart_owner_does_not_grant_touch() {
+    WorldModel wm = restart_touch_scene(999);
+    if (detail::actor_touch_allowed_with_guard(wm, 1, false)) {
+        printf("FAIL: unknown restart owner granted first touch\n");
+        return 1;
+    }
+    wm.game_state = PM_FreeBall_LeftBot;  // quadrant is known, owning team is not encoded
+    if (detail::actor_touch_allowed_with_guard(wm, 1, false)) {
+        printf("FAIL: neutral FreeBall state granted an owning-team exception\n");
+        return 1;
+    }
+    printf("unknown restart owner does not grant touch: OK\n");
+    return 0;
+}
+
+static int restart_executor_remains_allowed_until_release() {
+    Environment env;
+    init_env(env, 110.0, 90.0);
+    env.gameState = PM_PlaceKick_Blue;
+    WorldModel wm;
+    TeamContext ctx{true};
+    wm.update(&env, ctx);
+    RoleAssignment assignment;
+    assignment.assign(wm);
+
+    Environment prev = env;
+    init_env(env, 112.0, 90.0);
+    env.gameState = PM_PlaceKick_Blue;
+    env.lastBall.pos = prev.currentBall.pos;
+    wm.update(&env, ctx);
+    if (wm.runtime_phase != RuntimePhase::RestartSetup ||
+        !detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: authorized executor was locked after sub-threshold ball motion\n");
+        return 1;
+    }
+    run_active(wm, 1);
+    if (std::fabs(wm.home[1].vl) < 1e-9 && std::fabs(wm.home[1].vr) < 1e-9) {
+        printf("FAIL: executor's follow-up start action was locked before release\n");
+        return 1;
+    }
+    printf("restart executor remains allowed until release: OK\n");
+    return 0;
+}
+
+static int restart_ball_motion_enters_running() {
     WorldModel wm; Environment e; TeamContext ctx{true};
     auto step = [&](double bx, double by, int gs) {
         Environment prev = e; init_env(e, bx, by); e.gameState = gs;
         e.lastBall.pos = prev.currentBall.pos;
         wm.update(&e, ctx);
-        return wm.live_play;
+        return wm.runtime_phase == RuntimePhase::Running;
     };
     init_env(e, 110, 90);
     if (step(110, 90, PM_FreeBall_LeftBot)) { printf("FAIL: 重启摆球首帧不应算活球\n"); return 1; }
@@ -4079,7 +5923,392 @@ static int test_live_play() {
     if (step(55, 30, PM_FreeBall_LeftBot)) { printf("FAIL: 球位跳变(重新摆球)应回到死球\n"); return 1; }
     if (step(55, 30, PM_PlaceKick_Blue)) { printf("FAIL: gameState 变化应回到死球\n"); return 1; }
     if (!step(55, 30, PM_PlayOn)) { printf("FAIL: PlayOn 必须算活球\n"); return 1; }
-    printf("live play: OK (真机 gameState 不回 PlayOn 时按球离开摆放点判活球)\n");
+    printf("restart ball motion enters Running: OK (保留现有球位释放判据)\n");
+    return 0;
+}
+
+static int running_uses_normal_touch_permission() {
+    WorldModel wm = restart_touch_scene(PM_FreeBall_LeftBot);
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.restart_armed = false;
+    if (!detail::actor_touch_allowed_with_guard(wm, 1, false) ||
+        !detail::push_allowed_with_guard(wm, false)) {
+        printf("FAIL: Running depended on restart owner/executor permission\n");
+        return 1;
+    }
+    printf("running uses normal touch permission: OK\n");
+    return 0;
+}
+
+static int restart_exception_does_not_bypass_no_push_policy() {
+    WorldModel wm = restart_touch_scene();
+    wm.ball.x = 26.0; wm.ball.y = 20.0;
+    if (!detail::actor_touch_allowed_with_guard(wm, 1, false)) {
+        printf("FAIL: control case was not an authorized restart touch\n");
+        return 1;
+    }
+    if (detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: restart first-touch exception bypassed enabled no-push guard\n");
+        return 1;
+    }
+    printf("restart exception preserves no-push policy: OK\n");
+    return 0;
+}
+
+static int our_penalty_uses_common_restart_touch_gate() {
+    WorldModel wm = restart_touch_scene(PM_PenaltyKick_Blue);
+    if (!detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: our penalty's existing ACTIVE executor did not use common touch gate\n");
+        return 1;
+    }
+    wm.ctx = TeamContext{false};
+    wm.game_state = PM_PenaltyKick_Yellow;
+    if (!detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: yellow-side penalty owner did not use common touch gate\n");
+        return 1;
+    }
+    printf("our penalty uses common restart touch gate: OK\n");
+    return 0;
+}
+
+static int our_free_kick_uses_active_executor() {
+    WorldModel wm = restart_touch_scene(PM_FreeKick_Blue);
+    if (!detail::actor_touch_allowed_with_guard(wm, 1, true) ||
+        detail::actor_touch_allowed_with_guard(wm, 2, true)) {
+        printf("FAIL: our free kick did not use the existing ACTIVE executor\n");
+        return 1;
+    }
+    printf("our free kick uses ACTIVE executor: OK\n");
+    return 0;
+}
+
+static int our_goal_kick_uses_goalie_executor() {
+    WorldModel wm = restart_touch_scene(PM_GoalKick_Blue);
+    if (!detail::actor_touch_allowed_with_guard(wm, 0, true) ||
+        detail::actor_touch_allowed_with_guard(wm, 1, true)) {
+        printf("FAIL: own goal kick did not use the existing goalie executor\n");
+        return 1;
+    }
+    printf("our goal kick uses goalie executor: OK\n");
+    return 0;
+}
+
+static int restart_owner_still_controls_restart_permission() {
+    WorldModel ours = restart_touch_scene(PM_FreeKick_Blue);
+    ours.possession = Possession::Opponent;  // 运动战推断不能改写裁判定位球归属
+    ours.whos_ball = 2;
+    if (!detail::actor_touch_allowed_with_guard(ours, 1, false) ||
+        detail::actor_touch_allowed_with_guard(ours, 2, false)) {
+        printf("FAIL: P1.3 possession evidence changed our restart executor permission\n"); return 1;
+    }
+    WorldModel theirs = restart_touch_scene(PM_FreeKick_Yellow);
+    theirs.possession = Possession::Ours;
+    theirs.whos_ball = 1;
+    if (detail::actor_touch_allowed_with_guard(theirs, 1, false) ||
+        detail::actor_touch_allowed_with_guard(theirs, 2, false)) {
+        printf("FAIL: P1.3 possession evidence bypassed opponent restart ownership\n"); return 1;
+    }
+    printf("restart owner still controls restart permission: OK\n");
+    return 0;
+}
+
+static void update_play_mode_preserving_pose(WorldModel &wm, int game_state) {
+    Environment env;
+    init_env(env, wm.ball.x, wm.ball.y);
+    env.lastBall.pos = env.currentBall.pos;
+    env.gameState = game_state;
+    env.whosBall = wm.whos_ball;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        env.home[i].pos.x = wm.home[i].x; env.home[i].pos.y = wm.home[i].y;
+        env.home[i].rotation = wm.home[i].rot;
+        env.opponent[i].pos.x = wm.opp[i].x; env.opponent[i].pos.y = wm.opp[i].y;
+        env.opponent[i].rotation = wm.opp[i].rot;
+    }
+    wm.update(&env, wm.ctx);
+}
+
+static WorldModel pass_lifecycle_context(CoopPassPhase phase) {
+    WorldModel wm = possession_pass_scene();
+    wm.game_state = wm.game_state_last = PM_FreeBall_LeftBot;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.restart_armed = true;
+    wm.coop_stats.created = 1;
+    wm.coop_pass_task.active = true;
+    wm.coop_pass_task.phase = phase;
+    wm.coop_pass_task.observing_push = false;
+    wm.coop_pass_task.frames_left = 40;
+    return wm;
+}
+
+static int pass_task_survives_irrelevant_raw_game_state_change() {
+    WorldModel wm = pass_lifecycle_context(CoopPassPhase::Preparing);
+    const int frames_left = wm.coop_pass_task.frames_left;
+    update_play_mode_preserving_pose(wm, PM_PlayOn);
+    if (wm.runtime_phase != RuntimePhase::Running || !wm.coop_pass_task.active) {
+        printf("FAIL: Preparing task ended on a raw-state change within Running\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.frames_left >= frames_left) {
+        printf("FAIL: Preparing task did not survive and advance after irrelevant raw-state change\n"); return 1;
+    }
+    printf("pass task survives irrelevant raw game state change: OK\n");
+    return 0;
+}
+
+static int receiving_survives_irrelevant_raw_game_state_change() {
+    WorldModel wm = pass_lifecycle_context(CoopPassPhase::Receiving);
+    update_play_mode_preserving_pose(wm, PM_PlayOn);
+    if (wm.runtime_phase != RuntimePhase::Running || !wm.coop_pass_task.active ||
+        wm.coop_pass_task.phase != CoopPassPhase::Receiving) {
+        printf("FAIL: Receiving task ended on a raw-state change within Running\n"); return 1;
+    }
+    run_active(wm, 1);
+    if (!wm.coop_pass_task.active || wm.coop_pass_task.phase != CoopPassPhase::Receiving) {
+        printf("FAIL: Receiving phase did not survive irrelevant raw-state change\n"); return 1;
+    }
+    printf("receiving survives irrelevant raw game state change: OK\n");
+    return 0;
+}
+
+static int temporary_control_survives_irrelevant_raw_game_state_change() {
+    WorldModel wm = pass_lifecycle_context(CoopPassPhase::Received);
+    wm.coop_pass_task.active = false;
+    wm.coop_ball_control = {true, 2, 0};
+    update_play_mode_preserving_pose(wm, PM_PlayOn);
+    cancel_unsafe_coop_pass(wm);
+    if (wm.runtime_phase != RuntimePhase::Running || !wm.coop_ball_control.active) {
+        printf("FAIL: temporary control ended on a raw-state change within Running\n"); return 1;
+    }
+    printf("temporary control survives irrelevant raw game state change: OK\n");
+    return 0;
+}
+
+static int restart_interrupts_active_pass_task() {
+    for (CoopPassPhase phase : {CoopPassPhase::Preparing, CoopPassPhase::Receiving}) {
+        WorldModel wm = pass_lifecycle_context(phase);
+        wm.game_state = wm.game_state_last = PM_PlayOn;
+        wm.restart_armed = false;
+        update_play_mode_preserving_pose(wm, PM_PlaceKick_Blue);
+        if (wm.runtime_phase != RuntimePhase::RestartSetup || wm.coop_pass_task.active ||
+            wm.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] != 1) {
+            printf("FAIL: restart did not interrupt pass phase=%d\n", (int)phase); return 1;
+        }
+    }
+    printf("restart interrupts active pass task: OK\n");
+    return 0;
+}
+
+static int restart_interrupts_temporary_control() {
+    WorldModel wm = pass_lifecycle_context(CoopPassPhase::Received);
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.restart_armed = false;
+    wm.coop_pass_task.active = false;
+    wm.coop_ball_control = {true, 2, 0};
+    update_play_mode_preserving_pose(wm, PM_PlaceKick_Blue);
+    if (wm.runtime_phase != RuntimePhase::RestartSetup || wm.coop_ball_control.active ||
+        wm.coop_stats.control_exits[(int)CoopOutcome::PhaseInterrupted] != 1) {
+        printf("FAIL: restart did not interrupt temporary control\n"); return 1;
+    }
+    printf("restart interrupts temporary control: OK\n");
+    return 0;
+}
+
+static int old_pass_task_does_not_resume_after_restart() {
+    WorldModel wm = pass_lifecycle_context(CoopPassPhase::Preparing);
+    wm.game_state = wm.game_state_last = PM_PlayOn;
+    wm.restart_armed = false;
+    update_play_mode_preserving_pose(wm, PM_PlaceKick_Blue);
+    const int task_frames = wm.coop_pass_task.frames_left;
+    update_play_mode_preserving_pose(wm, PM_PlayOn);
+    if (wm.runtime_phase != RuntimePhase::Running || wm.coop_pass_task.active ||
+        wm.coop_pass_task.frames_left != task_frames ||
+        wm.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] != 1) {
+        printf("FAIL: old pass task resumed after the restart ended\n"); return 1;
+    }
+    printf("old pass task does not resume after restart: OK\n");
+    return 0;
+}
+
+static int possession_cancel_still_works() {
+    return confirmed_opponent_control_can_cancel_pass();
+}
+
+// 赛前合并护栏：非 1 号主攻沿用射门/带球/追球，不进入固定编号传球链。
+static int test_p0_active_pass_compatibility() {
+    WorldModel base;
+    base.ctx = TeamContext{true};
+    base.game_state = base.game_state_last = PM_PlayOn;
+    base.runtime_phase = RuntimePhase::Running;
+    base.possession = Possession::Ours; base.we_have_ball = true;
+    base.ball.valid = true; base.ball.x = 70.0; base.ball.y = 90.0;
+    base.threat_level = 0.1; base.shoot_push_count = 10;
+    base.role[0] = ROLE_GOALIE; base.role[1] = ROLE_ACTIVE;
+    base.role[2] = ROLE_ASSIST; base.role[3] = ROLE_MIDFIELD; base.role[4] = ROLE_PASSIVE;
+    for (int i = 0; i < PLAYERS_PER_SIDE; ++i) {
+        base.home[i].x = 180.0; base.home[i].y = 30.0 + 25.0 * i;
+        base.opp[i].x = 200.0; base.opp[i].y = 20.0 + 30.0 * i;
+    }
+    base.home[0].x = 210.0; base.home[0].y = 90.0;
+    base.home[1].x = 75.0; base.home[1].y = 90.0;
+    base.home[2].x = 120.0; base.home[2].y = 90.0;
+    base.assist_x = 120.0; base.assist_y = 90.0;
+    base.mid_x = 180.0; base.mid_y = 150.0;
+    base.passive_x = 180.0; base.passive_y = 40.0;
+    base.opp[0].x = 50.0; base.opp[0].y = 90.0;
+
+    WorldModel fixed = base;
+    run_active(fixed, 1);
+    if (!fixed.coop_pass_task.active || fixed.coop_pass_task.kind != PassTaskKind::Ordinary ||
+        fixed.coop_pass_task.passer_id != 1) {
+        printf("FAIL: P0 active=1 lost ordinary pass\n"); return 1;
+    }
+
+    WorldModel dynamic = base;
+    dynamic.active_id = 3;
+    dynamic.role[1] = ROLE_MIDFIELD; dynamic.role[3] = ROLE_ACTIVE;
+    dynamic.home[3] = dynamic.home[1]; dynamic.home[1].x = 180.0;
+    PassPlan tempting = plan_pass(dynamic, 3);
+    if (!tempting.viable) { printf("FAIL: P0 active=3 fixture lacks tempting pass\n"); return 1; }
+    RobotState wrong_command = dynamic.home[3];
+    motion::position(wrong_command, tempting.target_x, tempting.target_y);
+    run_active(dynamic, 3);
+    int active_count = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
+        active_count += dynamic.role[i] == ROLE_ACTIVE ? 1 : 0;
+    if (dynamic.coop_pass_task.active || dynamic.coop_stats.created != 0 || active_count != 1 ||
+        same_drive_command(dynamic.home[3], wrong_command) ||
+        (fabs(dynamic.home[3].vl) < 1e-9 && fabs(dynamic.home[3].vr) < 1e-9)) {
+        printf("FAIL: P0 active=3 followed an uncreatable pass or stalled\n"); return 1;
+    }
+
+    WorldModel coop = coop_task_scene();
+    coop.active_id = 3;
+    coop.role[0] = ROLE_GOALIE; coop.role[1] = ROLE_MIDFIELD;
+    coop.role[2] = ROLE_ASSIST; coop.role[3] = ROLE_ACTIVE; coop.role[4] = ROLE_PASSIVE;
+    coop.home[3] = coop.home[1];
+    if (!plan_coop_pass(coop, 3).viable) {
+        printf("FAIL: P0 active=3 fixture lacks tempting CoopPass\n"); return 1;
+    }
+    run_active(coop, 3);
+    if (coop.coop_pass_task.active || coop.coop_stats.created != 0 ||
+        (fabs(coop.home[3].vl) < 1e-9 && fabs(coop.home[3].vr) < 1e-9)) {
+        printf("FAIL: P0 active=3 created CoopPass or waited for receiver\n"); return 1;
+    }
+
+    WorldModel duplicate = base;
+    duplicate.active_id = 3; duplicate.role[3] = ROLE_ACTIVE;
+    RoleAssignment().assign(duplicate);
+    int unique_count = 0;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i)
+        unique_count += duplicate.role[i] == ROLE_ACTIVE ? 1 : 0;
+    if (unique_count != 1 || duplicate.role[duplicate.active_id] != ROLE_ACTIVE) {
+        printf("FAIL: P0 role assignment left two ACTIVE robots\n"); return 1;
+    }
+
+    WorldModel stale = possession_pass_scene();
+    stale.active_id = 3; stale.role[1] = ROLE_MIDFIELD; stale.role[3] = ROLE_ACTIVE;
+    cancel_unsafe_coop_pass(stale);
+    if (stale.coop_pass_task.active ||
+        stale.coop_stats.outcomes[(int)CoopOutcome::InvalidTarget] != 1) {
+        printf("FAIL: P0 active change retained an old pass task\n"); return 1;
+    }
+    WorldModel control = possession_pass_scene();
+    control.coop_pass_task.active = false;
+    control.coop_ball_control = {true, 2, 0};
+    control.active_id = 3; control.role[1] = ROLE_MIDFIELD; control.role[3] = ROLE_ACTIVE;
+    cancel_unsafe_coop_pass(control);
+    if (control.coop_ball_control.active) {
+        printf("FAIL: P0 active change retained receiver control\n"); return 1;
+    }
+    printf("P0 active compatibility: OK (1 passes; 3 falls back; one ACTIVE; old task/control clear)\n");
+    return 0;
+}
+
+static WorldModel p0_press_task_scene() {
+    WorldModel wm = possession_pass_scene();
+    wm.coop_pass_task.kind = PassTaskKind::Ordinary;
+    wm.coop_pass_task.phase = CoopPassPhase::Receiving;
+    wm.coop_pass_task.frames_left = 40;
+    wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+    wm.home[1].x = 150.0; wm.home[1].y = 150.0;
+    wm.home[2].x = 100.0; wm.home[2].y = 150.0;
+    wm.home[3].x = 130.0; wm.home[3].y = 150.0;
+    wm.home[4].x = 180.0; wm.home[4].y = 150.0;
+    return wm;
+}
+
+// 活动传球优先于普通逼抢；取消后同一套逼抢选择可重新接管。
+static int test_p0_pass_press_ownership() {
+    Strategy strategy;
+    WorldModel receiver = p0_press_task_scene();
+    strategy.run(receiver);
+    if (!receiver.coop_pass_task.active || receiver.coop_pass_task.frames_left != 39 ||
+        receiver.presser_id != 3) {
+        printf("FAIL: P0 receiver/passer task lost to press (presser=%d left=%d active=%d)\n",
+               receiver.presser_id, receiver.coop_pass_task.frames_left,
+               (int)receiver.coop_pass_task.active); return 1;
+    }
+    WorldModel receive_expected = receiver, press_expected = receiver;
+    run_assist(receive_expected, 2);
+    run_press(press_expected, 3);
+    if (!same_drive_command(receiver.home[2], receive_expected.home[2]) ||
+        !same_drive_command(receiver.home[3], press_expected.home[3])) {
+        printf("FAIL: P0 receiver command or non-task presser command was overwritten\n"); return 1;
+    }
+
+    WorldModel passer = p0_press_task_scene();
+    passer.home[1].x = 100.0; passer.home[2].x = 140.0;
+    strategy.run(passer);
+    if (!passer.coop_pass_task.active || passer.coop_pass_task.frames_left != 39 ||
+        passer.presser_id != 3) {
+        printf("FAIL: P0 passer task did not advance under press conditions\n"); return 1;
+    }
+
+    WorldModel intercepted = p0_press_task_scene();
+    intercepted.opp[0].x = intercepted.ball.x;
+    intercepted.opp[0].y = intercepted.ball.y;
+    strategy.run(intercepted);
+    if (intercepted.coop_pass_task.active || intercepted.presser_id != 2 ||
+        intercepted.coop_stats.outcomes[(int)CoopOutcome::Intercepted] != 1) {
+        printf("FAIL: P0 intercepted task did not release pressing\n"); return 1;
+    }
+
+    WorldModel timeout = p0_press_task_scene();
+    timeout.coop_pass_task.frames_left = 0;
+    strategy.run(timeout);
+    if (timeout.coop_pass_task.active || timeout.presser_id != 2 ||
+        timeout.coop_stats.outcomes[(int)CoopOutcome::ReceiveTimeout] != 1) {
+        printf("FAIL: P0 expired task retained press ownership\n"); return 1;
+    }
+
+    WorldModel restart = p0_press_task_scene();
+    restart.runtime_phase = RuntimePhase::RestartSetup;
+    restart.game_state = PM_PlaceKick_Blue;
+    strategy.run(restart);
+    if (restart.coop_pass_task.active || restart.presser_id != -1 ||
+        restart.coop_stats.outcomes[(int)CoopOutcome::PhaseInterrupted] != 1) {
+        printf("FAIL: P0 restart retained pass or press lock\n"); return 1;
+    }
+    restart.runtime_phase = RuntimePhase::Running;
+    restart.game_state = PM_PlayOn;
+    strategy.run(restart);
+    if (restart.presser_id != 2) {
+        printf("FAIL: P0 press did not resume after restart\n"); return 1;
+    }
+    printf("P0 pass/press ownership: OK (participants protected; others press; cancel/timeout/restart release)\n");
+    return 0;
+}
+
+static int restart_first_touch_chain_unchanged() {
+    int rc = our_restart_executor_can_first_touch();
+    rc |= our_restart_non_executor_cannot_touch();
+    rc |= opponent_restart_blocks_all_our_touch();
+    rc |= unknown_restart_owner_does_not_grant_touch();
+    rc |= restart_executor_remains_allowed_until_release();
+    rc |= restart_ball_motion_enters_running();
+    rc |= restart_exception_does_not_bypass_no_push_policy();
+    if (rc) return 1;
+    printf("restart first-touch chain unchanged: OK\n");
     return 0;
 }
 
@@ -4087,6 +6316,46 @@ static int test_live_play() {
 // 旧实现（defense.hpp:goalie_block_depth）写死 max_out=40：
 //   球离门 >=52cm 时门将一律站到离门线 40cm。真机实测门将 x 中位 14~16cm、p99 42cm、
 //   最大 49.8cm；由于回程太长，丢球时门将 x=8.6~27.7 而球已在门线上（球从门将身后进网）。
+// 门球（平台把球钉在摆点上）时门将必须"去推球"，不许走"球在身后 → 横向让开/倒车"那两条
+//   真机取证（replay_trace 逐帧回放 20261010193949 帧 2700~2795）：门球摆点 (205.2,77.7) 离门线
+//   只有 14.8cm，门将一走到球后就同时满足 gk_rule_ball_behind 与闸零 → 被命令"钉住 x、横移 11cm"，
+//   运动学在 rot≈-162° 下把它变成全速倒车（vl=-150 vr=-126），门将被甩到 x=192.9；
+//   89 帧球一动不动、门将 x 在 [192.9,225.4] 来回冲 —— 就是用户说的"每次发球都往旁边冲"。
+static int test_gk_serve_held_ball() {
+    // 场景取**真机卡死那一刻**的位置：门将已经越过球（x=198.3 < 球 205.2）、横向差 6.4cm、
+    //   rot=-162°。这一步是关键 —— 只有在这个位置，`gk_rule_ball_behind` 才会命中。
+    auto scene = []() {
+        WorldModel wm;
+        gk_test_field(wm);
+        wm.ball.x = 205.2; wm.ball.y = 77.7;          // 我方门球摆点（真机实测值）
+        wm.ball.vx = 0.0;  wm.ball.vy = 0.0;          // 平台把球钉住：速度恒 0
+        wm.home[0].x = 198.3; wm.home[0].y = 84.1; wm.home[0].rot = -162.0;
+        return wm;
+    };
+    // 新口径：不许再"钉住自己的 x 横向让开"（那一步在 rot≈-162° 下被运动学变成全速倒车）
+    WorldModel now = scene();
+    run_goalie(now, 0);
+    const RobotState &a = now.home[0];
+    if (std::fabs(a.tgt_x - a.x) <= 1.5) {
+        printf("FAIL: 门球时门将又被命令「钉住 x=%.1f、横向让开」到 (%.1f,%.1f)\n",
+               a.x, a.tgt_x, a.tgt_y);
+        return 1;
+    }
+    // 反证：回滚成"静止球也允许横向让开"→ 必须复现旧行为（x 钉死）
+    set_param("roles.kTkDeadSkip", 0.0);
+    WorldModel old = scene();
+    run_goalie(old, 0);
+    const RobotState &b = old.home[0];
+    set_param("roles.kTkDeadSkip", 1.0);
+    if (std::fabs(b.tgt_x - b.x) > 1.5) {
+        printf("FAIL: 回滚档没有复现旧行为（x=%.1f 目标 x=%.1f），用例失去判别力\n", b.x, b.tgt_x);
+        return 1;
+    }
+    printf("gk serve held ball: OK (门球摆点卡死位：旧「钉住 x=%.1f 横移」→ 新目标 (%.1f,%.1f))\n",
+           b.tgt_x, a.tgt_x, a.tgt_y);
+    return 0;
+}
+
 // 回归：门前慢球死锁（真机实测形状，13 个失球里约 10 个是这一种）
 //   球在门前 14.7cm；门将在球的【场侧】23.1cm 处、横向已经让开约 24cm
 //   （= gk_rule_ball_behind 的兜底目标 kGkBallRetreatLat=30 被门框夹住后的结果）。
@@ -4181,8 +6450,11 @@ static int test_goalie_line_block() {
     wm.ball.x = 217.5; wm.ball.y = 140; wm.ball.vx = 0.0; wm.ball.vy = -1.0;
     wm.home[0].x = 209; wm.home[0].y = 104;
     if (!gk_line_block_point(wm, 0, tx, ty)) { printf("FAIL: 贴门线滚球应堵路径\n"); return 1; }
-    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 106.0) > 0.5) {
-        printf("FAIL: 贴门线堵点应为 (217,106)，实际 (%.1f,%.1f)\n", tx, ty); return 1;
+    {   // 合同 = 「堵在门线上、y 夹到门将 y 带上沿」，上沿 2026-10-10 由 106 放宽成旋钮
+        const double yhi = get_param("roles.kGkYHi", 110.0);
+        if (fabs(tx - 217.0) > 0.5 || fabs(ty - yhi) > 0.5) {
+            printf("FAIL: 贴门线堵点应为 (217,%.0f)，实际 (%.1f,%.1f)\n", yhi, tx, ty); return 1;
+        }
     }
     wm.ball.y = 80; wm.ball.vy = 2.0;
     if (!gk_line_block_point(wm, 0, tx, ty) || fabs(ty - 92.0) > 0.5) {
@@ -4383,20 +6655,79 @@ static int test_mark_assignment() {
 int main(int argc, char **argv) {
     int rc = 0;
     bool coop_pass_only = false;
+    bool p0_control_only = false;
 // --params <文件>：注入参数后再跑全部测试（自动调参的行为护栏）
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--coop-pass-only") == 0) coop_pass_only = true;
+        if (strcmp(argv[i], "--p0-control-only") == 0) p0_control_only = true;
         if (strcmp(argv[i], "--params") == 0 && i + 1 < argc) {
             int n = simuro5::apply_param_file(argv[++i]);
             if (n < 0) { printf("offline_test: 无法读取参数文件 %s\n", argv[i]); return 2; }
             printf("=== 已注入 %d 个参数（%s）===\n", n, argv[i]);
         }
     }
+    if (p0_control_only) {
+        rc |= test_ordinary_pass_admission();
+        rc |= test_coop_pass_task();
+        rc |= test_p0_active_pass_compatibility();
+        rc |= test_p0_pass_press_ownership();
+        if (rc == 0) printf("=== P0 CONTROL TEST PASSED ===\n");
+        return rc;
+    }
     if (coop_pass_only) {
-        rc = test_coop_pass();
+        rc |= test_p0_active_pass_compatibility();
+        rc |= test_p0_pass_press_ownership();
+        rc |= pass_is_not_cancelled_by_stale_whos_ball();
+        rc |= confirmed_opponent_control_can_cancel_pass();
+        rc |= receive_confirmation_uses_live_possession_evidence();
+        rc |= pass_task_survives_irrelevant_raw_game_state_change();
+        rc |= receiving_survives_irrelevant_raw_game_state_change();
+        rc |= temporary_control_survives_irrelevant_raw_game_state_change();
+        rc |= restart_interrupts_active_pass_task();
+        rc |= restart_interrupts_temporary_control();
+        rc |= old_pass_task_does_not_resume_after_restart();
+        rc |= possession_cancel_still_works();
+        rc |= test_coop_pass();
         rc |= test_coop_pass_task();
         rc |= test_coop_lifecycle();
+        rc |= ordinary_pass_local_search_keeps_center_candidate();
+        rc |= ordinary_pass_local_search_finds_safer_nearby_point();
+        rc |= ordinary_pass_local_search_stays_near_anchor();
+        rc |= ordinary_pass_local_search_respects_hard_safety();
+        rc |= ordinary_pass_local_target_is_locked_after_task_creation();
+        rc |= ordinary_pass_local_search_does_not_change_coop_pass();
+        rc |= ordinary_pass_rejects_clear_opponent_first_at_creation();
+        rc |= ordinary_pass_accepts_close_arrival_race();
+        rc |= ordinary_pass_tries_alternative_safe_local_point();
+        rc |= ordinary_pass_does_not_block_receiver_travel();
+        rc |= preparing_pass_still_cancels_on_new_opponent_first();
+        rc |= ordinary_pass_does_not_tighten_existing_hard_gates();
+        rc |= ordinary_pass_prefers_lower_receiver_travel();
+        rc |= ordinary_pass_prefers_receiver_owned_target();
+        rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
+        rc |= ordinary_pass_scoring_keeps_anchor_target();
+        rc |= test_ordinary_pass_admission();
         rc |= test_ordinary_pass_task();
+        rc |= ordinary_passer_moves_behind_ball_before_push();
+        rc |= ordinary_prep_reaches_area_before_align();
+        rc |= ordinary_passer_accepts_reasonable_alignment();
+        rc |= ordinary_prep_avoids_alignment_oscillation();
+        rc |= ordinary_passer_prepares_while_receiver_moves();
+        rc |= ordinary_prep_keeps_locked_pass_target();
+        rc |= ordinary_prep_respects_existing_safety_cancel();
+        rc |= ordinary_prep_does_not_change_coop_or_shooting();
+        rc |= ordinary_push_locks_target_on_first_commit();
+        rc |= ordinary_push_commit_and_observation_are_separate();
+        rc |= ordinary_push_target_remains_fixed_across_frames();
+        rc |= ordinary_push_does_not_recheck_receiver_ready_after_commit();
+        rc |= ordinary_push_does_not_return_to_align_after_commit();
+        rc |= ordinary_push_keeps_receiver_target_locked();
+        rc |= ordinary_push_requires_real_release_evidence();
+        rc |= ordinary_fixed_push_reaches_release();
+        rc |= ordinary_push_commitment_respects_safety_cancel();
+        rc |= ordinary_push_lock_resets_after_task_end();
+        rc |= ordinary_push_does_not_change_coop_pass();
+        rc |= ordinary_push_waypoint_stall_keeps_real_release_rule();
         rc |= test_pass_readiness_gate();
         rc |= test_receiver_meet_ball();
         rc |= test_pass_opponent_first_cancel();
@@ -4419,8 +6750,57 @@ int main(int argc, char **argv) {
     rc |= test_opp_kick_predict();
     rc |= test_coop_pass();
     rc |= test_coop_pass_task();
+    rc |= test_p0_active_pass_compatibility();
+    rc |= test_p0_pass_press_ownership();
     rc |= test_coop_lifecycle();
+    rc |= pass_is_not_cancelled_by_stale_whos_ball();
+    rc |= confirmed_opponent_control_can_cancel_pass();
+    rc |= receive_confirmation_uses_live_possession_evidence();
+    rc |= pass_task_survives_irrelevant_raw_game_state_change();
+    rc |= receiving_survives_irrelevant_raw_game_state_change();
+    rc |= temporary_control_survives_irrelevant_raw_game_state_change();
+    rc |= restart_interrupts_active_pass_task();
+    rc |= restart_interrupts_temporary_control();
+    rc |= old_pass_task_does_not_resume_after_restart();
+    rc |= possession_cancel_still_works();
+    rc |= ordinary_pass_local_search_keeps_center_candidate();
+    rc |= ordinary_pass_local_search_finds_safer_nearby_point();
+    rc |= ordinary_pass_local_search_stays_near_anchor();
+    rc |= ordinary_pass_local_search_respects_hard_safety();
+    rc |= ordinary_pass_local_target_is_locked_after_task_creation();
+    rc |= ordinary_pass_local_search_does_not_change_coop_pass();
+    rc |= ordinary_pass_rejects_clear_opponent_first_at_creation();
+    rc |= ordinary_pass_accepts_close_arrival_race();
+    rc |= ordinary_pass_tries_alternative_safe_local_point();
+    rc |= ordinary_pass_does_not_block_receiver_travel();
+    rc |= preparing_pass_still_cancels_on_new_opponent_first();
+    rc |= ordinary_pass_does_not_tighten_existing_hard_gates();
+    rc |= ordinary_pass_prefers_lower_receiver_travel();
+    rc |= ordinary_pass_prefers_receiver_owned_target();
+    rc |= ordinary_pass_scoring_does_not_relax_hard_safety();
+    rc |= ordinary_pass_scoring_keeps_anchor_target();
+    rc |= test_ordinary_pass_admission();
     rc |= test_ordinary_pass_task();
+    rc |= ordinary_passer_moves_behind_ball_before_push();
+    rc |= ordinary_prep_reaches_area_before_align();
+    rc |= ordinary_passer_accepts_reasonable_alignment();
+    rc |= ordinary_prep_avoids_alignment_oscillation();
+    rc |= ordinary_passer_prepares_while_receiver_moves();
+    rc |= ordinary_prep_keeps_locked_pass_target();
+    rc |= ordinary_prep_respects_existing_safety_cancel();
+    rc |= ordinary_prep_does_not_change_coop_or_shooting();
+    rc |= ordinary_push_locks_target_on_first_commit();
+    rc |= ordinary_push_commit_and_observation_are_separate();
+    rc |= ordinary_push_target_remains_fixed_across_frames();
+    rc |= ordinary_push_does_not_recheck_receiver_ready_after_commit();
+    rc |= ordinary_push_does_not_return_to_align_after_commit();
+    rc |= ordinary_push_keeps_receiver_target_locked();
+    rc |= ordinary_push_requires_real_release_evidence();
+    rc |= ordinary_fixed_push_reaches_release();
+    rc |= ordinary_push_commitment_respects_safety_cancel();
+    rc |= ordinary_push_lock_resets_after_task_end();
+    rc |= ordinary_push_does_not_change_coop_pass();
+    rc |= ordinary_push_waypoint_stall_keeps_real_release_rule();
     rc |= test_pass_readiness_gate();
     rc |= test_receiver_meet_ball();
     rc |= test_pass_opponent_first_cancel();
@@ -4428,23 +6808,49 @@ int main(int argc, char **argv) {
     rc |= test_goalie_side_step();
     rc |= test_rebound_and_doubleteam();
     rc |= test_possession_source();
+    rc |= running_possession_ignores_stale_restart_owner();
+    rc |= clear_our_control_reports_our_possession();
+    rc |= clear_opponent_control_reports_opponent_possession();
+    rc |= loose_ball_is_not_opponent_possession();
     rc |= test_goalie_clear_push();
+    rc |= test_goalie_cross_track();
+    rc |= test_gk_lateral_transit();
     rc |= test_goalie_straight_clear();
     rc |= test_goalie_kick_far();
     rc |= test_passive_front_sweep();
     rc |= test_gk_on_line_no_push();
+    rc |= test_goalie_opponent_lock_uses_possession();
     rc |= test_goalie_challenge();
     rc |= test_doubleteam_loose_ball();
     rc |= test_presser();
     rc |= test_goalie_line_cover();
     rc |= test_goalie_line_block();
+    rc |= test_gk_serve_held_ball();
     rc |= test_gk_last_ditch_no_freeze();
-    rc |= test_live_play();
+    rc |= our_restart_executor_can_first_touch();
+    rc |= our_restart_non_executor_cannot_touch();
+    rc |= opponent_restart_blocks_all_our_touch();
+    rc |= unknown_restart_owner_does_not_grant_touch();
+    rc |= restart_executor_remains_allowed_until_release();
+    rc |= restart_ball_motion_enters_running();
+    rc |= running_uses_normal_touch_permission();
+    rc |= restart_exception_does_not_bypass_no_push_policy();
+    rc |= our_penalty_uses_common_restart_touch_gate();
+    rc |= our_free_kick_uses_active_executor();
+    rc |= our_goal_kick_uses_goalie_executor();
+    rc |= restart_owner_still_controls_restart_permission();
+    rc |= restart_first_touch_chain_unchanged();
+    rc |= test_running_phase_allows_active_action();
+    rc |= test_non_running_phase_blocks_active_touch();
+    rc |= test_running_phase_keeps_no_push_guard();
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
+    rc |= test_restart_charge();
     rc |= test_no_align_wait();
     rc |= test_zone_mode();
     rc |= test_gk_goal_kick_reach();
+    rc |= test_gk_restart_reset_phase();
+    rc |= test_gk_serve_settle();
     rc |= test_defense_intercept();
     rc |= test_hungarian_solver();
     rc |= test_mark_assignment();

@@ -38,5 +38,8 @@ void enforce_own_goal_area(WorldModel &wm);
 // 己方大禁区非门将最多 3 人（规则 7.10.4）
 void enforce_own_penalty_count(WorldModel &wm);
 
+// 同队最小间距：我方两车贴太近时，从轮速里各加一个"背离队友"的平动分量（不含门将）
+void enforce_teammate_spacing(WorldModel &wm);
+
 }  // namespace simuro5
 #endif

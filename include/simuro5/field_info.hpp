@@ -48,7 +48,7 @@ inline void clamp_goalie_area(const TeamContext &ctx, double &x, double &y) {
     double x_lo = std::min(gx, gx + ctx.attack_dir() * 80.0);
     double x_hi = std::max(gx, gx + ctx.attack_dir() * 80.0);
     x = clamp(x, x_lo, x_hi);
-    y = clamp(y, 72.5, 107.5);
+    y = clamp(y, 72.5, 107.5);   // ⚠️ 2026-10-10 试过放宽到门框 70/110，会把门球几何搞坏，已回退
 }
 
 // 对方罚球区（进攻方禁区内不能久留）
