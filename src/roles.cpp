@@ -2913,6 +2913,42 @@ static void own_box_clamp(const WorldModel &wm, int id, double &tx, double &ty) 
     tx = ctx.our_goal_x() + ctx.attack_dir() * fx;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 【2026-10-13】把"己方门区纪律"接回普通角色分支（上面 `own_box_clamp` 的调用面）
+//
+// 为什么：真机 log 逐场核对（`_dsh_session/now/discipline_kpi.py`）——**判我们点球那几场
+//   我方 `Violated No pushing` 是 0 次**，而点球按规则 7.10.1/7.10.2 是**门区纪律**判的：
+//     7.10.1 门区内除门将外停留 >20 连续周期 → 罚点球
+//     7.10.2 门区里 2 个以上防守 → 直接罚点球
+//   真机形状：19:30 那场非门将球员在自家小门区里**连续 69 帧**（规则线 20）、19:18 连续 23 帧、
+//   14:37 策略口径门区"2+ 人"**114 帧**。
+//   而执行这条纪律的 `own_box_clamp` 原来**只被 `run_zone` 调用**，`strategy.kZoneMode` 默认 0
+//   （第 93 轮关闭）⇒ 它一直是**死代码**（docs/06:4199-4200 也记着这件事）。
+//
+// 做法：角色函数跑完后**统一兜底一次**，不改角色内部逻辑（一处覆盖所有分支与出口）。
+//   ⚠️ 两道豁免，缺一个都会踩坑：
+//     ① 本帧角色主动"站定/让位"（vl=vr=0，例如角区不碰球 / 门前让开）→ 不许把它拽出来；
+//     ② 目标本来就在大禁区外（>=45cm）→ 什么都不做（绝大多数帧走这条，零开销）。
+//   传球任务参与者的豁免由调用方（strategy.cpp）负责 —— 那里已有 `pass_task_controls_robot`。
+// 回滚：`roles.kOwnBoxClamp=0`。
+// ═══════════════════════════════════════════════════════════════════════════
+TUNABLE(kOwnBoxClamp, 1.0);
+
+void zone_box_clamp_role(WorldModel &wm, int id) {
+    if (kOwnBoxClamp < 0.5) return;
+    if (id <= 0 || id >= PLAYERS_PER_SIDE) return;
+    const int role = wm.role[id];
+    if (role != ROLE_PASSIVE && role != ROLE_ASSIST && role != ROLE_MIDFIELD) return;
+    RobotState &r = wm.home[id];
+    if (r.vl == 0.0 && r.vr == 0.0) return;                        // ① 主动站定/让位
+    if (wm.ctx.dist_our_goal(r.tgt_x) >= 45.0) return;             // ② 本来就在大禁区外
+    double tx = r.tgt_x, ty = r.tgt_y;
+    own_box_clamp(wm, id, tx, ty);
+    if (std::fabs(tx - r.tgt_x) < 1e-9 && std::fabs(ty - r.tgt_y) < 1e-9) return;
+    motion::position(r, tx, ty,
+                     r.tgt_mode == (int)motion::TM_PASS ? motion::TM_PASS : motion::TM_STOP);
+}
+
 void run_zone(WorldModel &wm, int id) {
     if (run_pass_receiver(wm, id)) return;
     const TeamContext &ctx = wm.ctx;

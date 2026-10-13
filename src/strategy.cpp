@@ -167,7 +167,9 @@ void Strategy::run(WorldModel &wm) {
         if (restart_charge(wm, i)) continue;
         // 队员 57fad54：普通逼抢不许抢走有效传球任务的 passer / receiver / 临时控球参与者
         if (i == wm.presser_id && !pass_task_controls_robot(wm, i)) {
-            run_press(wm, i); continue;
+            run_press(wm, i);
+            zone_box_clamp_role(wm, i);      // 己方门区纪律兜底（该分支已排除传球任务参与者）
+            continue;
         }
         switch (wm.role[i]) {
             case ROLE_ACTIVE:   run_active(wm, i); break;
@@ -176,6 +178,9 @@ void Strategy::run(WorldModel &wm) {
             case ROLE_MIDFIELD: run_midfield(wm, i); break;
             default:            motion::stop(wm.home[i]); break;
         }
+        // 己方门区纪律兜底（2026-10-13）：非 ACTIVE 角色的目标落进自家门区就拽出去。
+        //   传球任务参与者豁免（任务优先级高于站位纪律）；ACTIVE 有自己的门区纪律（见上面的 in_ga 分支）。
+        if (!pass_task_controls_robot(wm, i)) zone_box_clamp_role(wm, i);
     }
 
     // 对方门区停留兜底：贴球(≤25cm)不算滞留，其余连续 >15 帧撤出 + 冷却 30 帧

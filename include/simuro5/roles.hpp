@@ -31,6 +31,14 @@ bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool gua
 // 门将对准球的直线提前堵点（慢球朝门/沿门线滚）；false = 不触发
 bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty);
 
+// 己方门区纪律兜底（2026-10-13）：非 ACTIVE 角色跑完后统一调一次。
+//   真机依据：判我们点球那几场官方 log 里 `Violated No pushing` 是 **0 次**，点球按
+//   规则 7.10.1/7.10.2 是**门区纪律**判的（门区内除门将外停留 >20 连续周期 / 门区 2+ 人）；
+//   执行这条纪律的 `own_box_clamp` 原来只被 `run_zone` 调用，而 `strategy.kZoneMode` 默认 0
+//   ⇒ 死代码。形状：19:30 那场非门将球员在自家小门区里**连续 69 帧**（规则线 20）。
+//   调用方负责先排除"传球任务参与者"（任务优先于站位纪律）。
+void zone_box_clamp_role(WorldModel &wm, int id);
+
 // 守门员：站球门前跟球 y；球逼近时出击
 void run_goalie(WorldModel &wm, int id);
 

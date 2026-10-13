@@ -5921,6 +5921,71 @@ static int test_no_push_guard_default_on() {
     return 0;
 }
 
+// 己方门区纪律兜底（2026-10-13）：非 ACTIVE 角色的目标落进自家门区时必须被拽出去。
+//   依据：判我们点球那几场官方 log 里 `Violated No pushing` 是 **0 次**，点球按规则
+//   7.10.1/7.10.2 是**门区纪律**判的（门区内除门将外停留 >20 连续周期 / 门区 2+ 人）；
+//   执行者 own_box_clamp 原来只挂在 run_zone 上，而 kZoneMode 默认 0 ⇒ 死代码。
+//   真机形状：20261013193005 那场非门将球员在自家小门区里**连续 69 帧**（规则线 20）。
+static int test_own_box_clamp_role() {
+    auto scene = []() {
+        WorldModel wm;
+        gk_test_field(wm);                     // 蓝位、home[0]=门将、其它人 x=120、对手 x=60
+        wm.role[0] = ROLE_GOALIE; wm.role[1] = ROLE_ACTIVE;
+        wm.role[2] = ROLE_ASSIST; wm.role[3] = ROLE_MIDFIELD; wm.role[4] = ROLE_PASSIVE;
+        wm.ball.x = 200.0; wm.ball.y = 90.0;
+        wm.home[2].x = 195.0; wm.home[2].y = 90.0;   // #2 离球最近 → 它是"被放行"的那一个
+        wm.home[3].x = 150.0; wm.home[3].y = 60.0;
+        wm.home[3].tgt_x = 210.0; wm.home[3].tgt_y = 95.0;   // 目标离门线 10cm：在门区内
+        wm.home[3].tgt_mode = 0;                              // TM_STOP
+        wm.home[3].vl = 40.0; wm.home[3].vr = 40.0;           // 本帧确实在动
+        return wm;
+    };
+    // ① 非"最近的非主攻" → 拽出大禁区（门线前 45cm = x 175）
+    WorldModel wm = scene();
+    zone_box_clamp_role(wm, 3);
+    if (fabs(wm.home[3].tgt_x - 175.0) > 0.5) {
+        printf("FAIL: 非盯球者的门前目标应被拽到门线前 45cm(175)，实际 %.1f\n", wm.home[3].tgt_x);
+        return 1;
+    }
+    // ② 门将/主攻不受影响（角色过滤）
+    WorldModel act = scene();
+    act.role[3] = ROLE_ACTIVE;
+    act.home[3].tgt_x = 210.0;
+    zone_box_clamp_role(act, 3);
+    if (fabs(act.home[3].tgt_x - 210.0) > 1e-9) {
+        printf("FAIL: ACTIVE 有自己的门区纪律，不该被这里改（实际 %.1f）\n", act.home[3].tgt_x);
+        return 1;
+    }
+    // ③ 本帧"主动站定/让位"（vl=vr=0）不许被拽走
+    WorldModel st = scene();
+    st.home[3].vl = st.home[3].vr = 0.0;
+    st.home[3].tgt_x = 210.0;
+    zone_box_clamp_role(st, 3);
+    if (fabs(st.home[3].tgt_x - 210.0) > 1e-9) {
+        printf("FAIL: 角色主动站定（vl=vr=0）时不该被拽出来（实际 %.1f）\n", st.home[3].tgt_x);
+        return 1;
+    }
+    // ④ 目标本来就在大禁区外 → 一个字节都不改
+    WorldModel far_ = scene();
+    far_.home[3].tgt_x = 160.0;
+    zone_box_clamp_role(far_, 3);
+    if (fabs(far_.home[3].tgt_x - 160.0) > 1e-9) {
+        printf("FAIL: 大禁区外的目标不该被改（实际 %.1f）\n", far_.home[3].tgt_x);
+        return 1;
+    }
+    // ⑤ 回滚旋钮
+    set_param("roles.kOwnBoxClamp", 0.0);
+    WorldModel off = scene();
+    zone_box_clamp_role(off, 3);
+    set_param("roles.kOwnBoxClamp", 1.0);
+    if (fabs(off.home[3].tgt_x - 210.0) > 1e-9) {
+        printf("FAIL: roles.kOwnBoxClamp=0 应完全关掉（实际 %.1f）\n", off.home[3].tgt_x);
+        return 1;
+    }
+    printf("own box clamp role: OK (拽出到 45cm/角色过滤/站定豁免/区外不动/一键回滚)\n");
+    return 0;
+}
+
 static WorldModel restart_touch_scene(int game_state = PM_PlaceKick_Blue) {
     WorldModel wm = runtime_action_scene();
     wm.game_state = game_state;
@@ -6962,6 +7027,7 @@ int main(int argc, char **argv) {
     rc |= test_running_phase_keeps_no_push_guard();
     rc |= test_no_push_guard_default_on();
     rc |= test_gk_serve_anchor();
+    rc |= test_own_box_clamp_role();
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
     rc |= test_restart_charge();
