@@ -56,11 +56,13 @@ static const char *gk_probe_rule() {
 }
 
 // 门将本帧命中规则的数组下标。kGoalieRules 的顺序（见 roles.cpp）：
-//   0 no_push / 1 side_step / 2 opp_ball_lock / 3 restart_kick / 4 cover_line /
-//   5 opp_kick_line / 6 press_door / 7 goal_line_hold / 8 clear / 9 wall_ball /
-//   10 shot_block / 11 default；-1 = 前置规则(penalty/line_block/ball_behind)或未命中
+//   0 no_push / 1 side_step / 2 opp_ball_lock / 3 restart_kick /
+//   4 opp_kick_line / 5 press_door / 6 goal_line_hold / 7 clear / 8 wall_ball /
+//   9 shot_block / 10 default；-1 = 前置规则(penalty/line_block/ball_behind)或未命中
+//   ⚠️ 2026-10-13：`cover_line` 已删除（真机 1699 万帧只命中 26 帧，见 roles.cpp 说明），
+//      本表必须与 `kGoalieRuleNames` 保持同序同长。
 static const char *const kGkRuleNamesShort[] = {
-    "no_push", "side_step", "opp_ball_lock", "restart_kick", "cover_line",
+    "no_push", "side_step", "opp_ball_lock", "restart_kick",
     "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
     "shot_block", "default",
 };
@@ -69,7 +71,7 @@ static int gk_rule_idx() {
     if (std::strcmp(r, "none") == 0) return -1;
     if (std::strcmp(r, "penalty") == 0 || std::strcmp(r, "line_block") == 0 ||
         std::strcmp(r, "ball_behind") == 0) return -1;
-    for (int i = 0; i < 12; ++i)
+    for (int i = 0; i < 11; ++i)
         if (std::strcmp(r, kGkRuleNamesShort[i]) == 0) return i;
     return -2;
 }

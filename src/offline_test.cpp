@@ -5209,42 +5209,66 @@ static int test_swarm_attack() {
     return 0;
 }
 
-// 门将「门线封堵」：球在门框内轨迹上、马上到线 → 抢门线预测落点
-static int test_goalie_line_cover() {
-    WorldModel wm;
-    wm.ctx = TeamContext{true};                 // 蓝队：己方门线 x=220，门框 y∈[70,110]
-    wm.ball.valid = true;
-    for (int i = 0; i < 5; ++i) { wm.home[i].x = 180; wm.home[i].y = 90; }
-    double tx = 0.0, ty = 0.0;
-
-    wm.ball.x = 210; wm.ball.y = 95; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
-    wm.home[0].x = 195; wm.home[0].y = 95;
-    if (!gk_cover_line_point(wm, 0, tx, ty)) {
-        printf("FAIL: 球在门框内轨迹上应触发门线封堵\n");
+// 「最后一道防线」：球在门框内轨迹上、已贴到门线前 9cm
+//   ⇒ 规则表必须给出门将**对准球的横移线**（= 预测越线 y）的指令，且横向目标绝不许出框。
+//   2026-10-13：原来提供"抢门线落点"的是 `gk_rule_cover_line`，它被删除（真机 1699 万帧只命中
+//   26 帧、门槛自相矛盾、够格的帧近半被更早的规则抢走）。本用例钉住"行为不丢"：
+//     ① 门将贴球且球离门线 <15cm → `goal_line_hold` 的安全动作（站定 或 退回门线对到球的 y）；
+//     ② 门将横向已让开 → 必须回到门线前 3cm 且 y 对到球的越线点；
+//     ③ 会偏出的球 → 绝不把门将站到门框外。
+//   防止"删掉一条死规则，最后一道防线跟着没了"。
+static int test_goalie_last_ditch_line() {
+    auto scene = [](double bx, double vx, double by, double gx, double gy) {
+        WorldModel wm;
+        gk_test_field(wm);                     // 蓝位、门将 0 号、其它人在 x=120、对手在 x=60
+        wm.possession = Possession::Unknown;
+        wm.ball.x = bx; wm.ball.y = by;
+        wm.ball.vx = vx; wm.ball.vy = 0.0;
+        wm.home[0].x = gx; wm.home[0].y = gy;
+        return wm;
+    };
+    // ① 门将就贴在球旁边（真机最常见的形状）：允许"站定防乌龙"，但横向必须锁在球的越线点上
+    WorldModel near = scene(211.0, 6.0, 95.0, 215.0, 95.0);
+    run_goalie(near, 0);
+    bool frozen = (near.home[0].vl == 0.0 && near.home[0].vr == 0.0);
+    bool has_tgt = (near.home[0].tgt_x > 0.0);
+    if (!frozen) {
+        if (has_tgt && fabs(near.home[0].tgt_y - 95.0) > 1.0) {
+            printf("FAIL: 球贴门线时门将横向目标 %.1f 偏离越线点 95（应锁定球的横移线）\n",
+                   near.home[0].tgt_y);
+            return 1;
+        }
+    }
+    // ② 门将横向已让开 15cm → 必须回门线前 3cm、y 对到越线点
+    WorldModel away = scene(211.0, 6.0, 95.0, 205.0, 80.0);
+    run_goalie(away, 0);
+    if (fabs(away.home[0].tgt_x - 217.0) > 0.5 || fabs(away.home[0].tgt_y - 95.0) > 0.5) {
+        printf("FAIL: 球贴门线+门将已让开 → 应回 (217,95) 封线，实际 (%.1f,%.1f)\n",
+               away.home[0].tgt_x, away.home[0].tgt_y);
         return 1;
     }
-    if (fabs(tx - 217.0) > 0.5 || fabs(ty - 95.0) > 0.5) {
-        printf("FAIL: 门线封堵目标应为 (217,95)，实际 (%.1f,%.1f)\n", tx, ty);
+    // ③ 会偏出的球：横向目标绝不许站到门框（70~110）外
+    WorldModel wide = scene(211.0, 1.5, 130.0, 215.0, 120.0);
+    run_goalie(wide, 0);
+    if (wide.home[0].tgt_x > 0.0 &&
+        (wide.home[0].tgt_y > 110.5 || wide.home[0].tgt_y < 69.5)) {
+        printf("FAIL: 偏出的球把门将站到门框外 y=%.1f\n", wide.home[0].tgt_y);
         return 1;
     }
-    wm.ball.vx = -2.0;
-    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 球背离门不应触发\n"); return 1; }
-    wm.ball.x = 210; wm.ball.y = 130; wm.ball.vx = 2.0; wm.ball.vy = -1.0;
-    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 会偏出的球不应触发\n"); return 1; }
-    wm.ball.x = 140; wm.ball.y = 95; wm.ball.vx = 2.0; wm.ball.vy = 0.0;
-    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 球还远不应触发\n"); return 1; }
-    wm.ball.x = 210; wm.ball.y = 95; wm.ball.vx = 0.5; wm.ball.vy = 0.0;
-    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 太慢的球不应触发门线封堵\n"); return 1; }
-    wm.ball.vx = 2.0;
-    wm.home[0].x = 205; wm.home[0].y = 95;
-    if (gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 门将贴球时应让位给清球\n"); return 1; }
-    wm.ctx = TeamContext{false};
-    wm.ball.x = 10; wm.ball.y = 95; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
-    wm.home[0].x = 25; wm.home[0].y = 95;
-    if (!gk_cover_line_point(wm, 0, tx, ty)) { printf("FAIL: 黄队镜像应触发\n"); return 1; }
-    if (fabs(tx - 3.0) > 0.5) { printf("FAIL: 黄队镜像目标 x 应为 3，实际 %.1f\n", tx); return 1; }
-
-    printf("goalie line cover: OK (门框内轨迹抢落点/背离-偏出-太远-太慢-贴球让位/黄队镜像)\n");
+    // ④ 黄队镜像
+    WorldModel mir;
+    gk_test_field(mir);
+    mir.possession = Possession::Unknown;
+    mir.ctx = TeamContext{false};
+    mir.ball.x = 9.0; mir.ball.y = 95.0; mir.ball.vx = -6.0; mir.ball.vy = 0.0;
+    mir.home[0].x = 15.0; mir.home[0].y = 80.0;
+    run_goalie(mir, 0);
+    if (fabs(mir.home[0].tgt_x - 3.0) > 0.5 || fabs(mir.home[0].tgt_y - 95.0) > 0.5) {
+        printf("FAIL: 黄队镜像应回 (3,95) 封线，实际 (%.1f,%.1f)\n",
+               mir.home[0].tgt_x, mir.home[0].tgt_y);
+        return 1;
+    }
+    printf("goalie last ditch line: OK (贴门线锁横移线/让开后回 3cm 封线/偏出不越框/黄队镜像)\n");
     return 0;
 }
 
@@ -6823,7 +6847,7 @@ int main(int argc, char **argv) {
     rc |= test_goalie_challenge();
     rc |= test_doubleteam_loose_ball();
     rc |= test_presser();
-    rc |= test_goalie_line_cover();
+    rc |= test_goalie_last_ditch_line();
     rc |= test_goalie_line_block();
     rc |= test_gk_serve_held_ball();
     rc |= test_gk_last_ditch_no_freeze();

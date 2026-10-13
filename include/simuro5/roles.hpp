@@ -16,8 +16,9 @@ bool push_allowed_with_guard(const WorldModel &wm, bool guard_enabled);
 bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool guard_enabled);
 }  // namespace detail
 
-// 门将门线封堵：球在门框内轨迹上且快到门线时，把门线预测落点（贴线 3cm）写入 (tx,ty)
-bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty);
+// ⚠️ 2026-10-13 删除 `gk_cover_line_point`（门线封堵）：真机 1699 万帧只命中 26 帧，
+//    门槛自相矛盾（tta<=8.3 帧 ∧ dist<77.49cm ⇒ 要求球速 >=373cm/s），且它要管的局面
+//    已由 `gk_rule_shot_block` 覆盖（球离门线 <=9cm 时目标逐值相同）。删除理由写在 roles.cpp。
 
 // 门将对准球的直线提前堵点（慢球朝门/沿门线滚）；false = 不触发
 bool gk_line_block_point(const WorldModel &wm, int id, double &tx, double &ty);

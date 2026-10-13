@@ -55,15 +55,14 @@ GROUPS = {
     "defense": ["defense.kInterceptLineDist", "defense.kMinBallSpeed", "defense.kMySpeed",
                 "defense.kReachMargin", "defense.kDoubleTeamDangerDist",
                 "defense.kDoubleTeamLateral", "defense.kDoubleTeamCarryDist",
-                "defense.kDoubleTeamCoverDist", "roles.kCoverLineDanger",
-                "roles.kCoverLineTta", "roles.kCoverLineDist", "roles.kCoverLineGiveUp",
+                "defense.kDoubleTeamCoverDist",
                 "roles.kReboundRushSpeed", "roles.kReboundRushDist",
                 "roles.kGkNoPushDist", "roles.kGkSideClear", "roles.kGkBackOff",
                 "roles.kGkBehindMargin"],
     "motion": ["motion.kAlignedGain", "motion.kMaxRotW", "motion.kMinRotW",
                "motion.kNearDist", "motion.kCreepMax"],
     "pilot": ["shoot.kMinOpen", "shoot.kBankMinQ", "roles.kPrepDist",
-              "roles.kCoverLineTta", "defense.kInterceptLineDist",
+              "defense.kInterceptLineDist",
               "pass.PASS_MAX_DIST", "motion.kNearDist", "roles.kReboundRushDist"],
 }
 GROUPS["both"] = GROUPS["attack"] + GROUPS["defense"]   # 攻防合起来评估"组合拳"效果
@@ -91,13 +90,10 @@ RANGES = {
     # 夹抢（功能关键）：范围收紧，避免"不夹抢"把分数刷上去（轮次 77 挂过"门前持球应夹抢"）
     "defense.kDoubleTeamDangerDist": (60.0, 140.0), "defense.kDoubleTeamLateral": (10.0, 40.0),
     "defense.kDoubleTeamCarryDist": (8.0, 30.0), "defense.kDoubleTeamCoverDist": (25.0, 70.0),
-    # 门线封堵：慢球阈值不能压太低（否则慢球也触发封堵、把人拉出位置；轮次 77 挂过该测试）
-    "roles.kCoverLineDanger": (0.8, 2.5), "roles.kCoverLineTta": (8.0, 60.0),
-    "roles.kCoverLineDist": (20.0, 140.0),
-    # ⚠️ kCoverLineGiveUp 默认只有 12（不是 85cm 那种量纲）。
-    #    我曾写成 (85,215) ⇒ 经 ±60% 夹取后 **上界(19.7) < 下界(85)（范围倒置）**，
-    #    该参数在每个候选里都被钉死在 19.7（+64%），导致防守组 182 个候选**全部**被闸门否决。
-    "roles.kCoverLineGiveUp": (7.0, 20.0),
+    # ⚠️ 2026-10-13：`roles.kCoverLine*` 四个参数已随 `gk_rule_cover_line` 一起删除
+    #    （真机 1699 万帧只命中 26 帧；见 roles.cpp 顶部说明），不要再往搜索空间里放。
+    #    （历史上这里挂过一课：`kCoverLineGiveUp` 默认 12，曾被写成 (85,215) ⇒ 范围倒置，
+    #     防守组 182 个候选全被闸门否决。删掉它以后这坑自然消失。）
     # kReboundRushSpeed 默认 8；原范围 (0.5,6) 不含默认值 ⇒ 起点被夹到 6（-25%），量纲对不上，改宽
     "roles.kReboundRushSpeed": (4.0, 14.0), "roles.kReboundRushDist": (20.0, 150.0),
     # 门将让开（功能关键）：轮次 77 挂过"已让开就不该再拦"（可能把球顶进自家门）

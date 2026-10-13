@@ -344,32 +344,28 @@ bool gk_side_step_point(const WorldModel &wm, int id, double &tx, double &ty) {
     return true;
 }
 
-TUNABLE(kCoverLineDanger, 0.8);  // cm/帧：球朝门速度下限
-TUNABLE(kCoverLineTta, 8.3);  // 帧：到门线时间上限
-TUNABLE(kCoverLineDist, 77.4913);  // cm：球离门线多近才抢
-TUNABLE(kCoverLineGiveUp, 7);  // cm：门将贴球到此距离 → 让位给清球
-
-bool gk_cover_line_point(const WorldModel &wm, int id, double &tx, double &ty) {
-    const TeamContext &ctx = wm.ctx;
-    const RobotState &r = wm.home[id];
-    double bx = wm.ball.x;
-    double y_at_goal = 0.0;
-    if (!predict_y_at_x(bx, wm.ball.y, wm.ball.vx, wm.ball.vy,
-                        ctx.our_goal_x(), y_at_goal))
-        return false;
-    if (y_at_goal < goal_y_low() || y_at_goal > goal_y_high())
-        return false;                                   // 会偏出或打门柱
-    if (ball_danger_speed(wm) <= kCoverLineDanger) return false;      // 太慢：站线跟球就够
-    if (ctx.dist_our_goal(bx) >= kCoverLineDist) return false;
-    if (std::fabs(wm.ball.vx) > 1e-9) {
-        double tta = std::fabs(ctx.our_goal_x() - bx) / std::fabs(wm.ball.vx);
-        if (tta > kCoverLineTta) return false;
-    }
-    if (dist(r.x, r.y, bx, wm.ball.y) < kCoverLineGiveUp) return false;  // 贴球了 → 清球优先
-    tx = ctx.our_goal_x() + ctx.attack_dir() * 3.0;      // 贴门线 3cm
-    ty = clamp(y_at_goal, kGkYLo, kGkYHi);                  // 预测落点，夹在门框内侧
-    return true;
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// 【2026-10-13 删除】门线封堵 `gk_cover_line_point` / `gk_rule_cover_line`
+//   （原四个旋钮 `kCoverLineDanger/Tta/Dist/GiveUp` 一并删除）
+//
+// 它自称"最后一道防线"（球在门框内轨迹上 → 抢门线落点），但两条独立取证都说它没在跑：
+//   ① 真机 1 699 万帧门将逐帧 trace（`C:\Strategy\goalie_trace.csv`，10-04 构建，规则表同今天）：
+//      这条规则**只命中 26 帧 = 0.00015%**；`default` 51.6% + `opp_ball_lock` 34.2% 才是实战。
+//   ② 门槛之间自相矛盾：`dist_our_goal < 77.49` ∧ `tta <= 8.3 帧` 要求球速 >= 9.3cm/帧 = 373cm/s，
+//      而真机越线球速中位 ≈80cm/s（2cm/帧）。两个门合起来只剩"球已进到离门线 6~17cm 的 2~4 帧"。
+//   ③ 就算只把 `tta` 按真实球速放到 40 帧（复算 505 帧够格），其中 **243 帧（48%）被更早的
+//      `opp_ball_lock` 抢走**、83 帧被 `line_block`、74 帧被 `ball_behind` ⇒ 只改门槛是**表面功夫**。
+//   ④ 它要管的局面已由 `gk_rule_shot_block` 覆盖（on_target 即触发，无速度门；522 帧），
+//      而且球离门线 <= 9cm 时 shot_block 的 `out_depth = max(3, ball_goal - kGkBallSideMargin=6)`
+//      = 3cm ⇒ 与它下的目标 **(门线前 3cm, 预测落点)** 逐值相同。9~77cm 档 shot_block 站在
+//      `kGkGuardDist=10cm`，比"退回门线"更保守，没有证据说后者更好。
+//   ⑤ 删掉它还有个附带好处：`goal_line_hold`（贴门线+贴球 → 站定防乌龙，index 7）不再被它抢帧。
+//
+// ⚠️ 别凭"某个旋钮改了没用"就断定死代码（docs/06 第 74 轮补记的教训）—— 这次不是灵敏度，
+//    是 1 699 万帧真机计数 + 门槛算术 + 与 shot_block 的目标逐值对比。
+//    回归测试见 `test_goalie_last_ditch_line`（钉住"球贴门线 9cm 内 + 门将已在球的门侧
+//    ⇒ 目标 = 门线前 3cm、y = 预测落点"这条行为仍由规则表提供）。
+// ═══════════════════════════════════════════════════════════════════════════
 
 TUNABLE(kGkLineBlock, 1.0);      // 总开关（0 = 回滚）
 TUNABLE(kGkLbMinSpeed, 0.2);     // cm/帧：朝门速度下限（更慢交给门前静止球推出）
@@ -1013,13 +1009,6 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     return true;
 }
 
-bool gk_rule_cover_line(WorldModel &wm, int id, const GkView &) {
-    double tx = 0.0, ty = 0.0;
-    if (!gk_cover_line_point(wm, id, tx, ty)) return false;
-    motion::position(wm.home[id], tx, ty, motion::TM_PASS);
-    return true;
-}
-
 bool gk_rule_opp_kick_line(WorldModel &wm, int id, const GkView &) {
     double y_pred = 90.0;
     if (!opp_kick_target_y(wm, y_pred)) return false;
@@ -1196,7 +1185,6 @@ const GkRule kGoalieRules[] = {
     gk_rule_side_step,      // 门口球已越过门将：先侧向让开
     gk_rule_opp_ball_lock,  // 对方持球：锁门前浅位（门口贴球时上前封角）
     gk_rule_restart_kick,   // 门前静止球：穿球推出
-    gk_rule_cover_line,     // 球在门框内轨迹上：抢门线落点
     gk_rule_opp_kick_line,  // 对手准备出脚：按机头方向提前封线
     gk_rule_press_door,     // 门前对手贴球：封球-门连线
     gk_rule_goal_line_hold, // 贴门线+贴球：站定防乌龙
@@ -1206,25 +1194,40 @@ const GkRule kGoalieRules[] = {
     gk_rule_default,        // 无威胁：门前跟球 y
 };
 
-// 诊断：记录门将每帧命中规则到 C:\Strategy\goalie_trace.csv（CMake 选项 HNNU_TRACE，默认 OFF）
+// 诊断：记录门将每帧命中规则到 C:\Strategy\goalie_trace_v2.csv（CMake 选项 HNNU_TRACE，默认 OFF）
 #if defined(SIMURO5_HNNU_TRACE) || defined(SIMURO5_GK_PROBE)
 const char *const kGoalieRuleNames[] = {
-    "no_push", "side_step", "opp_ball_lock", "restart_kick", "cover_line",
+    "no_push", "side_step", "opp_ball_lock", "restart_kick",
     "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
     "shot_block", "default",
 };
 #endif
 
 #ifdef SIMURO5_HNNU_TRACE
+// ⚠️ 2026-10-13：换新文件 `goalie_trace_v2.csv`（带表头），并新增**当帧最终目标点 `tgt_x/tgt_y`**。
+//   为什么必须有这一列：真机两场蓝位（20261013143755 / 145057）实测 ——
+//     · 预测落点误差中位 **0.4cm**、≤6cm 命中 75%（预测没问题）
+//     · 门将真实站位离真实越线点中位 **16.5cm**、≤6cm 只有 12%（门将不在该在的地方）
+//   没有 `tgt_*` 就分不清是"目标算错"还是"门将没走到"。记录点也从"规则表之后"挪到
+//   **守门两闸之后**（见 `run_goalie` 末尾），所以打印出来的就是这一帧真正下发的目标点。
 static void gk_trace(const char *rule, const WorldModel &wm, int id, const GkView &v) {
     static FILE *fp = nullptr;
     static long frame = 0;
-    if (!fp) fp = std::fopen("C:\\Strategy\\goalie_trace.csv", "a");
+    if (!fp) {
+        fp = std::fopen("C:\\Strategy\\goalie_trace_v2.csv", "a");
+        if (fp)
+            std::fprintf(fp, "frame,rule,ball_x,ball_y,gk_x,gk_y,tgt_x,tgt_y,ball_goal,"
+                             "db,opp_dmin,opp_has_ball,y_at_goal,on_target,y_aim,danger,"
+                             "gk_moved,ball_vx,ball_vy\n");
+    }
     if (!fp) return;
     ++frame;
-    std::fprintf(fp, "%ld,%s,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%.2f,%.2f\n",
-                 frame, rule, wm.ball.x, wm.ball.y, wm.home[id].x, wm.home[id].y,
-                 v.ball_goal, v.db, v.opp_dmin, (int)v.opp_has_ball, wm.ball.vx, wm.ball.vy);
+    const RobotState &gr = wm.home[id];
+    std::fprintf(fp, "%ld,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                 frame, rule, wm.ball.x, wm.ball.y, gr.x, gr.y, gr.tgt_x, gr.tgt_y,
+                 v.ball_goal, v.db, v.opp_dmin, (int)v.opp_has_ball, v.y_at_goal,
+                 (int)v.on_target, v.y_aim, v.danger, wm.goalie_moved,
+                 wm.ball.vx, wm.ball.vy);
     if ((frame % 40) == 0) std::fflush(fp);
 }
 
@@ -1301,9 +1304,8 @@ void run_goalie(WorldModel &wm, int id) {
             }
         }
     }
-#ifdef SIMURO5_HNNU_TRACE
-    gk_trace(hit, wm, id, v);
-#endif
+    // ⚠️ 诊断记录不放这里：此时两闸还没跑，`gr.tgt_*` 只是规则表的目标。
+    //   挪到函数末尾（两闸之后），才拿得到这一帧真正下发的 `tgt_x/tgt_y`。
 
     // ═══════ 守门两闸：只对守门模式生效，出球模式整段跳过 ═══════
     const TeamContext &gctx = wm.ctx;
@@ -1409,6 +1411,9 @@ void run_goalie(WorldModel &wm, int id) {
                              motion::TM_PASS);
         }
     }
+#ifdef SIMURO5_HNNU_TRACE
+    gk_trace(hit, wm, id, v);   // 决策段末尾（两闸之后）：tgt_x/tgt_y = 本帧真正下发的目标点
+#endif
     }   // ═══ 决策段结束：以下不再吃旧驱动律 ═══
 
     // ── 定位路径用**新驱动律**重发同一个目标（2026-10-10）──
