@@ -134,6 +134,15 @@ struct WorldModel {
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
+    // 门球发球的**锚点**（2026-10-13）："本次门球第一次进 restart_kick"时的球位。
+    //   为什么必须锚住：准备点是 `px = 球位 - 推球方向×8cm`，原来每帧按**当前**球位重算，
+    //   而门将一推球球就在动 ⇒ 准备点跟着球走 = **追自己的尾巴**，`at_ready`（停在 3cm 内）
+    //   永远不成立 ⇒ 承诺段那脚猛推（TM_PASS 150~200cm/s）从不触发，只剩 19cm/s 的身体慢推。
+    //   真机取证（20261013193005 帧 3817~3862）：球从门球点 (205,77) 以 19cm/s 被推走 11cm，
+    //   门将 y 在 70~85 之间来回摆，对手从 85cm 外赶到捅进 → 该场 4/5 丢球都是这个形状。
+    //   `ok=false` = 还没锚（下一帧进规则时重新锚）；球被平台重新摆放/规则不再适用时清零。
+    bool   goalie_serve_anchor_ok = false;
+    double goalie_serve_ax = 0.0, goalie_serve_ay = 0.0;
     // 门将上一帧位置（run_goalie 自己记）：用来量门将**真实**移动量（平台上报的 vl/vr 只是上一帧命令），
     //   和认出"平台把门将瞬移回门口"（重新开球）。goalie_last_id=-1 表示还没有上一帧。
     int    goalie_last_id = -1;

@@ -1263,7 +1263,7 @@ static int test_active_corner_rescue() {
                wm.home[1].vl, wm.home[1].vr);
         return 1;
     }
-    if (kNoPushGuardEnabled) {
+    if (no_push_guard_enabled()) {
         wm.ball.x = 26; wm.ball.y = 20;
         wm.home[1].x = 18; wm.home[1].y = 12; wm.home[1].rot = 45;
         wm.home[1].vl = wm.home[1].vr = 0;
@@ -5828,6 +5828,99 @@ static int test_running_phase_keeps_no_push_guard() {
     return 0;
 }
 
+// 门球发球锚点（2026-10-13）：准备点必须锚在"本次门球第一帧的球位"，不许跟着球走。
+//   真机形状（20261013193005 帧 3817~3862）：球被以 19cm/s 推走，而准备点 `px = 当前球位 − 8cm`
+//   每帧重算 ⇒ 目标跟着球跑 ⇒ `at_ready`（停在 3cm 内）永不成立 ⇒ 那脚 TM_PASS 猛推从不触发，
+//   只剩身体慢推；球到离门线 ~30cm 处丢在场上，对手从 85cm 外赶到捅进。
+//   判别力：`roles.kGkCreepOurs=0`（回滚）时球一离开门球点 >12cm 就丢"死球"身份、锚点作废。
+static int test_gk_serve_anchor() {
+    auto scene = []() {
+        WorldModel wm;
+        gk_test_field(wm);
+        wm.ball.x = 205.2; wm.ball.y = 77.7; wm.ball.vx = 0.0; wm.ball.vy = 0.0;
+        wm.home[0].x = 212.0; wm.home[0].y = 80.0; wm.home[0].rot = -107.0;
+        return wm;
+    };
+    WorldModel wm = scene();
+    run_goalie(wm, 0);                       // 第一帧：球静止在门球点 → 立锚
+    if (!wm.goalie_serve_anchor_ok) {
+        printf("FAIL: 门球点静止球应立起发球锚点\n");
+        return 1;
+    }
+    const double ax0 = wm.goalie_serve_ax;
+    if (fabs(ax0 - 205.2) > 0.6) {
+        printf("FAIL: 锚点应取首帧球位 x=205.2，实际 %.1f\n", ax0);
+        return 1;
+    }
+    // 模拟"门将把球推走"：球每帧朝场外 4cm、门将保持贴在球后 8cm。
+    //   ⚠️ 每帧位移必须 < kGkTeleportJump=8cm，否则会被判成"平台把门将瞬移回门口"而**合法地**
+    //   复位承诺期（第一版用例就是踩了这个：一次挪 15cm ⇒ 锚点被正确清掉，用例自己错怪了实现）。
+    //   推 7 帧 × 2cm = 14cm：**故意落在 12~15cm 这个窗口里** ——
+    //   老判据 `gk_goal_kick_creep` 的半径是 12cm（推过 12cm 就假），新判据的半径是 30cm，
+    //   只有落在这两数之间，「新判据在起作用」才是可判别的（用例判别力就是这么来的）。
+    wm.home[0].x = wm.ball.x + 8.0;
+    for (int k = 0; k < 7; ++k) {
+        wm.ball.x -= 2.0; wm.ball.vx = -2.0; wm.ball.vy = 0.0;
+        wm.home[0].x = wm.ball.x + 8.0; wm.home[0].y = 78.0;
+        run_goalie(wm, 0);
+    }
+    if (!wm.goalie_serve_anchor_ok || fabs(wm.goalie_serve_ax - ax0) > 1e-9) {
+        printf("FAIL: 推球途中锚点不该跟着球走（锚 %.1f → %.1f，ok=%d，球已到 %.1f）\n",
+               ax0, wm.goalie_serve_ax, (int)wm.goalie_serve_anchor_ok, wm.ball.x);
+        return 1;
+    }
+    // 判别力自证：关掉新判据 → 球离开 12cm 后应丢"死球"身份、锚点作废
+    set_param("roles.kGkCreepOurs", 0.0);
+    WorldModel off = scene();
+    run_goalie(off, 0);
+    off.home[0].x = off.ball.x + 8.0;
+    for (int k = 0; k < 7; ++k) {
+        off.ball.x -= 2.0; off.ball.vx = -2.0; off.ball.vy = 0.0;
+        off.home[0].x = off.ball.x + 8.0; off.home[0].y = 78.0;
+        run_goalie(off, 0);
+    }
+    set_param("roles.kGkCreepOurs", 1.0);
+    if (off.goalie_serve_anchor_ok) {
+        printf("FAIL: 回滚档下球已推过 12cm，锚点应作废（说明判据没在起作用）\n");
+        return 1;
+    }
+    printf("gk serve anchor: OK (锚点不跟球走；回滚档 12cm 外即作废)\n");
+    return 0;
+}
+
+// 推球守卫默认口径（2026-10-13 用户指令重新打开）+ 运行时可注入。
+//   真机依据：`C:\Strategy\SimuroSot5.log` 我方 73 次 `Violated No pushing` vs 对手 31 次，
+//   平台口径"每 4 次送对手 1 球"。判别力：`roles.kNoPushGuard=0` 必须能一键回到旧口径，
+//   否则 sim 侧做不了单变量 A/B（要重编两版）。
+static int test_no_push_guard_default_on() {
+    if (!no_push_guard_enabled()) {
+        printf("FAIL: 推球守卫默认应为开（真机取证后按用户指令重新打开）\n");
+        return 1;
+    }
+    WorldModel wm = runtime_action_scene();
+    wm.game_state = PM_PlayOn;
+    wm.runtime_phase = RuntimePhase::Running;
+    wm.ball.x = 26.0; wm.ball.y = 20.0;         // 角区 = no-push zone
+    if (detail::push_allowed_with_guard(wm, no_push_guard_enabled())) {
+        printf("FAIL: 守卫开着时角区内不该允许碰球\n");
+        return 1;
+    }
+    set_param("roles.kNoPushGuard", 0.0);       // 单变量回滚口径
+    bool off = detail::push_allowed_with_guard(wm, no_push_guard_enabled());
+    set_param("roles.kNoPushGuard", 1.0);
+    if (!off) {
+        printf("FAIL: roles.kNoPushGuard=0 应回到旧口径（角区允许碰球）\n");
+        return 1;
+    }
+    wm.ball.x = 110.0; wm.ball.y = 90.0;        // 合规区域：守卫不该拦
+    if (!detail::push_allowed_with_guard(wm, no_push_guard_enabled())) {
+        printf("FAIL: 守卫不该拦合规区域的球\n");
+        return 1;
+    }
+    printf("no-push guard default on: OK (角区拦/合规区放行/一键回滚)\n");
+    return 0;
+}
+
 static WorldModel restart_touch_scene(int game_state = PM_PlaceKick_Blue) {
     WorldModel wm = runtime_action_scene();
     wm.game_state = game_state;
@@ -6867,6 +6960,8 @@ int main(int argc, char **argv) {
     rc |= test_running_phase_allows_active_action();
     rc |= test_non_running_phase_blocks_active_touch();
     rc |= test_running_phase_keeps_no_push_guard();
+    rc |= test_no_push_guard_default_on();
+    rc |= test_gk_serve_anchor();
     rc |= test_opp_box_instant_exit();
     rc |= test_contest_charge();
     rc |= test_restart_charge();

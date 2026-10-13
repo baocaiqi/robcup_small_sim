@@ -155,16 +155,22 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
 }
 
 // 推球守卫：死球/摆位期或球在角区时不碰球（平台 No pushing 犯规，每 4 次送对手 1 球）
+// ⚠️ 2026-10-13 默认由 false → **true**（用户指令重新打开做真机 A/B），并改成运行时可注入：
+//   `sim_bench --params roles.kNoPushGuard=0` 即回到旧口径，不必重编两版。
+//   真机依据：`C:\Strategy\SimuroSot5.log` 我方 73 次 `Violated No pushing` vs 对手 31 次。
+//   回滚：`roles.kNoPushGuard=0`（sim）或把默认值改回 0.0 重编（真机）。
+//   ⚠️ 定义体（`no_push_guard_enabled`）必须留在下面**匿名 namespace 之外**，
+//      否则是内部链接，offline_test 链接不到（本次踩过 LNK2019）。
 bool push_allowed(const WorldModel &wm) {
-    return detail::push_allowed_with_guard(wm, kNoPushGuardEnabled);
+    return detail::push_allowed_with_guard(wm, no_push_guard_enabled());
 }
 
 bool robot_touch_allowed(const WorldModel &wm, int id) {
-    return detail::actor_touch_allowed_with_guard(wm, id, kNoPushGuardEnabled);
+    return detail::actor_touch_allowed_with_guard(wm, id, no_push_guard_enabled());
 }
 
 bool prep_point_ok(double px, double py) {
-    if (!kNoPushGuardEnabled) { (void)px; (void)py; return true; }
+    if (!no_push_guard_enabled()) { (void)px; (void)py; return true; }
     return !in_no_push_zone(px, py);
 }
 
@@ -229,6 +235,11 @@ double spread_y(const WorldModel &wm, double bx, double by,
 }
 
 }  // anonymous namespace
+
+// 推球守卫总开关（2026-10-13 默认改为开）。定义放在匿名 namespace 之外 = 外部可见，
+//   否则是内部链接、offline_test 链接不到（本次踩过 LNK2019）。
+TUNABLE(kNoPushGuard, 1.0);
+bool no_push_guard_enabled() { return kNoPushGuard > 0.5; }
 
 // 这个 gameState 是不是"该我们开球"（争球算双方都可抢）
 bool our_restart(const WorldModel &wm) {
@@ -604,6 +615,30 @@ bool gk_goal_kick_creep(const GkView &v) {
            kGkCreepRange;
 }
 
+// ⚠️ 2026-10-13 新增：**我们自己正在把球推出去**时，别丢"死球"身份。
+//   两个门槛各自都会在"推球途中"失效，而它们正是 restart_kick 的入场券（`v.ball_still`）：
+//     ① 速度项 `hypot < 0.2cm/帧`：门将用身体推球时球速就是 **0.47cm/帧**（真机实测 19cm/s）⇒ 立刻假；
+//     ② `gk_goal_kick_creep` 的距离项：球一离开门球点 **12cm** 就假 ⇒ 推到第 12cm 就丢身份。
+//   结果（真机 20261013193005 帧 3817~3862）：球被慢推到离门线 30cm 处丢在场上，
+//   门将不再"推穿"，对手从 85cm 外 0.7 秒赶到捅一脚 → 进球。该场 5 个丢球里 4 个起于此。
+//   判据只认"只可能来自我们自己推球"的形状：**球在朝场外滚**（对手的射门不可能远离我方门）
+//   ＋ 还在门口范围内 ＋ 门将就在接触距离内。三条同时成立才认，避免把活球当死球。
+TUNABLE(kGkCreepOurs, 1.0);          // 0 = 回滚（只认上面那条静止判据）
+TUNABLE(kGkCreepOursRange, 30.0);    // cm：球离己方门线还这么近才算"还在门口"
+TUNABLE(kGkCreepOursContact, 14.0);  // cm：门将离球这么近才算"是它在推"
+constexpr double kGkCreepOursSpeed = 0.15;   // cm/帧：朝场外至少这么快才算在推（19cm/s=0.47 ✓）
+
+bool gk_creep_ours(const WorldModel &wm, const GkView &v) {
+    if (kGkCreepOurs < 0.5) return false;
+    // ⚠️ 必须"本次门球已经开推了"（锚点已立）才算 —— 否则等于把"门前任何朝场外滚的慢球"
+    //   都当死门球，正好重演第 67 轮那个坑：restart_kick 会 gk_set_play=true ⇒ 整段跳过守门两闸
+    //   ⇒ 门将站成桩子。本判据只在**规则自己已经开始处理这个球**之后才生效，不会造出新的死球场景。
+    if (!wm.goalie_serve_anchor_ok) return false;
+    if (v.vx * wm.ctx.attack_dir() <= kGkCreepOursSpeed) return false;   // 没在朝场外滚
+    if (v.ball_goal > kGkCreepOursRange) return false;                   // 已经推远了：交给别人
+    return v.db <= kGkCreepOursContact;                                  // 门将正在推它
+}
+
 GkView gk_view(const WorldModel &wm, int id) {
     const TeamContext &ctx = wm.ctx;
     const RobotState &r = wm.home[id];
@@ -615,7 +650,7 @@ GkView gk_view(const WorldModel &wm, int id) {
     v.ball_goal = ctx.dist_our_goal(v.bx);
     v.gside = ball_goal_side(ctx, v.bx);
     v.opp_dmin = opp_clear_dist(wm);
-    v.ball_still = std::hypot(v.vx, v.vy) < 0.2 || gk_goal_kick_creep(v);
+    v.ball_still = std::hypot(v.vx, v.vy) < 0.2 || gk_goal_kick_creep(v) || gk_creep_ours(wm, v);
     v.opp_has_ball = false;
     v.y_at_goal = 90.0;
     v.heading_goal = predict_y_at_x(v.bx, v.by, v.vx, v.vy, ctx.our_goal_x(), v.y_at_goal);
@@ -897,8 +932,16 @@ void gk_back_to_prep(const TeamContext &ctx, RobotState &r, const GkView &v, boo
     gk_goto(ctx, r, px, pyc, gliding ? motion::TM_PASS : motion::TM_STOP);
 }
 
+// 门球发球锚点（2026-10-13，见 world_model.hpp 的 `goalie_serve_anchor_ok` 说明）：
+//   1 = 第一次进本规则时把球位锚住，之后准备点不再跟着球走（治"追自己的尾巴"）；
+//   0 = 回滚成每帧按当前球位重算准备点。
+TUNABLE(kGkServeAnchor, 1.0);
+
 bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
-    if (!(v.ball_goal < 45.0 && v.ball_still)) return false;
+    if (!(v.ball_goal < 45.0 && v.ball_still)) {
+        wm.goalie_serve_anchor_ok = false;      // 规则不再适用 → 下次进来重新锚
+        return false;
+    }
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
     bool contested = v.opp_dmin < 40.0;
@@ -911,7 +954,16 @@ bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     // 为什么必须承诺：推穿这个动作本身会把门将带离准备点、也会让横向偏差变大，
     // 一旦拿这些量当"要不要继续推"的条件，门将就会在"推穿"和"绕回球后"之间每 3 帧翻一次，
     // 结果原地左右蹭（实测旧逻辑要 130 帧 = 3.25 秒才把球弄出去）。
-    double px = v.bx - dx * kGkPushDist, py = v.by - dy * kGkPushDist;
+    // ⚠️ 2026-10-13：准备点必须**锚在本次门球第一帧的球位**上。原来 `px = v.bx - dx*8` 每帧重算，
+    //   而推球途中球一直在动 ⇒ 准备点跟着球跑 ⇒ `at_ready`（停在 3cm 内）永不成立 ⇒
+    //   那脚"猛推"从不触发（真机只剩 19cm/s 的身体慢推，见 world_model.hpp 取证）。
+    if (!wm.goalie_serve_anchor_ok) {
+        wm.goalie_serve_ax = v.bx; wm.goalie_serve_ay = v.by;
+        wm.goalie_serve_anchor_ok = true;
+    }
+    const double abx = (kGkServeAnchor > 0.5) ? wm.goalie_serve_ax : v.bx;
+    const double aby = (kGkServeAnchor > 0.5) ? wm.goalie_serve_ay : v.by;
+    double px = abx - dx * kGkPushDist, py = aby - dy * kGkPushDist;
     // 门将活动范围 y∈[kGkYLo,kGkYHi]，球贴着下沿时理论后撤点够不到，只能取夹住后的点
     double pyc = clamp(py, kGkYLo, kGkYHi);
     bool clamped = (pyc != py);
@@ -1265,8 +1317,10 @@ void run_goalie(WorldModel &wm, int id) {
     }
     wm.goalie_last_id = id; wm.goalie_last_x = gr.x; wm.goalie_last_y = gr.y;
     if (kGkRestartReset > 0.5 &&
-        (gk_ball_replaced(wm) || (kGkTeleportReset > 0.5 && gk_teleported)))
+        (gk_ball_replaced(wm) || (kGkTeleportReset > 0.5 && gk_teleported))) {
         wm.goalie_serve_phase = 0;
+        wm.goalie_serve_anchor_ok = false;   // 球被平台重新摆放 → 锚点作废（见 world_model.hpp）
+    }
 #ifdef SIMURO5_GK_PROBE
     // 把本帧 GkView 的关键量交给探针（sim_trace --gk-probe 打印用）
     motion::g_gk_probe.y_at_goal    = v.y_at_goal;
