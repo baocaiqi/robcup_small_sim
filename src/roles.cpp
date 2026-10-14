@@ -180,6 +180,7 @@ TUNABLE(kGkNewDrive, 0.0);
 //   （`gk_cover_line_point`）、门前死守、门球几何全部用原始预测，不受影响。
 //   1.0 = 回退成"直接站到预测点"。
 TUNABLE(kGkShrink, 0.7);
+TUNABLE(kGkThreatBlend, 0.3);   // 门将默认站位 y 往威胁场门线最危险 y 偏的比例（0=关）
 constexpr double kGkBlockLineDepth = 3.0;  // cm：门前死守 / 慢球堵门线时贴门线的深度（闸零与 gk_slow_block 共用）
 
 // 对方机器人避障半径（本体 6 + 净空 4）；与 plan_route 的 margin 绑定，调小须同步调 margin
@@ -1042,11 +1043,77 @@ void gk_back_to_prep(const TeamContext &ctx, RobotState &r, const GkView &v, boo
 //   0 = 回滚成每帧按当前球位重算准备点。
 TUNABLE(kGkServeAnchor, 1.0);
 
+// ═══ 快发球（2026-10-14，参考对手门球"门将不停顿、斜着直接顶穿球推向边路"思想，自研实现）═══
+//   真机取证（replay 20261014161152 帧 2884~2929，黄位）：老流程 = 倒车去后撤点 → 带着惯性进承诺期 →
+//   原地以 ±14 轮速慢转 ~33 帧（顺带滑出去 12cm）→ 第 45 帧才推，对手已经贴到 10cm，抢断破门。
+//   今天 9 个失球里 6 个都是"球在门球点 (15,78) 停了 41~57 帧"这个形状。
+//   对手的门球（观察值，不是我们照抄的值）：约 7 帧就出球，门将从门口斜向直接穿过球，1 秒后球已在边路。
+//   我们的做法：不找后撤点、不原地转正——门将→球这条线本身就穿过球心，只要它
+//     ① 朝场内（与进攻方向夹角 ≤ kGkFastServeCone），② 横向分量指向球所在的那一侧边墙（不往中路送），
+//   就直接以 TM_PASS 冲向"球后方 kGkFastServeThrough"的点（差速轮可倒车，车尾顶也一样），一脚把球捅向边路。
+//   条件不满足（门将站得太偏/太远）→ 退回老流程。kGkFastServe=0 = 整段回滚。还没真机验证。
+TUNABLE(kGkFastServe, 1.0);
+TUNABLE(kGkFastServeCone, 60.0);     // 度：门将→球方向与进攻方向的最大夹角
+TUNABLE(kGkFastServeMidDeg, 20.0);   // 度：横向指向中路时，夹角在此以内仍放行（近似直推）
+TUNABLE(kGkFastServeMaxDist, 40.0);  // cm：门将离球超过此值不走快发球（太远直冲不准）
+TUNABLE(kGkFastServeThrough, 40.0);  // cm：穿球目标在球后方多远
+// 先转后冲：差速轮不能横移，边转边走会画弧擦过球（离线闭环已证），所以偏差大于 SpinDeg 就原地转，
+//   车头或车尾对准都行（谁近用谁）；转速 = 偏差(度)×SpinK，封顶 SpinMax（轮速单位）。
+TUNABLE(kGkFastSpinDeg, 12.0);
+// 2026-10-14 晚：SpinK 2→4、SpinMax 70→150。真机取证（rlg 190700/184121 门球段）：命令 ±70 时
+//   前 9 帧只转了 20°（真机转向有一阶惯性，离线运动学没建模），门将还往后溜 7cm。转得更猛才赶得上。
+TUNABLE(kGkFastSpinK, 4.0);
+TUNABLE(kGkFastSpinMax, 150.0);
+TUNABLE(kGkFastDriveK, 3.0);         // 冲刺时的航向修正（轮速/度）
+
+void gk_fast_drive(RobotState &r, double tx, double ty) {
+    const double aim = angle_to(r.x, r.y, tx, ty);
+    double err = angle_diff(aim, r.rot), s = 1.0;
+    if (std::fabs(err) > 90.0) { err = angle_diff(aim, r.rot + 180.0); s = -1.0; }   // 车尾更近 → 倒着冲
+    if (std::fabs(err) > kGkFastSpinDeg) {
+        const double w = clamp(err * kGkFastSpinK, -kGkFastSpinMax, kGkFastSpinMax);
+        r.vl = -w; r.vr = w;
+    } else {
+        const double c = err * kGkFastDriveK;
+        r.vl = clamp(s * motion::kMaxWheel - c, -motion::kMaxWheel, motion::kMaxWheel);
+        r.vr = clamp(s * motion::kMaxWheel + c, -motion::kMaxWheel, motion::kMaxWheel);
+    }
+    r.tgt_x = tx; r.tgt_y = ty; r.tgt_mode = motion::TM_PASS;
+}
+
+bool gk_fast_serve(WorldModel &wm, int id, const GkView &v) {
+    if (kGkFastServe < 0.5) return false;
+    const TeamContext &ctx = wm.ctx;
+    RobotState &r = wm.home[id];
+    if ((r.x - v.bx) * v.gside <= 0.0) { wm.goalie_fast_ok = false; return false; }   // 必须站在球的门侧
+    if (wm.goalie_fast_ok) {                                     // 已锁定：一口气冲到底，不重判
+        gk_fast_drive(r, wm.goalie_fast_tx, wm.goalie_fast_ty);
+        return true;
+    }
+    const double ux0 = v.bx - r.x, uy0 = v.by - r.y, d = std::hypot(ux0, uy0);
+    if (d < 1e-6 || d > kGkFastServeMaxDist) return false;
+    const double ux = ux0 / d, uy = uy0 / d;
+    const double c = ux * ctx.attack_dir();                      // = cos(与进攻方向夹角)
+    if (c < std::cos(kGkFastServeCone * SIMURO5_PI / 180.0)) return false;
+    const bool to_wall = uy * (v.by - 90.0) >= 0.0;              // 横向朝球那侧的边墙
+    if (!to_wall && c < std::cos(kGkFastServeMidDeg * SIMURO5_PI / 180.0)) return false;
+    const double tx = clamp(v.bx + ux * kGkFastServeThrough, 4.0, TeamContext::FIELD_LENGTH - 4.0);
+    const double ty = clamp(v.by + uy * kGkFastServeThrough, 4.0, TeamContext::FIELD_WIDTH - 4.0);
+    // 不走 gk_goto：它会把目标夹回门前 y∈[74,106]，斜线就被掰弯、擦球边。球一被顶动 ball_still 变假，
+    //   本规则自然退出，门将由其余规则拉回门前，所以不会跟着目标跑出去。
+    wm.goalie_serve_phase = 0;
+    wm.goalie_fast_ok = true; wm.goalie_fast_tx = tx; wm.goalie_fast_ty = ty;
+    gk_fast_drive(r, tx, ty);
+    return true;
+}
+
 bool gk_rule_restart_kick(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 45.0 && v.ball_still)) {
         wm.goalie_serve_anchor_ok = false;      // 规则不再适用 → 下次进来重新锚
+        wm.goalie_fast_ok = false;
         return false;
     }
+    if (gk_fast_serve(wm, id, v)) return true;
     const TeamContext &ctx = wm.ctx;
     RobotState &r = wm.home[id];
     bool contested = v.opp_dmin < 40.0;
@@ -1330,8 +1397,13 @@ bool gk_rule_default(WorldModel &wm, int id, const GkView &v) {
     //   在 80cm/s 下追"球现在在哪"必然滞后 8cm 量级；改成瞄"球会从门的哪个 y 进"，
     //   并且**朝门中心收缩**（`v.y_aim` = 90 + kGkShrink×(预测−90)，真机数据解出 k≈0.7：
     //   远端预测差 8~13cm，硬追单个预测点不如"信它七成 + 门中心三成"，<=6cm 命中率 39.9%→48.8%）。
+    double ty = v.y_aim;
+    // 2026-10-14 晚：没有射门在路上时，再往"威胁场门线最危险的 y"偏一点（参考对手沿门线
+    //   每 2cm 取 phi 最大处站位的思想，自研实现；只混 kGkThreatBlend，不整个交给威胁场）。
+    //   有射门（on_target）时照旧只信预测落点。kGkThreatBlend=0 回滚。还没真机验证。
+    if (!v.on_target && wm.threat.valid) ty += kGkThreatBlend * (wm.threat.line_max_y - ty);
     motion::position(wm.home[id], gk_line_x(wm.ctx, v.ball_goal < 15.0 ? 3.0 : kGkGuardDist),
-                     clamp(v.y_aim, kGkYLo, kGkYHi));
+                     clamp(ty, kGkYLo, kGkYHi));
     return true;
 }
 
@@ -1419,6 +1491,7 @@ void run_goalie(WorldModel &wm, int id) {
         (gk_ball_replaced(wm) || (kGkTeleportReset > 0.5 && gk_teleported))) {
         wm.goalie_serve_phase = 0;
         wm.goalie_serve_anchor_ok = false;   // 球被平台重新摆放 → 锚点作废（见 world_model.hpp）
+        wm.goalie_fast_ok = false;
     }
 #ifdef SIMURO5_HNNU_TRACE
     const char *hit = "none";

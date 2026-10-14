@@ -5,6 +5,7 @@
 #include "simuro5/simuro_interface.hpp"
 #include <cmath>
 #include "simuro5/team.hpp"
+#include "simuro5/threat_field.hpp"
 
 namespace simuro5 {
 
@@ -144,6 +145,7 @@ struct WorldModel {
     int ga_cooldown[PLAYERS_PER_SIDE] = {0};
     int dead_ball_frames = 0;  // 球静止在对方门区的连续帧数（>100 判卡死）
     double threat_level = 0.0; // 0~1
+    ThreatField threat;        // 对手威胁场（threat_field.hpp），update() 末尾每帧重建；DWA/站位只读
     int threat_hold_frames = 0;
     int goalie_opp_hold = 0;
     int goalie_serve_phase = 0;   // 发球承诺：0=先精确到位并转正机头, 1=已承诺，一气推穿不回头
@@ -156,6 +158,10 @@ struct WorldModel {
     //   `ok=false` = 还没锚（下一帧进规则时重新锚）；球被平台重新摆放/规则不再适用时清零。
     bool   goalie_serve_anchor_ok = false;
     double goalie_serve_ax = 0.0, goalie_serve_ay = 0.0;
+    // 快发球（roles.cpp gk_fast_serve）锁定的穿球目标：第一帧定下就不再改，
+    //   否则门将一动、"门将→球"方向就翻边，差速轮原地来回抽（离线闭环已证）。随锚点一起作废。
+    bool   goalie_fast_ok = false;
+    double goalie_fast_tx = 0.0, goalie_fast_ty = 0.0;
     // 门将上一帧位置（run_goalie 自己记）：用来量门将**真实**移动量（平台上报的 vl/vr 只是上一帧命令），
     //   和认出"平台把门将瞬移回门口"（重新开球）。goalie_last_id=-1 表示还没有上一帧。
     int    goalie_last_id = -1;

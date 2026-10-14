@@ -1,4 +1,7 @@
 #include "simuro5/formation.hpp"
+#include "simuro5/geometry.hpp"
+#define TUNABLE_PREFIX "form."
+#include "simuro5/tunable.hpp"
 #include <cmath>
 
 namespace simuro5 {
@@ -29,6 +32,49 @@ void keep_out_of_fb_quarter(double &x, double &y, bool fb_right, bool fb_top) {
     const bool straddling = std::fabs(y - 90.0) <= kFbQuarterClear;
     if (!in_quarter && !straddling) return;
     y = fb_top ? 90.0 - kFbQuarterClear : 90.0 + kFbQuarterClear;
+}
+
+
+// ═══ 我方门球：门将摆位时机头就对准"门将→球"那条线（2026-10-14 晚）═══
+//   真机取证（今天 4 场 rlg，黄位 7 次门球）：平台把门将摆在 (5.1,90.1) 机头 90°（我们给的 goalie_rot），
+//   球在 (14.7,77.7)，"门将→球"方向 ≈ −52°；快发球要先原地转 ~38°（车尾对准）。真机原地转起步很慢
+//   （命令 ±70 → 前 9 帧只转 20°，还往后溜 7cm），实测出球 35~45 帧 + 再 10~25 帧等球静止，
+//   离线闭环的 9~17 帧在真机上没兑现。摆位时直接把机头摆到这条线上 = 一帧不用转，开球就冲。
+//   参考对手门球"门将摆好就直接斜着顶穿"思想，自研实现（对手门将摆位机头 180° 是观察值）。
+//   kGkKickFaceBall=0 回滚成老的 goalie_rot。球位用真机观察值（平台会把 SetBall 的 (10,78) 挪到 (14.7,77.7)）。
+TUNABLE(kGkKickFaceBall, 1.0);
+TUNABLE(kGkKickBallDx, 14.7);   // 门球球位离己门线（观察值）
+TUNABLE(kGkKickBallY, 77.7);
+TUNABLE(kGkKickGkY, 90.1);      // 平台摆好后门将 y（观察值）
+double goalkick_goalie_rot(const TeamContext &c) {
+    if (kGkKickFaceBall < 0.5) return goalie_rot(c);
+    const double gx = M(c, 215), bx = c.our_goal_x() + c.attack_dir() * kGkKickBallDx;
+    return angle_to(gx, kGkKickGkY, bx, kGkKickBallY);
+}
+
+// ═══ 我方门球站位（2026-10-14 晚，参考对手"门球前队友已分散站好接应位"思想，自研实现）═══
+//   对手自己门球时 4 人站 (190,70)(190,115)(150,40)(130,130)（蓝位坐标，观察值，不是我们照抄的值）。
+//   我们的快发球固定把球斜着捅向球所在那侧边墙（球 y=77.7 → 下边墙，方向约 −52°，
+//   直线在 x≈75 撞墙）。老站位 3 号 (70,40) 在这条线场内侧 ~15cm，球滚到 y≈25 时它还得横插；
+//   真机今天 22 次门球里 8 次 4 秒内丢球，形状都是"球慢慢滚出去 → 对手先到 → 顶回门"。
+//   新站位：3 号直接站到出球线前方靠墙（kGkKickRecvX/Y），1 号收到门前中路偏上挡回传路线，
+//   2/4 号不动。kGkKickNewShape=0 回滚老站位。还没真机验证。
+TUNABLE(kGkKickNewShape, 1.0);
+TUNABLE(kGkKickRecvX, 150.0);   // 3 号接应点（蓝位坐标，x=150 ⇔ 黄位 70）
+TUNABLE(kGkKickRecvY, 25.0);
+TUNABLE(kGkKickGuardX, 175.0);  // 1 号门前护位（蓝位坐标，x=175 ⇔ 黄位 45）
+TUNABLE(kGkKickGuardY, 100.0);
+void goalkick_formation(const TeamContext &c, Robot *r) {
+    put(r, 0, M(c, 215), 90, goalkick_goalie_rot(c));
+    if (kGkKickNewShape < 0.5) {
+        put(r, 1, M(c, kFrontLineX), 100, field_rot(c));
+        put(r, 3, M(c, 150), 40, field_rot(c));
+    } else {
+        put(r, 1, M(c, kGkKickGuardX), kGkKickGuardY, field_rot(c));
+        put(r, 3, M(c, kGkKickRecvX), kGkKickRecvY, field_rot(c));
+    }
+    put(r, 2, M(c, 170), 65, field_rot(c));
+    put(r, 4, M(c, 130), 130, field_rot(c));
 }
 
 void defense_formation(const TeamContext &c, Robot *r) {
@@ -110,10 +156,10 @@ void formation_former(const TeamContext &c, PlayMode gs, Robot robots[]) {
             break;
 
         case PM_GoalKick_Blue:
-            if (c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,kFrontLineX), 100, field_rot(c)); put(robots, 2, M(c,170), 65, field_rot(c)); put(robots, 3, M(c,150), 40, field_rot(c)); put(robots, 4, M(c,130), 130, field_rot(c)); }
+            if (c.is_blue) goalkick_formation(c, robots);
             break;
         case PM_GoalKick_Yellow:
-            if (!c.is_blue) { put(robots, 0, M(c,215), 90, goalie_rot(c)); put(robots, 1, M(c,kFrontLineX), 100, field_rot(c)); put(robots, 2, M(c,170), 65, field_rot(c)); put(robots, 3, M(c,150), 40, field_rot(c)); put(robots, 4, M(c,130), 130, field_rot(c)); }
+            if (!c.is_blue) goalkick_formation(c, robots);
             break;
 
         default:

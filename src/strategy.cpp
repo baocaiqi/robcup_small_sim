@@ -4,6 +4,8 @@
 #include "simuro5/motion.hpp"
 #include "simuro5/field_info.hpp"
 #include "simuro5/defense.hpp"
+#include "simuro5/local_planner.hpp"
+#include "simuro5/defense_shape.hpp"
 #define TUNABLE_PREFIX "strategy."
 #include "simuro5/tunable.hpp"
 #include <cmath>
@@ -191,9 +193,21 @@ void Strategy::run(WorldModel &wm) {
             case ROLE_MIDFIELD: run_midfield(wm, i); break;
             default:            motion::stop(wm.home[i]); break;
         }
+        // 局部避让（plan.kPlanMode，0 关 / 1 影子 / 2 生效）：只改无球跑位的"怎么绕"，不改"去哪"
+        if (!pass_task_controls_robot(wm, i)) plan_steer(wm, i);
         // 己方门区纪律兜底（2026-10-13）：非 ACTIVE 角色的目标落进自家门区就拽出去。
         //   传球任务参与者豁免（任务优先级高于站位纪律）；ACTIVE 有自己的门区纪律（见上面的 in_ga 分支）。
         if (!pass_task_controls_robot(wm, i)) zone_box_clamp_role(wm, i);
+    }
+
+    // 球门侧保底人数（shape.kShapeOn，参考对手防守站位思想，自研实现，见 defense_shape.cpp）：
+    //   失球权且球在己半场、球门侧没人时，改派一个无球队员回到球-门连线上
+    {
+        bool skip[PLAYERS_PER_SIDE] = {false, false, false, false, false};
+        for (int i = 0; i < PLAYERS_PER_SIDE; ++i)
+            skip[i] = pass_task_controls_robot(wm, i) || i == wm.presser_id || i == wm.sweeper_id;
+        const int sid = defense_shape_apply(wm, skip);
+        if (sid >= 0) zone_box_clamp_role(wm, sid);
     }
 
     // 对方门区停留兜底：贴球(≤25cm)不算滞留，其余连续 >15 帧撤出 + 冷却 30 帧
@@ -231,6 +245,7 @@ void Strategy::run(WorldModel &wm) {
     cancel_unsafe_coop_pass(wm);
     ra_.complete_pass_handoff(wm);
     if (!wm.coop_pass_task.active) wm.third_man_support = {};
+    plan_frame_end(wm);
 }
 
 // 裁判口径门区余量 X/Y cm（抗惯性过冲）；大禁区非门将上限 3 人、顶出再加 5cm

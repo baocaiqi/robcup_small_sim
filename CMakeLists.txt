@@ -32,6 +32,9 @@ set(CORE_SOURCES
   src/shoot.cpp
   src/pass.cpp
   src/defense.cpp
+  src/threat_field.cpp
+  src/local_planner.cpp
+  src/defense_shape.cpp
   src/route.cpp
   src/roles.cpp
   src/formation.cpp

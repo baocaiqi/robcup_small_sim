@@ -104,6 +104,7 @@ void WorldModel::update(const Environment *env, const TeamContext &ctx_) {
         opp_last[i] = opp[i];
     }
     opp_vel_ready = true;
+    threat_build(threat, *this);   // 威胁场：读本帧球/对手/速度；kThreatFieldMode=0 时只置无效
 }
 
 }  // namespace simuro5
