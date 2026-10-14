@@ -56,7 +56,7 @@ bool is_our_goal_kick(const WorldModel &wm) {
 //   · 豁免名单只有「我方门球→门将」「我方开球/点球/任意球→当前主攻」；
 //   · 而 world_model.cpp 里"球离开摆放点 6cm 才算活球" ⇒ **自锁**：
 //     球要动才算活球，能碰球的却不许碰 ⇒ 球躺平、全队按角色跑位、贴球那台被
-//     hold_out_of_corner()（实现就是 motion::stop）就地停住。
+//     hold_out_of_corner() 就地停住（**纪律型出口已于 2026-10-14 改成“贴合法边界等”**，见下面“纪律型『让位』”那段说明）。
 // 治：把豁免放宽到"离球最近的非门将"——① 我方发球且当前主攻无效时退化到它；
 //     ② **争球(PM_FreeBall_*)**：本来就没有球队归属，双方都该抢。
 TUNABLE(kRestartExemptNearest, 1.0);   // 1 = 开（默认）；0 = 回滚成"只有主攻/门将能碰"
@@ -227,9 +227,61 @@ bool prep_point_ok(double px, double py) {
     return !in_no_push_zone(px, py);
 }
 
-void hold_out_of_corner(WorldModel &wm, RobotState &r) {
-    (void)wm;
-    motion::stop(r);
+// ── 纪律型"让位"：从"原地停车"改成"贴合法边界等"（2026-10-14 修机制）──────────
+// 病（真机取证，`_dsh_session/now/smoothness.py`）：
+//   这些出口原来一律 motion::stop ⇒ 全场 **20.8% 的帧整车完全停住**（官方 demo 9.4%）、
+//   起步次数 **647~879 次/分**（官方 447~478）、"动 ≤5 帧就断"的碎片段占 **22~28%**（官方 13~14%）；
+//   人眼看到的"到处跑、不流畅"主要来自这里。而站死还让我们离球**更远**：
+//   最近球员到球中位 20.8 / 26.7cm，官方 16.7 / 20.6cm。
+//   机制上这就是"多道闸抢方向盘、而且抢的方向都是别动"——角色的'我去抢球'被纪律一票否决。
+// 治：把"别动"改成**目标投影 + 缓动**，送到离球最近的**合法点**上贴着等：
+//   ① 驻留点 = 沿"球→我"的方向退到 gap 处：**始终停在我们现在这一侧，绝不横穿球**（防推球犯规）
+//      · 活球期 gap = kHoldBallGap（18cm）；死球/对方摆位 gap = kHoldBallGapDead（40cm，只在外围等）
+//   ② 按 id 把方向扇开 ±16°，几台车不会叠在同一个点
+//   ③ 自家门区推到 45cm 外 / 对方门区投影出去（谁也不贴门站）
+//   ⇒ 不犯规（仍然不碰球），但**保持运动**；且球一出禁区我们就在最近处、第一时间接手。
+// 回滚：`roles.kHoldApproach=0` 即恢复旧的"原地停"。
+TUNABLE(kHoldApproach, 1.0);
+TUNABLE(kHoldSpeed, 0.55);        // 缓动系数：驻留时别冲
+TUNABLE(kHoldBallGap, 18.0);      // cm：**活球**时与球的最小距离（车 6 + 球 2 + 10cm 余量）
+TUNABLE(kHoldBallGapDead, 40.0);  // cm：**死球/对方摆位**时与球的最小距离（别去干扰对方发球）
+TUNABLE(kHoldFan, 0.14);          // rad：按 id 把驻留方向扇开（±16°），防几台车叠一个点
+
+void hold_out_of_corner(WorldModel &wm, RobotState &r, int id) {
+    if (kHoldApproach < 0.5 || id <= 0 || id >= PLAYERS_PER_SIDE) { motion::stop(r); return; }
+    // ⚠️ 两条保守豁免：这些场景**必须站定**，驻留反而会帮倒忙 ——
+    //   ① 我方自己的摆位期（开球/点球/任意球/门球）：让主罚的人干净地摆/推；
+    //      我们那套门球几何是逐摆位（126 种）调出来的，队友凑近会挡路线。
+    //   ② 球在自家门区（门球摆位）：交给门将，别人不靠近。
+    //   ⇒ 驻留只作用于：对方发球、争球（无归属）、以及活球期的角区/准备点纪律。
+    if (wm.runtime_phase != RuntimePhase::Running && restart_owned_by_us(wm)) { motion::stop(r); return; }
+    if (in_goal_area(wm.ctx, wm.ball.x, wm.ball.y)) { motion::stop(r); return; }
+    const TeamContext &ctx = wm.ctx;
+    const double bx = wm.ball.x, by = wm.ball.y;
+    // 死球时留得更远（40cm）：对方摆位期我们只"在边上等"，不凑上去
+    const double gap = (wm.runtime_phase == RuntimePhase::Running) ? kHoldBallGap : kHoldBallGapDead;
+    // 驻留点 = 沿"球→我"的方向退到 gap 处 —— **始终在我们现在这一侧，绝不横穿球**
+    //   （⚠️ 第一版把基准取成"球位 ±7cm"，那等于开到球上会推球犯规，已收紧）
+    double dx = r.x - bx, dy = r.y - by;
+    double dn = std::hypot(dx, dy);
+    if (dn < 1e-6) { dx = -ctx.attack_dir(); dy = 0.0; dn = 1.0; }
+    const double ang = (id - (PLAYERS_PER_SIDE - 1) / 2.0) * kHoldFan;
+    const double ca = std::cos(ang), sa = std::sin(ang);
+    double tx = bx + (dx * ca - dy * sa) / dn * gap;
+    double ty = by + (dx * sa + dy * ca) / dn * gap;
+    // 自家门区（保守口径）：让位时谁也不许贴门站 ⇒ 目标落到自家半场靠门一侧就推到 45cm 外。
+    //   ⚠️ 这里**故意不复用** own_box_clamp：它定义在内层匿名命名空间里，从这个作用域前置声明
+    //      会变成"两个不同的函数" ⇒ C2668 重载歧义（本次编译踩过）。自包含更安全。
+    if (ctx.dist_our_goal(tx) < 45.0 && ty > 40.0 && ty < 140.0) {
+        tx = ctx.our_goal_x() + ctx.attack_dir() * 45.0;
+    }
+    clamp_out_opp_goal_area(ctx, tx, ty);
+    constexpr double kHoldMargin = 6.0;   // cm：离边线最小距离（FIELD_MARGIN 在 roles.cpp 里是各函数内部的局部常量）
+    tx = clamp(tx, kHoldMargin, TeamContext::FIELD_LENGTH - kHoldMargin);
+    ty = clamp(ty, kHoldMargin, TeamContext::FIELD_WIDTH - kHoldMargin);
+    motion::position(r, tx, ty, motion::TM_PASS);
+    r.vl *= kHoldSpeed;
+    r.vr *= kHoldSpeed;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2094,7 +2146,7 @@ void run_active(WorldModel &wm, int id) {
         wm.corner_ball_frames = 0;
     }
 
-    if (!robot_touch_allowed(wm, id)) { if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PushForbidden); hold_out_of_corner(wm, r); return; }
+    if (!robot_touch_allowed(wm, id)) { if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PushForbidden); hold_out_of_corner(wm, r, id); return; }
 
     // 对方门球/定位球重启：球停死在对方门区，别冲进去抢；先站罚球区外沿外等开球
     //   例外：我方主罚点球（in_penalty_exec）必须去踢
@@ -2165,7 +2217,7 @@ void run_active(WorldModel &wm, int id) {
                 } else if (corner_bypass || !in_no_push_zone(back_x, back_y)) {
                     motion::position(r, back_x, back_y);
                 } else {
-                    hold_out_of_corner(wm, r);   // 准备点在角区内 → 退到场心侧
+                    hold_out_of_corner(wm, r, id);   // 准备点在角区内 → 退到场心侧
                 }
                 return;
             }
@@ -2308,7 +2360,7 @@ void run_active(WorldModel &wm, int id) {
         //   他的准备点必然落在角区内，不例外等于把他钉在原地（见上面 corner_bypass）。
         if ((!prep_point_ok(px, py) || (coop_pass && in_no_push_zone(px, py))) && !corner_bypass) {
             if (coop_pass && wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PrepPoint);
-            hold_out_of_corner(wm, r); return;
+            hold_out_of_corner(wm, r, id); return;
         }
         if (coop_pass && !wm.coop_pass_task.active) {
             wm.coop_pass_task = {};
@@ -2469,7 +2521,7 @@ void run_active(WorldModel &wm, int id) {
             motion::position(r, wm.ball.x + dirx * 20.0, wm.ball.y + diry * 20.0, motion::TM_PASS);   // 带球推进
         } else if (!prep_point_ok(wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0)) {
             // 球后站位点在角区 → 不绕球后（会穿过球把球顶进角里）
-            hold_out_of_corner(wm, r);
+            hold_out_of_corner(wm, r, id);
         } else if (db < 16.0 && behind2 && wm.shoot_align_frames < kShootAlignTimeout) {
             if (++wm.shoot_align_frames >= kShootAlignTimeout) {
                 motion::position(r, wm.ball.x - dirx * 20.0, wm.ball.y - diry * 20.0);
@@ -2939,7 +2991,7 @@ void run_midfield(WorldModel &wm, int id) {
 
 void run_press(WorldModel &wm, int id) {
     RobotState &r = wm.home[id];
-    if (!push_allowed(wm)) { hold_out_of_corner(wm, r); return; }
+    if (!push_allowed(wm)) { hold_out_of_corner(wm, r, id); return; }
     BallState chased = chase_target(wm);
     if (wm.ctx.dist_opp_goal(chased.x) < 100.0 && std::fabs(chased.y - 90.0) < 45.0) {
         chased.x = wm.ctx.opp_goal_x() - wm.ctx.attack_dir() * 85.0;
@@ -3044,7 +3096,7 @@ void run_zone(WorldModel &wm, int id) {
         return;
     }
 
-    if (in_no_push_zone(wm.ball.x, wm.ball.y)) { hold_out_of_corner(wm, r); return; }
+    if (in_no_push_zone(wm.ball.x, wm.ball.y)) { hold_out_of_corner(wm, r, id); return; }
     BallState c = chase_target(wm);
     if (ctx.dist_opp_goal(c.x) < 100.0 && std::fabs(c.y - 90.0) < 45.0) {
         double tx = ctx.opp_goal_x() - ad * 85.0, ty = clamp(c.y, 72.5, 107.5);
