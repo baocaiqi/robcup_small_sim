@@ -46,6 +46,12 @@ TUNABLE(kActKeepRoleDead, 1.0);
 TUNABLE(kActDeadConfirm, 0.0);
 
 void RoleAssignment::assign(WorldModel &wm) {
+    const bool table_ok = wm.active_id >= 1 && wm.active_id < PLAYERS_PER_SIDE &&
+                          wm.role[0] == ROLE_GOALIE && wm.role[wm.active_id] == ROLE_ACTIVE;
+    // ⚠️ 合并取舍（2026-10-12）：队员 d9b1225 在 frozen 里加了 `runtime_phase != Running`，
+    //   效果等于"重启期每帧重置成固定档" —— 这正是我们第 72 轮用 kActKeepRoleDead 修掉的行为
+    //   （240 局 A/B：净胜 3.383→3.975，自家门区"2+ 人"犯规风险 −41%）。
+    //   故这里保留我们的旋钮口径；想退回那个行为把 kActKeepRoleDead 设成 0 即可。
     const bool old_freeze = wm.runtime_phase != RuntimePhase::Running && kActKeepRoleDead < 0.5;
     // 队员 adfa46b（2026-10-13 合并 P3）：动态接球进行中（coop_ball_control 活跃）时不许把角色表
     //   锁成固定档，否则"接球后交接主攻"拿不到 —— 即把 `kActDynamic < 0.5` 放宽成

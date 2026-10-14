@@ -435,6 +435,8 @@ TUNABLE(kPressHysteresis, 15.0);
 // 后场散球归属（2026-10-10）：见 update_presser 里的说明。0 = 关闭（回到"只在前场派"）
 TUNABLE(kPressBackEnabled, 1.0);
 TUNABLE(kPressBackMinGoalDist, 35.0);   // cm：球离己方门线近于此就不派（交给门将）
+// 第三人接应占用中的车不派去逼抢（2026-10-13 合并 P3）：0 = 回到"可以同车"（会让接应当帧被取消）
+TUNABLE(kPressSkipThirdMan, 1.0);
 
 void Strategy::update_presser(WorldModel &wm) {
     int cur = wm.presser_id;
@@ -473,6 +475,16 @@ void Strategy::update_presser(WorldModel &wm) {
         int rl = wm.role[i];
         if (rl != ROLE_ACTIVE && rl != ROLE_ASSIST && rl != ROLE_MIDFIELD) continue;
         if (pass_task_controls_robot(wm, i)) continue;
+        // 队员 01bc8df（2026-10-13 合并 P3）：**我们新加的"后场散球也派逼抢者"**这条，若唯一能派的
+        //   那台车正被"第三人接应"占用，就让位给接应 —— 否则 `third_man_runner_eligible`
+        //   （不许是 presser/sweeper/stealer/被盯人）会当帧把整条接应取消。
+        //   合并后正是被他们自己的用例 `neutral flight cancelled valid third man` 抓到的：
+        //   球挪到 x=160（后场）后我们新派的 presser=3，接应立刻消失。
+        //   ⚠️ 只让"后场散球"这一条让位：**前场**逼抢照旧抢占（他们的用例
+        //   `third man overrode required loose-ball presser` 要求前场散球必须有逼抢者，接应该让位）。
+        //   把关掉：`strategy.kPressSkipThirdMan=0`。
+        if (back_loose && kPressSkipThirdMan > 0.5 && wm.third_man_support.active &&
+            wm.third_man_support.runner_id == i) continue;
         double d = dist(bx, by, wm.home[i].x, wm.home[i].y);
         if (d > kPressMaxDist) continue;
         double forward = clamp(ad * (bx - wm.home[i].x), 0.0, kForwardMax);
