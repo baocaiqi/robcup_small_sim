@@ -50,25 +50,74 @@ bool is_our_goal_kick(const WorldModel &wm) {
            (!wm.ctx.is_blue && wm.game_state == PM_GoalKick_Yellow);
 }
 
-bool restart_exception_for_actor(const WorldModel &wm, int id) {
-    if (wm.runtime_phase != RuntimePhase::RestartSetup || !wm.restart_armed ||
-        !restart_owned_by_us(wm)) return false;
+// ── 重启/争球期的"碰球豁免"（2026-10-14，用户指令 A+B）─────────────────────
+// 病（真机症状"重新发球时到处跑不抢球"）：
+//   · touch_policy_allows 的**第一道闸**（stage）在非活球期把全队判成"不许碰球"；
+//   · 豁免名单只有「我方门球→门将」「我方开球/点球/任意球→当前主攻」；
+//   · 而 world_model.cpp 里"球离开摆放点 6cm 才算活球" ⇒ **自锁**：
+//     球要动才算活球，能碰球的却不许碰 ⇒ 球躺平、全队按角色跑位、贴球那台被
+//     hold_out_of_corner()（实现就是 motion::stop）就地停住。
+// 治：把豁免放宽到"离球最近的非门将"——① 我方发球且当前主攻无效时退化到它；
+//     ② **争球(PM_FreeBall_*)**：本来就没有球队归属，双方都该抢。
+TUNABLE(kRestartExemptNearest, 1.0);   // 1 = 开（默认）；0 = 回滚成"只有主攻/门将能碰"
+//   豁免者是否同时绕开"角区禁推"这一闸（1 = 绕开，默认）。
+//   为什么必须绕开：**争球的四个摆放点就在四个角上**（离角 0~20cm），全在
+//   kCornerNoPushR=35cm 的禁推角区内；不绕开 ⇒ 争球永远没人能碰球 ⇒ 球躺 100 周期
+//   被判"僵局"（docs/00:52）再给一个争球 ⇒ 死循环。
+//   ⚠️ 规则里"角区推球"算犯规（docs/00:51，每 4 次给对方 +1 球）——**本次改动里唯一有
+//      犯规风险的一环**；真机若发现吃犯规，把默认值改回 0.0 重编即可还原"宁可不救角球"。
+TUNABLE(kRestartExemptCorner, 1.0);
 
-    if (is_our_goal_kick(wm))
-        return id == 0 && wm.role[0] == ROLE_GOALIE;
+// 争球：球摆在四个角之一，无球队归属
+bool is_free_ball_state(int game_state) {
+    return game_state >= PM_FreeBall_LeftTop && game_state <= PM_FreeBall_RightBot;
+}
 
-    switch (wm.game_state) {
-        case PM_PlaceKick_Blue:
-        case PM_PlaceKick_Yellow:
-        case PM_PenaltyKick_Blue:
-        case PM_PenaltyKick_Yellow:
-        case PM_FreeKick_Blue:
-        case PM_FreeKick_Yellow:
-            return id == wm.active_id && id > 0 && id < PLAYERS_PER_SIDE &&
-                   wm.role[id] == ROLE_ACTIVE;
-        default:
-            return false;
+// 离球最近的非门将（并列取小号 ⇒ 同一帧只有一个豁免者，避免 5 台一起冲）
+int nearest_field_to_ball(const WorldModel &wm) {
+    int best = -1;
+    double bd = 1e18;
+    for (int i = 1; i < PLAYERS_PER_SIDE; ++i) {
+        const double dd = std::hypot(wm.home[i].x - wm.ball.x, wm.home[i].y - wm.ball.y);
+        if (dd < bd) { bd = dd; best = i; }
     }
+    return best;
+}
+
+bool restart_exception_for_actor(const WorldModel &wm, int id) {
+    if (wm.runtime_phase != RuntimePhase::RestartSetup || !wm.restart_armed) return false;
+
+    // ① 我方门球：只有门将（那套发球几何是扫 126 种摆位调出来的，别让场上队员插手）
+    if (is_our_goal_kick(wm))
+        return restart_owned_by_us(wm) && id == 0 && wm.role[0] == ROLE_GOALIE;
+
+    // ② 我方开球/点球/任意球：当前主攻优先；主攻无效时退化为离球最近的非门将（B）
+    if (restart_owned_by_us(wm)) {
+        switch (wm.game_state) {
+            case PM_PlaceKick_Blue:
+            case PM_PlaceKick_Yellow:
+            case PM_PenaltyKick_Blue:
+            case PM_PenaltyKick_Yellow:
+            case PM_FreeKick_Blue:
+            case PM_FreeKick_Yellow: {
+                const bool active_ok = wm.active_id > 0 && wm.active_id < PLAYERS_PER_SIDE &&
+                                       wm.role[wm.active_id] == ROLE_ACTIVE;
+                if (active_ok && id == wm.active_id && wm.role[id] == ROLE_ACTIVE) return true;
+                if (kRestartExemptNearest > 0.5 && !active_ok)
+                    return id > 0 && id == nearest_field_to_ball(wm);
+                return false;
+            }
+            default:
+                return false;
+        }
+    }
+
+    // ③ 争球（无归属，双方都该抢）：放行离球最近的非门将（B）
+    if (is_free_ball_state(wm.game_state))
+        return kRestartExemptNearest > 0.5 && id > 0 && id == nearest_field_to_ball(wm);
+
+    // ④ 对方发球：一律不碰（原设计，保持不动）
+    return false;
 }
 }  // namespace
 
@@ -79,8 +128,14 @@ bool push_allowed_with_guard(const WorldModel &wm, bool guard_enabled) {
 
 bool actor_touch_allowed_with_guard(const WorldModel &wm, int robot_id, bool guard_enabled) {
     if (robot_id < 0 || robot_id >= PLAYERS_PER_SIDE) return false;
-    const bool stage_allows_touch = wm.runtime_phase == RuntimePhase::Running ||
-                                    restart_exception_for_actor(wm, robot_id);
+    if (restart_exception_for_actor(wm, robot_id)) {
+        // 豁免者（本次重启/争球的指定主罚人）：是否连"角区禁推"一闸也放行。
+        // 为什么必须能放行：争球的四个摆放点全在禁推角区内，不放行 = 永远没人能碰球。
+        // 作用窗口很窄：restart_exception_for_actor 要求 runtime_phase==RestartSetup，
+        // 而 world_model.cpp 在球离开摆放点 6cm 后就切回 Running ⇒ 只覆盖"第一脚"。
+        return kRestartExemptCorner > 0.5 || !in_no_push_zone(wm.ball.x, wm.ball.y);
+    }
+    const bool stage_allows_touch = wm.runtime_phase == RuntimePhase::Running;
     return touch_policy_allows(wm, stage_allows_touch, guard_enabled);
 }
 }  // namespace detail
@@ -2089,11 +2144,15 @@ void run_active(WorldModel &wm, int id) {
     if (contested && kContestNoWait > 0.5 && wm.coop_pass_task.active && !pass_receiver_ready(wm))
         wm.coop_finish(CoopOutcome::OpponentFirst);
     // 角区救球：只救角区外环的卡球（该处推球合法）；球压在角心则不救，等平台判僵局重置
+    // ⚠️ 2026-10-14（A+B）：僵局判出来的**争球点又在角心**，于是"不救角心"= 死循环
+    //   （球躺 100 周期 → 判僵局 → 争球摆到角上 → 又不救）。所以**本次重启/争球的指定球员**
+    //   连角心也救；球一旦被推离摆放点 6cm，runtime_phase 切回 Running ⇒ 立刻恢复"角心不救"。
+    const bool corner_bypass = kRestartExemptCorner > 0.5 && restart_exception_for_actor(wm, id);
     if (wm.corner_ball_frames > 30) {
         double db = dist(r.x, r.y, wm.ball.x, wm.ball.y);
         if (db < 80.0) {
             bool deep = in_no_push_zone(wm.ball.x, wm.ball.y);   // 是否在禁推角区
-            if (!deep) {
+            if (!deep || corner_bypass) {
                 if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::Corner);
                 ++wm.corner_rescue_events;   // 统计用
                 double ex = 110.0 - wm.ball.x, ey = 90.0 - wm.ball.y;
@@ -2103,7 +2162,7 @@ void run_active(WorldModel &wm, int id) {
                 double te_ball = angle_diff(angle_to(r.x, r.y, wm.ball.x, wm.ball.y), r.rot);
                 if (db < 22.0 && std::fabs(te_ball) < 40.0) {
                     motion::position(r, wm.ball.x + ex * 30.0, wm.ball.y + ey * 30.0, motion::TM_PASS);   // 穿球踢向场心
-                } else if (!in_no_push_zone(back_x, back_y)) {
+                } else if (corner_bypass || !in_no_push_zone(back_x, back_y)) {
                     motion::position(r, back_x, back_y);
                 } else {
                     hold_out_of_corner(wm, r);   // 准备点在角区内 → 退到场心侧
@@ -2245,7 +2304,9 @@ void run_active(WorldModel &wm, int id) {
         double px = bx - sp.dir_x * prep_d;          // 准备点 = 球后 prep_d，落在瞄准线上
         double py = by - sp.dir_y * prep_d;
         // 准备点也不许落在角区（否则驱车过去会穿过球、把球顶进角里）
-        if (!prep_point_ok(px, py) || (coop_pass && in_no_push_zone(px, py))) {
+        // ⚠️ 2026-10-14（A+B）：但"本次重启/争球的指定球员"例外 —— 争球点就在角心，
+        //   他的准备点必然落在角区内，不例外等于把他钉在原地（见上面 corner_bypass）。
+        if ((!prep_point_ok(px, py) || (coop_pass && in_no_push_zone(px, py))) && !corner_bypass) {
             if (coop_pass && wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::PrepPoint);
             hold_out_of_corner(wm, r); return;
         }
