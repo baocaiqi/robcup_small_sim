@@ -14,11 +14,9 @@ const char *coop_outcome_name(CoopOutcome result) {
 }
 void WorldModel::coop_created() {
     ++coop_stats.created;
-    if (coop_observer) coop_observer(*this, "created", CoopOutcome::Count);
 }
 void WorldModel::coop_released() {
     ++coop_stats.released;
-    if (coop_observer) coop_observer(*this, "released", CoopOutcome::Count);
     if (coop_pass_task.kind == PassTaskKind::Ordinary)
         coop_pass_task.clear_push_target_lock();
 }
@@ -26,19 +24,16 @@ void WorldModel::coop_finish(CoopOutcome result) {
     if (!coop_pass_task.active) return;
     ++coop_stats.outcomes[(int)result];
     if (result == CoopOutcome::Success) ++coop_stats.received;
-    if (coop_observer) coop_observer(*this, "finished", result);
     if (coop_pass_task.kind == PassTaskKind::Ordinary)
         coop_pass_task.clear_push_target_lock();
     coop_pass_task.active = false;
 }
 void WorldModel::coop_control_entered() {
     ++coop_stats.control_entered;
-    if (coop_observer) coop_observer(*this, "control_entered", CoopOutcome::Count);
 }
 void WorldModel::coop_control_end(CoopOutcome reason) {
     if (!coop_ball_control.active) return;
     ++coop_stats.control_exits[(int)reason];
-    if (coop_observer) coop_observer(*this, "control_exited", reason);
     coop_ball_control.active = false;
 }
 

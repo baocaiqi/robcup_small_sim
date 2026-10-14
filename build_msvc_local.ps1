@@ -1,4 +1,4 @@
-# Local 32-bit MSVC Release build + offline_test for D:\robcup\strategy_5v5
+# Local 32-bit MSVC Release build for D:\robcup\strategy_5v5
 $ErrorActionPreference = "Continue"
 
 $repo = $PSScriptRoot

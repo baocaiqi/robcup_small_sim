@@ -11,7 +11,7 @@
 3. **用人话说目标**：agent 自动匹配技能。示例：
    - "帮我做射门模块，先设计方案确认再实现"
    - "修 bug：守门员站位抖，先复现再定位"
-   - "review 我改的 motion.cpp，跑 offline_test 验证"
+   - "review 我改的 motion.cpp，先给结论再说风险"
 
 ## 沟通约定（用户要求，2026-09-12）
 
@@ -34,7 +34,7 @@
 
 1. **不要改 `simuro_interface.hpp` 的接口签名**——平台按 mangled 名加载，改了就加载失败
 2. **必须 32 位 + MSVC**：`cmake -A Win32`，MinGW 编出来平台不认
-3. **改代码前先跑测试**：`cmake --build build --config Release && build\Release\offline_test.exe`
+3. **改代码前先想清楚怎么验证**：测试层已于 2026-10-14 整体移除，验收只剩两条 —— 真机 `.rlg` 取证（`tools/py/rlg_analyzer.py`）或人眼 review；改动仍须带可回滚旋钮
 4. **不引入第三方库**（平台加载的是裸 DLL，别依赖外部运行时）
 5. **每次重要改动后更新 `docs/06-调参记录.md`**（数值改了哪些、为什么、效果）
 
@@ -49,7 +49,7 @@
 
 ## 团队 Skill（仓库内自带，跟随仓库分发）
 
-> 按团队实际需要挑选 12 个常用工作流写成实体，
+> 按团队实际需要挑选 11 个常用工作流写成实体，
 > 存放在仓库内 `.claude/skills/` 和 `.codex/skills/`（SKILL.md 格式，双份通用）。
 
 | Skill | 一句话作用 |
@@ -57,7 +57,6 @@
 | brainstorming | 需求澄清：一次一问，方案对比 |
 | spec-driven-development | **先写规格再写代码**（没 spec 不动手） |
 | writing-plans | 拆成 2-5 分钟可验证小任务 |
-| test-driven-development | 先写测试→失败→最小实现→通过 |
 | incremental-implementation | 一次只改一小块，改完测完提交完再继续 |
 | systematic-debugging | 4 步根因：复现→定位→缩减→修复+防守 |
 | requesting-code-review | 合并前派 agent 对照 spec 审查 |
@@ -77,11 +76,10 @@ cp -r .codex/skills/* ~/.codex/skills/
 # 以后仓库有更新，重跑对应命令即可
 ```
 
-## 测试命令速查
+## 构建与复盘命令速查
 
 ```bat
 cmake --build build --config Release
-build\Release\offline_test.exe              :: 冒烟测试（策略 300 帧 + 摆位 12 态）
 python tools\py\rlg_analyzer.py 日志.rlg    :: 复盘比赛日志
 ```
 

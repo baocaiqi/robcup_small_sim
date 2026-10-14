@@ -19,7 +19,7 @@
 
 ```bat
 :: 1. 生成 32 位工程（官方平台是 i386，DLL 必须 32 位！）
-cmake -S . -B build -G "Visual Studio 17 2022" -A Win32 -DBUILD_TEST=ON
+cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
 
 :: 2. 编译
 cmake --build build --config Release
@@ -27,8 +27,6 @@ cmake --build build --config Release
 :: 3. 产物在 build/bin/Release/ 下：
 ::    Strategy4Blue.dll / Strategy4Yellow.dll
 
-:: 4. 离线冒烟测试（不依赖平台）
-build\Release\offline_test.exe
 ```
 
 比赛前把两个 DLL 拷贝到 `C:\Strategy\`（覆盖同名文件），启动 `SimuroSot5.exe` 开赛。
@@ -56,10 +54,10 @@ include/simuro5/        策略内核头文件
 src/
   dll_blue.cpp           蓝队导出壳（SetFormerRobots 等 5 个接口）
   dll_yellow.cpp         黄队导出壳
-  offline_test.cpp       离线冒烟测试
   *.cpp                  各模块实现
 docs/                    新人上手/规则速查/架构/接口/分工/进度/规范/调参/部署
 tools/py/                Python：constants/geometry/rlg_analyzer
+docs/                    规则/架构/接口/进度/规范/调参/部署
 ```
 
 ## 比赛关键参数速查

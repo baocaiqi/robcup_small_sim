@@ -59,7 +59,7 @@ set_target_properties(Strategy4Yellow PROPERTIES
 foreach(tgt Strategy4Blue Strategy4Yellow)
   target_include_directories(${tgt} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
   if(HNNU_TRACE)
-    # 只给两个平台 DLL 打开；offline_test / sim_bench 保持零副作用（不写盘）
+    # 只给两个平台 DLL 打开（写盘诊断默认 OFF，比赛版必须保持 OFF）
     target_compile_definitions(${tgt} PRIVATE SIMURO5_HNNU_TRACE)
   endif()
   if(MSVC)
@@ -71,32 +71,3 @@ foreach(tgt Strategy4Blue Strategy4Yellow)
     set_property(TARGET ${tgt} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   endif()
 endforeach()
-
-# ---- 测试(可选, 需要 -DBUILD_TEST=ON) ----
-if(BUILD_TEST)
-  add_executable(offline_test src/offline_test.cpp ${CORE_SOURCES})
-  target_include_directories(offline_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(offline_test PRIVATE STRATEGY4BLUE_EXPORTS)
-  if(MSVC)
-    target_compile_options(offline_test PRIVATE /W3 /utf-8)
-    set_property(TARGET offline_test PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  endif()
-
-  # ---- 快速无头仿真器（大量样本/回归测试/参数搜索）----
-  add_executable(sim_bench tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
-  target_include_directories(sim_bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(sim_bench PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_GK_PROBE)
-  if(MSVC)
-    target_compile_options(sim_bench PRIVATE /W3 /utf-8)
-    set_property(TARGET sim_bench PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  endif()
-
-  # ---- 诊断构建：sim_bench + 决策分支追踪（include/simuro5/branch_trace.hpp）----
-  add_executable(sim_trace tools/sim_bench/sim_bench.cpp ${CORE_SOURCES})
-  target_include_directories(sim_trace PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(sim_trace PRIVATE STRATEGY4BLUE_EXPORTS SIMURO5_BRANCH_TRACE SIMURO5_GK_PROBE)
-  if(MSVC)
-    target_compile_options(sim_trace PRIVATE /W3 /utf-8)
-    set_property(TARGET sim_trace PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-  endif()
-endif()

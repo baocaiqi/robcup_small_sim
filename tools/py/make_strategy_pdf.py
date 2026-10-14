@@ -85,11 +85,8 @@ TREE = """strategy_5v5/
 │   ├─ route.cpp                 避障路径：网格 A* + 视线拉直
 │   ├─ formation.cpp             12 态摆位与摆球
 │   ├─ geometry.cpp              基础几何计算
-│   └─ offline_test.cpp          离线回归测试（开发用，不参与比赛运行）
 └─ tools/                        —— 开发与复盘工具（不参与比赛运行）
-    ├─ sim_bench/                无头仿真器（复用同一份策略源码）
     ├─ py/                       录像与日志分析脚本
-    └─ sparring_yellow/          陪练黄队（官方 demo 源码 + 纪律补丁，官方源码不入库）
 """
 
 BODY = """

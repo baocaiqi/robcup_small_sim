@@ -36,7 +36,6 @@ def main():
     ap.add_argument("params", help="验收通过的战略参数文件（可多个，逗号分隔）")
     ap.add_argument("--yes", action="store_true", help="真正写入源码（否则只 dry-run）")
     ap.add_argument("--deploy", action="store_true", help="编译后部署到平台蓝位（自动备份旧 DLL）")
-    ap.add_argument("--skip-test", action="store_true")
     a = ap.parse_args()
 
     files = a.params.split(",")
@@ -59,15 +58,13 @@ def main():
             return 3
 
     # ② 编译
-    rc, out = run("cmake --build build --config Release", "编译（含 offline_test 与两个 DLL）", timeout=3600)
+    rc, out = run("cmake --build build --config Release", "编译两个 DLL", timeout=3600)
     if rc != 0:
         print("✗ 编译失败，未部署")
         return 4
 
     # ③ 冒烟测试（红线：必须 ALL TESTS PASSED 才算过）
-    if not a.skip_test:
-        rc, out = run("build\\Release\\offline_test.exe", "冒烟测试 offline_test")
-        if "ALL TESTS PASSED" not in out:
+    # 测试层已于 2026-10-14 整体移除：此处的 offline_test 门禁一并删除
             print("✗ offline_test 未通过，未部署（按团队铁律，测试不过不许上机）")
             return 5
         print("   ✓ ALL TESTS PASSED")

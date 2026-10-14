@@ -8,7 +8,6 @@
 #include "simuro5/tunable.hpp"
 #include <cmath>
 #include <cstdio>
-#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后
 
 namespace simuro5 {
 

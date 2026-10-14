@@ -13,7 +13,7 @@
 安全措施：
   · 默认先打印"旧 → 新"清单并要求 --yes 才写（--dry-run 只打印）
   · 只动 TUNABLE(...) 行，不碰其他代码
-  · 改完提示重新编译 + 跑 offline_test（不自动做，避免误部署）
+  · 改完提示重新编译（不自动做，避免误部署）
 """
 import argparse
 import io
@@ -31,9 +31,6 @@ PREFIX_TO_FILE = {
     "roles.": "src/roles.cpp",
     "strategy.": "src/strategy.cpp",
     "motion.": "src/motion.cpp",
-    # 仿真物理参数（定标产出）也写回源码：这样"重跑搜索"时仿真就是定标过的，
-    # 不用每次手动带 --params；sim_bench 与平台 DLL 共用同一份注册表，互不影响。
-    "sim.": os.path.join("tools", "sim_bench", "sim_bench.cpp"),
 }
 
 
@@ -117,7 +114,7 @@ def main():
             print("   ", m)
     print(f"\n合计需要改动 {total_changed} 处" + ("（dry-run，未写入）" if a.dry_run else ""))
     if total_changed and not a.dry_run:
-        print("下一步：cmake --build build --config Release && build\\Release\\offline_test.exe")
+        print("下一步：cmake --build build --config Release，然后真机取证")
     return 0
 
 

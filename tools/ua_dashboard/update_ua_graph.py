@@ -347,7 +347,7 @@ def main():
     # 7) 分层：按路径规则从零重建（可复现、可自愈；与原始人工分层一致）
     #     规则：dll/simuro_interface→平台层；world_model/team→世界模型层；
     #     strategy/role_assignment/situation/formation→策略调度层；
-    #     tools/py→Python 层；offline_test/sim_bench/run_sim→测试层；
+    #     tools/py→Python 层；run_sim→实机脚本层；（测试层 2026-10-14 已整体移除）
     #     技能文档→团队技能层；其余代码→行为控制层；文档→文档层；CMakeLists→构建层
     def layer_of(n):
         t, rel = n['type'], n['id'].split(':', 1)[1]
@@ -358,7 +358,7 @@ def main():
             return 'layer:config-build' if rel == 'CMakeLists.txt' else 'layer:python-tools'
         if rel.startswith('tools/py/'):
             return 'layer:python-tools'
-        if base in ('offline_test.cpp', 'sim_bench.cpp', 'run_sim.ps1'):
+        if base in ('run_sim.ps1',):
             return 'layer:testing-tools'
         if base in ('dll_blue.cpp', 'dll_yellow.cpp', 'simuro_interface.hpp'):
             return 'layer:platform-interface'

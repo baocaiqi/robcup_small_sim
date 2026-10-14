@@ -12,7 +12,7 @@ dead_code_scan.py — 扫"没被调用的函数"（保守版：只报不删）
   2. 用括号配对切出函数体，并把注释/字符串剔掉再配对（避免花括号误判）；
   3. 在全仓里数这个名字被引用的次数，区分：
        0 次          → **完全没人用**（可删候选）
-       只在测试里用  → offline_test / sim_bench 用（要问：是能力保留还是该删）
+       只在已删除的测试层里用  → 2026-10-14 后不再有此类判定
        其它          → 在用
   4. 平台导出接口（RunStrategy/SetFormerRobots/SetLaterRobots/SetBall/Set*TeamName）永远保留。
 
@@ -26,7 +26,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC_GLOBS = ["src", "include", "tools"]
-TEST_FILES = ("offline_test.cpp", "sim_bench.cpp")
+TEST_FILES = ()   # 测试层已于 2026-10-14 整体移除
 KEEP = {"RunStrategy", "SetFormerRobots", "SetLaterRobots", "SetBall",
         "SetBlueTeamName", "SetYellowTeamName", "main", "DllMain"}
 

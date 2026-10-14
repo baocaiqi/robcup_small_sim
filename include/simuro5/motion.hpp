@@ -19,30 +19,6 @@ constexpr double kMaxWheel   = 150.0;   // 轮速命令上限（自然命令约 
 // 走到 (tx,ty)：sigmoid 速度 + 角度误差比例修正；TM_STOP 时受制动包线约束
 void position(RobotState &r, double tx, double ty, TargetMode mode = TM_STOP);
 
-#ifdef SIMURO5_GK_PROBE
-// 门将目标点探针（诊断专用，仅 sim_bench/sim_trace 编译）：
-// position() 记下本次目标点，门将每帧取回。取回的是"夹进活动范围之后"的目标，
-// 所以打印出来的就是门将这一帧真正要去的 y —— 不是规则的中间量。
-struct GkTargetProbe {
-    bool  on  = false;
-    double tx = 0.0, ty = 0.0;
-    // 本帧 GkView 的几个关键量，由 roles.cpp 在 gk_view() 之后填（sim_bench 打印用）
-    double y_at_goal = 90.0;
-    double ball_goal = 999.0;   // 球到己门线距离
-    double db = 999.0;          // 门将到球距离
-    double opp_dmin = 999.0;    // 最近对手到球距离
-    int    heading_goal = 0, on_target = 0;
-    int    rule_idx = -1;       // 命中规则在 kGoalieRules 里的下标（-1=前置规则或未命中）
-    void begin() { on = true; }
-    void finish() { on = false; }
-    void note(double x, double y) {
-        if (!on) return;
-        tx = x; ty = y;
-    }
-};
-extern GkTargetProbe g_gk_probe;   // motion.cpp 定义（per-(dll) 一份）
-#endif
-
 // 作用域内 position() 用旧口径（单轮截断、不收侧向油门）——门将门球按旧手感标定
 struct LegacyDriveScope {
     LegacyDriveScope();

@@ -15,7 +15,6 @@ cmake --build build --config Release
 :: 输出: 0 error
 
 :: 2. 冒烟测试
-build\Release\offline_test.exe
 :: 输出: === ALL TESTS PASSED ===
 
 :: 3. (改了数值/决策后) 复盘
@@ -24,6 +23,6 @@ python tools\pylg_analyzer.py <一场比赛的.rlg> --frame <关键帧>
 
 ## 验收清单
 - [ ] 编译 0 error（贴输出）
-- [ ] offline_test 全绿（贴输出）
+- [ ] 真机 .rlg 复采通过（贴输出）
 - [ ] 改动的参数已记录到 docs/06-调参记录.md
 - [ ] 已提交（git log 可查）

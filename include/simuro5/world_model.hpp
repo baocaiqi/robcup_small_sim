@@ -110,7 +110,6 @@ struct WorldModel {
     ThirdManSupport third_man_support;
     CoopPassStats coop_stats;
     // 可为空；仿真器可装只读记录器，比赛 DLL 不写文件
-    void (*coop_observer)(const WorldModel &, const char *, CoopOutcome) = nullptr;
     // 传球任务与临时控球的计数/结算
     void coop_created();
     void coop_released();

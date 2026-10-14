@@ -10,7 +10,6 @@
 #include "simuro5/tunable.hpp"
 #include <cmath>
 #include <cstdio>
-#include "simuro5/branch_trace.hpp"   // 须在所有 include 之后（仅诊断构建生效）
 
 namespace simuro5 {
 
@@ -155,10 +154,9 @@ void move_avoiding(WorldModel &wm, RobotState &r, int id,
 }
 
 // 推球守卫：死球/摆位期或球在角区时不碰球（平台 No pushing 犯规，每 4 次送对手 1 球）
-// ⚠️ 2026-10-13 默认由 false → **true**（用户指令重新打开做真机 A/B），并改成运行时可注入：
-//   `sim_bench --params roles.kNoPushGuard=0` 即回到旧口径，不必重编两版。
+// ⚠️ 2026-10-13 默认由 false → **true**（用户指令重新打开做真机 A/B），并做成 TUNABLE 旋钮。
 //   真机依据：`C:\Strategy\SimuroSot5.log` 我方 73 次 `Violated No pushing` vs 对手 31 次。
-//   回滚：`roles.kNoPushGuard=0`（sim）或把默认值改回 0.0 重编（真机）。
+//   回滚：把默认值改回 0.0 重编（⚠️ 2026-10-14 测试层已删，sim_bench 注入式对照不再可用）。
 //   ⚠️ 定义体（`no_push_guard_enabled`）必须留在下面**匿名 namespace 之外**，
 //      否则是内部链接，offline_test 链接不到（本次踩过 LNK2019）。
 bool push_allowed(const WorldModel &wm) {
@@ -1090,7 +1088,7 @@ TUNABLE(kGkHoldCover, 2.0);      // cm：门将中心离进门点小于此才算
 
 bool gk_rule_goal_line_hold(WorldModel &wm, int id, const GkView &v) {
     if (!(v.ball_goal < 15.0 && v.db < kGkLastDitchGuard)) return false;
-    TRACE_MARK(wm.home[id]);
+;
     RobotState &r = wm.home[id];
     // 门将在球的"场侧"= 球已经跑到门将身后了。原地冻住等于把门让开：
     //   实测丢球形状——球 x=2.6 贴着门线从 y=16 滚到 y=72，门将连续 30 帧 0 位移。
@@ -1247,7 +1245,7 @@ const GkRule kGoalieRules[] = {
 };
 
 // 诊断：记录门将每帧命中规则到 C:\Strategy\goalie_trace_v2.csv（CMake 选项 HNNU_TRACE，默认 OFF）
-#if defined(SIMURO5_HNNU_TRACE) || defined(SIMURO5_GK_PROBE)
+#ifdef SIMURO5_HNNU_TRACE
 const char *const kGoalieRuleNames[] = {
     "no_push", "side_step", "opp_ball_lock", "restart_kick",
     "opp_kick_line", "press_door", "goal_line_hold", "clear", "wall_ball",
@@ -1284,17 +1282,11 @@ static void gk_trace(const char *rule, const WorldModel &wm, int id, const GkVie
 }
 
 #define GK_HIT(lit) hit = (lit)
-#elif defined(SIMURO5_GK_PROBE)
-#define GK_HIT(lit) g_gk_rule_probe = (lit)
 #else
 #define GK_HIT(lit) ((void)0)
 #endif  // SIMURO5_HNNU_TRACE
 
 }  // anonymous namespace
-
-#ifdef SIMURO5_GK_PROBE
-const char *g_gk_rule_probe = "none";
-#endif
 
 void run_goalie(WorldModel &wm, int id) {
     RobotState &gr = wm.home[id];
@@ -1321,20 +1313,6 @@ void run_goalie(WorldModel &wm, int id) {
         wm.goalie_serve_phase = 0;
         wm.goalie_serve_anchor_ok = false;   // 球被平台重新摆放 → 锚点作废（见 world_model.hpp）
     }
-#ifdef SIMURO5_GK_PROBE
-    // 把本帧 GkView 的关键量交给探针（sim_trace --gk-probe 打印用）
-    motion::g_gk_probe.y_at_goal    = v.y_at_goal;
-    motion::g_gk_probe.ball_goal    = v.ball_goal;
-    motion::g_gk_probe.db           = v.db;
-    motion::g_gk_probe.opp_dmin     = v.opp_dmin;
-    motion::g_gk_probe.heading_goal = v.heading_goal ? 1 : 0;
-    motion::g_gk_probe.on_target    = v.on_target ? 1 : 0;
-#endif
-#ifdef SIMURO5_GK_PROBE
-    g_gk_rule_probe = "none";
-    motion::g_gk_probe.rule_idx = -1;        // -1 = 前置规则(penalty/line_block/ball_behind)或未命中
-    motion::g_gk_probe.begin();              // 整段（规则 + 两闸）记下最后一个目标点
-#endif
 #ifdef SIMURO5_HNNU_TRACE
     const char *hit = "none";
 #endif
@@ -1350,9 +1328,6 @@ void run_goalie(WorldModel &wm, int id) {
         for (int i = 0; i < (int)(sizeof(kGoalieRules) / sizeof(kGoalieRules[0])); ++i) {
             if (kGoalieRules[i](wm, id, v)) {
                 GK_HIT(kGoalieRuleNames[i]);
-#ifdef SIMURO5_GK_PROBE
-                motion::g_gk_probe.rule_idx = i;
-#endif
                 gk_set_play = (i == 0) || (i == 3);   // 0=no_push(死球)  3=restart_kick(门球)
                 break;
             }
@@ -1484,9 +1459,6 @@ void run_goalie(WorldModel &wm, int id) {
         motion::position(gr, gr.tgt_x, gr.tgt_y,
                          gr.tgt_mode == (int)motion::TM_PASS ? motion::TM_PASS : motion::TM_STOP);
     }
-#ifdef SIMURO5_GK_PROBE
-    motion::g_gk_probe.finish();
-#endif
 }
 #undef GK_HIT
 
@@ -2180,7 +2152,7 @@ void run_active(WorldModel &wm, int id) {
             const double need = (ctx.dist_our_goal(bx) < kChargeOwnGuard) ? kChargeMinFwdOwn : kChargeMinFwd;
             if (fwd >= need) {
                 motion::position(r, bx + dx / d * kChargeThrough, by + dy / d * kChargeThrough, motion::TM_PASS);
-                TRACE_MARK(r);
+;
                 return;
             }
         }
@@ -2531,7 +2503,7 @@ void run_passive(WorldModel &wm, int id) {
             // 门线球站定防乌龙：球贴门线且本角色贴球 → 停轮站定用身体封角，绝不碰球拖动
             //   （只在场侧生效，球门侧已由上面清道夫接管）
             if (wm.ctx.dist_our_goal(wm.ball.x) < 15.0 && dbp < 14.0) {
-                TRACE_MARK(wm.home[id]);
+;
                 wm.home[id].vl = 0.0;
                 wm.home[id].vr = 0.0;
                 return;
@@ -2548,7 +2520,7 @@ void run_passive(WorldModel &wm, int id) {
                 double wx = wm.ball.x + g * 6.0, wy = wm.ball.y + side * kCoverDetourLat;
                 if (wy < 5.0 || wy > 175.0) wy = wm.ball.y - side * kCoverDetourLat;   // 贴边：换另一侧绕
                 if (in_goal_area_rule(wm.ctx, wx, wy)) {   // 绕行点进裁判门区：宁可停车也不穿球
-                    TRACE_MARK(wm.home[id]);
+;
                     wm.home[id].vl = 0.0;
                     wm.home[id].vr = 0.0;
                     return;
@@ -2688,14 +2660,14 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
               if (fp) { std::fprintf(fp, "%ld,%.1f,%.1f,%.1f,%d,%.1f\n",
                   n++, bx, by, bspeed, id, lane); std::fflush(fp); } }
 #endif
-            TRACE_MARK(wm.home[id]);
+;
             return true;
         }
-        swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);  TRACE_MARK(wm.home[id]);
+        swarm_move(wm, id, ctx.opp_goal_x() - ad * (58.0 + kOppBoxMargin), 90.0 + lane * 32.0);;
         return true;
     }
     if ((by - 90.0) * lane < -kLaneShare) {
-        swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);  TRACE_MARK(wm.home[id]);
+        swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);;
         return true;
     }
 
@@ -2724,7 +2696,7 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
         const double d_wing = dist(wm.home[wing].x, wm.home[wing].y, bx, by);
         if (d_wing + kHerdYield < d_me) {                        // ① 让位
             swarm_move(wm, id, bx - ad * kWeakBack, 90.0 + lane * kWeakLaneY);
-            TRACE_MARK(wm.home[id]);
+;
             return true;
         }
         if (d_wing < kHerdNear) { lat = lane * kHerdLane; side_out = lane; }   // ② 错开
@@ -2735,23 +2707,23 @@ bool run_swarm(WorldModel &wm, int id, double lane) {
             if (i == id || wm.role[i] == ROLE_GOALIE) continue;
             if (!holds_ball(wm, i, ux, uy)) continue;
             swarm_move(wm, id, bx - ux * kEscortBack + nx * side_out * kEscortSide,
-                       by - uy * kEscortBack + ny * side_out * kEscortSide);  TRACE_MARK(wm.home[id]);
+                       by - uy * kEscortBack + ny * side_out * kEscortSide);;
             return true;
         }
     }
 
     if (behind > 0.0 && std::fabs(side_off) < kHerdLatTol) {
         swarm_move(wm, id, bx + ux * kHerdThrough + nx * lat,
-                   by + uy * kHerdThrough + ny * lat);  TRACE_MARK(wm.home[id]);
+                   by + uy * kHerdThrough + ny * lat);;
     } else if (behind > -3.0) {
         double back = kHerdBack + 0.5 * std::fabs(side_off);
         double px = bx - ux * back + nx * lat, py = by - uy * back + ny * lat;
         if (!prep_point_ok(px, py)) return false;
-        swarm_move(wm, id, px, py);  TRACE_MARK(wm.home[id]);
+        swarm_move(wm, id, px, py);;
     } else {
         // 人在球前面：先横绕到球侧，绝不直线穿过球
         swarm_move(wm, id, bx - ux * 4.0 + nx * side_out * kHerdSide,
-                   by - uy * 4.0 + ny * side_out * kHerdSide);  TRACE_MARK(wm.home[id]);
+                   by - uy * 4.0 + ny * side_out * kHerdSide);;
     }
     return true;
 }
