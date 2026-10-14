@@ -24,5 +24,5 @@ python tools\pylg_analyzer.py <一场比赛的.rlg> --frame <关键帧>
 ## 验收清单
 - [ ] 编译 0 error（贴输出）
 - [ ] 真机 .rlg 复采通过（贴输出）
-- [ ] 改动的参数已记录到 docs/06-调参记录.md
+- [ ] 改动的参数在 TUNABLE 注释和 commit message 里写清楚（带回滚值）
 - [ ] 已提交（git log 可查）
