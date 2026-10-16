@@ -1651,7 +1651,17 @@ TUNABLE(kReboundZoneHi, 40.0);   // cm：离对方门线 < 此值才冲（更远
 TUNABLE(kReboundMinSpeed, 0.5);  // cm/帧：球速低于此值视为停球，不冲（保留门外等二点，防门区停球误冲）
 TUNABLE(kReboundRushDepth, 30.0);  // cm：冲的目标点越过球多深（推球板在机身前 ~7.5cm，20cm 会把球推到
                                    //   离门线还差 ~7cm 处停住进不去；加深到 30 才够把球推过门线）
-TUNABLE(kMaxShootPushes, 1);  // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+// A. 门前多次推射：离门 40cm 内允许 3 次，远处 1 次（真机取证：对手门前 24/111=22% 变成射门，
+//   我们只有 3/108=3%；原因之一是我们射一次被挡就停，对手会连续推。1→3 回滚值 1）
+TUNABLE(kMaxShootPushes, 1);      // 同一轮进攻连续推球尝试上限（防禁区死磕送判罚）
+TUNABLE(kCloseShootPushes, 3);    // 离对方门 < kCloseShootDist 时的推射上限
+TUNABLE(kCloseShootDist, 40.0);   // cm：门前加推区（≤40 贴门，>40 远射）
+TUNABLE(kDeadBallRestartOnly, 1.0); // C. 1=只在裁判重启时才从对方门前退开，0=回滚（球静止就退）
+TUNABLE(kDeadBallHold, 40.0);      // C. 退开时站离对方门线多远（cm），回滚值 85
+// B. 门前不拐走廊：真机 门前 55cm 内触球 108 次只射 3 次（对手 111 次射 24 次），
+//   开口角 <12° 时会被走廊拐弯换成推中路。1=开 0=回滚
+TUNABLE(kForceCloseShot, 1.0);
+TUNABLE(kForceCloseDist, 35.0);   // cm：离对方门小于此值才强推
 // 净开口小于此角(度)就宁可先拐进中路：边路看门只有 12° 上下，中路有 67°
 TUNABLE(kCorridorShotOpen, 12.0);
 // 走廊拐弯总开关（1 开 0 关）；关掉即回到「边路硬推」的老行为
@@ -2223,7 +2233,11 @@ void run_active(WorldModel &wm, int id) {
 
     // 对方门球/定位球重启：球停死在对方门区，别冲进去抢；先站罚球区外沿外等开球
     //   例外：我方主罚点球（in_penalty_exec）必须去踢
+    // C. 2026-10-15：真机取证 球静止在对方门前中路 418 帧里 253 帧我们最近的人 >40cm ——
+    //   活球停在门口我们也退开了。改为只在裁判判的重启（RestartSetup）才退，且退到 kDeadBallHold。
+    //   回滚：kDeadBallRestartOnly=0、kDeadBallHold=85
     if (!wm.in_penalty_exec &&
+        (kDeadBallRestartOnly < 0.5 || wm.runtime_phase == RuntimePhase::RestartSetup) &&
         std::hypot(wm.ball.vx, wm.ball.vy) < 1.0 &&
         std::fabs(wm.ball.x - ctx.opp_goal_x()) < 50.0 &&
         std::fabs(wm.ball.y - 90.0) < 20.0) {
@@ -2231,7 +2245,7 @@ void run_active(WorldModel &wm, int id) {
             wm.dead_ball_frames = 0;
         } else {
             if (wm.coop_pass_task.active) wm.coop_finish(CoopOutcome::DeadBall);
-            double hold_x = ctx.opp_goal_x() - ctx.attack_dir() * 85.0;
+            double hold_x = ctx.opp_goal_x() - ctx.attack_dir() * kDeadBallHold;
             double hold_y = clamp(wm.ball.y, 72.5, 107.5);
             motion::position(r, hold_x, hold_y);
             return;
@@ -2387,7 +2401,11 @@ void run_active(WorldModel &wm, int id) {
     // 走廊拐弯：没射门机会、或机会窄到只有一条缝（边路看门本来就只有 12° 上下）时，
     //   改推「球前中路」而不是往缝里捅
     bool corridor_now = false;
-    if (kCorridorEnabled >= 0.5 && !coop_pass && (!sp.viable || sp.open_angle < kCorridorShotOpen)) {
+    // B. 2026-10-15：离对方门 < kForceCloseDist 且直射可行时不再拐走廊，直接往门里挤
+    //   （参考对手门前连续推球思想，自研实现；回滚 kForceCloseShot=0）
+    const bool force_close = kForceCloseShot > 0.5 && sp.viable && !wm.in_penalty_exec &&
+                             sp.shot_dist < kForceCloseDist;
+    if (kCorridorEnabled >= 0.5 && !coop_pass && !force_close && (!sp.viable || sp.open_angle < kCorridorShotOpen)) {
         ShootPlan ca = plan_corridor(wm, id);
         if (ca.viable) { sp = ca; corridor_now = true; }
     }
@@ -2411,7 +2429,8 @@ void run_active(WorldModel &wm, int id) {
     const double kShootNowQ = 0.35;
     bool shoot_now = corridor_now ||
                      (sp.viable && (sp.shot_dist <= 70.0 || sp.quality >= kShootNowQ || coop_pass));
-    if (shoot_now && (coop_pass || corridor_now || wm.shoot_push_count < kMaxShootPushes)) {
+    const int max_pushes = (sp.shot_dist < kCloseShootDist) ? (int)kCloseShootPushes : (int)kMaxShootPushes;
+    if (shoot_now && (coop_pass || corridor_now || wm.shoot_push_count < max_pushes)) {
         double bx = wm.ball.x, by = wm.ball.y;
         int this_side = (sp.aim_y > 90.0) ? 1 : -1;
         // 变角推射：已推 >=2 次且仍瞄同一侧 → 强制换另一侧（借墙方案不适用）
